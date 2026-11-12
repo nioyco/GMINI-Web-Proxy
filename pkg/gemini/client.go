@@ -17,7 +17,9 @@ package gemini
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/sha1"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +31,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -192,9 +195,26 @@ func (c *Client) buildBody(p GenParams, images []uploadedImage) (body, reqUUID s
 	return vals.Encode(), reqUUID, nil
 }
 
+// reqIDCounter yields the upstream _reqid values. It starts at a random offset
+// and increments atomically, so concurrent requests never share an id (the old
+// time.Now().Unix()%1e6 collided for every request within the same second).
+var reqIDCounter atomic.Uint64
+
+func init() {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		reqIDCounter.Store(uint64(binary.BigEndian.Uint32(b[:])))
+	}
+}
+
+// nextReqID returns a 6-digit, process-unique (until 1e6 requests wrap) id.
+func nextReqID() uint64 {
+	return reqIDCounter.Add(1) % 1000000
+}
+
 // streamURL builds the StreamGenerate URL with a per-request id.
 func (c *Client) streamURL() string {
-	reqid := time.Now().Unix() % 1000000
+	reqid := nextReqID()
 	prefix := c.accountPrefix()
 	return fmt.Sprintf(
 		"%s%s/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"+

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -448,5 +449,24 @@ func TestNewClampsNumericDefaults(t *testing.T) {
 	if c.cfg.RequestTimeout != 7 || c.cfg.RetryAttempts != 5 || c.cfg.RetryDelaySec != 3 {
 		t.Errorf("positive values overwritten: timeout=%d attempts=%d delay=%d",
 			c.cfg.RequestTimeout, c.cfg.RetryAttempts, c.cfg.RetryDelaySec)
+	}
+}
+
+func TestNextReqIDUniqueConcurrent(t *testing.T) {
+	const n = 5000
+	ids := make(chan uint64, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); ids <- nextReqID() }()
+	}
+	wg.Wait()
+	close(ids)
+	seen := map[uint64]bool{}
+	for id := range ids {
+		if seen[id] {
+			t.Fatalf("duplicate reqid %d", id)
+		}
+		seen[id] = true
 	}
 }
