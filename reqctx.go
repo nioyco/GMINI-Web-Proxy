@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
 )
 
 // headerRequestID is the correlation header accepted from clients and echoed back.
@@ -57,6 +59,7 @@ type reqInfo struct {
 	echoStripped   atomic.Int64
 	echoFabricated atomic.Int64
 	refusal        atomic.Bool
+	met            gemini.CallMetrics // upstream timing/size, filled by the gemini client
 }
 
 type ctxKey struct{}
@@ -92,6 +95,15 @@ type statsCounters struct {
 	echoStripped      atomic.Int64
 	echoFabricated    atomic.Int64
 	upstreamRefusal   atomic.Int64
+
+	// Upstream aggregates (only requests that reached Gemini).
+	upstreamRequests  atomic.Int64
+	upstreamAttempts  atomic.Int64
+	upstreamRetries   atomic.Int64
+	upstreamMS        atomic.Int64
+	firstByteMS       atomic.Int64
+	upstreamReqBytes  atomic.Int64
+	upstreamRespBytes atomic.Int64
 }
 
 // activeSet tracks in-flight requests so shutdown can cancel them.
@@ -191,6 +203,7 @@ func (s *Server) withTracking(next http.Handler) http.Handler {
 		ctx, cancel := context.WithCancelCause(r.Context())
 		ri := &reqInfo{id: id, method: r.Method, route: r.URL.Path, start: time.Now(), cancel: cancel}
 		ctx = context.WithValue(ctx, ctxKey{}, ri)
+		ctx = gemini.WithMetrics(ctx, &ri.met)
 		s.active.add(ri)
 		s.stats.requests.Add(1)
 		sw := &statusWriter{ResponseWriter: w}
@@ -212,12 +225,27 @@ func (s *Server) withTracking(next http.Handler) http.Handler {
 				s.stats.status2xx.Add(1)
 			}
 			s.stats.keepalives.Add(ri.keepalives.Load())
+			m := &ri.met
+			if m.Attempts.Load() > 0 {
+				s.stats.upstreamRequests.Add(1)
+				s.stats.upstreamAttempts.Add(m.Attempts.Load())
+				s.stats.upstreamRetries.Add(m.Retries.Load())
+				s.stats.upstreamMS.Add(m.UpstreamMS.Load())
+				s.stats.firstByteMS.Add(m.FirstByteMS.Load())
+				s.stats.upstreamReqBytes.Add(m.ReqBytes.Load())
+				s.stats.upstreamRespBytes.Add(m.RespBytes.Load())
+			}
 			s.log.Info("request_end",
 				"request_id", id, "method", r.Method, "route", ri.route,
 				"model", ri.model, "stream", ri.stream, "status", status,
 				"duration_ms", time.Since(ri.start).Milliseconds(),
 				"keepalives", ri.keepalives.Load(), "bytes", sw.bytes,
-				"echo_stripped", ri.echoStripped.Load(), "upstream_refusal", ri.refusal.Load())
+				"echo_stripped", ri.echoStripped.Load(), "upstream_refusal", ri.refusal.Load(),
+				"upstream_req_bytes", m.ReqBytes.Load(), "prompt_bytes", m.PromptBytes.Load(),
+				"upstream_attempts", m.Attempts.Load(), "upstream_retries", m.Retries.Load(),
+				"retry_wait_ms", m.RetryWaitMS.Load(), "first_byte_ms", m.FirstByteMS.Load(),
+				"upstream_ms", m.UpstreamMS.Load(), "upstream_resp_bytes", m.RespBytes.Load(),
+				"resp_bytes", sw.bytes)
 		}()
 		next.ServeHTTP(sw, r.WithContext(ctx))
 	})

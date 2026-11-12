@@ -471,16 +471,22 @@ func (c *Client) Generate(ctx context.Context, p GenParams) (string, error) {
 		return "", err
 	}
 
+	met := metricsFrom(ctx)
+	met.request(len(p.Prompt), len(body))
 	var lastErr error
 	for attempt := 0; attempt < c.cfg.RetryAttempts; attempt++ {
 		req, err := c.newRequest(ctx, body, p.Model, reqUUID)
 		if err != nil {
 			return "", err
 		}
+		met.attempt(attempt)
+		t0 := time.Now()
 		resp, err := c.http.Do(req)
 		if err == nil {
+			met.firstByte(t0)
 			raw, readErr := readLimited(resp.Body, maxResponseBytes)
 			resp.Body.Close()
+			met.upstream(t0, len(raw))
 			if errors.Is(readErr, ErrResponseTooLarge) {
 				return "", readErr // deterministic: retrying would not help
 			}
@@ -496,15 +502,21 @@ func (c *Client) Generate(ctx context.Context, p GenParams) (string, error) {
 				err = ErrEmptyResponse
 			}
 		}
+		if resp == nil {
+			met.upstream(t0, 0) // transport error: time spent before failing
+		}
 		lastErr = err
 		if attempt < c.cfg.RetryAttempts-1 {
 			c.log.Warn("retrying gemini request",
 				"attempt", attempt+1, "max", c.cfg.RetryAttempts, "err", err)
+			wait := time.Duration(c.cfg.RetryDelaySec) * time.Second
+			w0 := time.Now()
 			select {
 			case <-ctx.Done():
 				return "", ctx.Err()
-			case <-time.After(time.Duration(c.cfg.RetryDelaySec) * time.Second):
+			case <-time.After(wait):
 			}
+			met.retryWait(time.Since(w0))
 		}
 	}
 	// ErrEmptyResponse is already self-descriptive; don't double-wrap it.
@@ -526,6 +538,12 @@ func (c *Client) GenerateStream(ctx context.Context, p GenParams, emit func(delt
 	if err != nil {
 		return err
 	}
+	met := metricsFrom(ctx)
+	met.request(len(p.Prompt), len(body))
+	met.attempt(0)
+	t0 := time.Now()
+	respBytes := 0
+	defer func() { met.upstream(t0, respBytes) }()
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("gemini request failed: %w", err)
@@ -539,6 +557,8 @@ func (c *Client) GenerateStream(ctx context.Context, p GenParams, emit func(delt
 	for {
 		line, readErr := reader.ReadString('\n')
 		if line != "" {
+			respBytes += len(line)
+			met.firstByte(t0)
 			if text, ok := latestText(line); ok && len(text) > len(prevText) {
 				delta := cleanGeminiText(runeDelta(prevText, text))
 				prevText = text
