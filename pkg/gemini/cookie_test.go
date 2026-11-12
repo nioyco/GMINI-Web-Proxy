@@ -1,6 +1,11 @@
 package gemini
 
-import "testing"
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestReplaceCookieValue(t *testing.T) {
 	in := "__Secure-1PSIDTS=old; __Secure-1PSID=sid"
@@ -46,5 +51,51 @@ func TestSetCookieValue(t *testing.T) {
 	}
 	if _, ok := setCookieValue("NID=xyz; Path=/", "__Secure-1PSIDTS"); ok {
 		t.Errorf("should not match a different cookie")
+	}
+}
+
+func TestWriteFileAtomicReplacesAndKeepsPerm(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookie.txt")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomic(path, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(path)
+	if string(got) != "new" {
+		t.Errorf("content = %q", got)
+	}
+	info, _ := os.Stat(path)
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("perm = %v, want 0600", info.Mode().Perm())
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Errorf("leftover files: %v", entries)
+	}
+}
+
+func TestWriteFileAtomicFailureKeepsOldFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookie.txt")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prev := renameFile
+	renameFile = func(string, string) error { return errors.New("simulated rename failure") }
+	defer func() { renameFile = prev }()
+
+	if err := writeFileAtomic(path, []byte("new"), 0o600); err == nil {
+		t.Fatal("expected error")
+	}
+	got, _ := os.ReadFile(path)
+	if string(got) != "old" {
+		t.Errorf("old cookie lost: %q", got)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Errorf("temp file not cleaned: %v", entries)
 	}
 }

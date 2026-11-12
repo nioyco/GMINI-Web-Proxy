@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -63,7 +64,7 @@ func (c *Client) RotateCookie(ctx context.Context) {
 
 	// Persist to disk only for a file-backed cookie; an inline cookie has no file.
 	if c.cfg.Cookie == "" && c.cfg.CookieFile != "" {
-		if err := os.WriteFile(c.cfg.CookieFile, []byte(newCookie), 0o600); err != nil {
+		if err := writeFileAtomic(c.cfg.CookieFile, []byte(newCookie), 0o600); err != nil {
 			c.log.Warn("cookie rotation persist failed", "err", err)
 			return
 		}
@@ -81,6 +82,45 @@ func (c *Client) RotateCookie(ctx context.Context) {
 	// Keep the XSRF "at" token in sync with the rotated session. The model list is
 	// refreshed by the caller (startup, then the periodic refresh loop).
 	c.refreshAtToken(ctx)
+}
+
+// renameFile is os.Rename; a variable so tests can simulate a failing rename.
+var renameFile = os.Rename
+
+// writeFileAtomic writes data to a temporary file in the same directory (created
+// 0600), fsyncs it, then renames it over path. On any failure the temp file is
+// removed and the previous file is left untouched. No backup copy is kept.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		cleanup()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := renameFile(tmpName, path); err != nil {
+		cleanup()
+		return err
+	}
+	return nil
 }
 
 // fetchRotatedTS POSTs to RotateCookies and returns the fresh __Secure-1PSIDTS
