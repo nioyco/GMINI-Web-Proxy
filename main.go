@@ -31,6 +31,17 @@ func main() {
 		cfg.Listen = normalizeListen(*listenAddr)
 	}
 	logger := newLogger(cfg.LogRequests)
+	if err := validateStartup(cfg); err != nil {
+		logger.Error("config error", "err", err)
+		os.Exit(1)
+	}
+	if len(cfg.APIKeys) == 0 {
+		logger.Warn("running WITHOUT authentication (GEMINI_ALLOW_NO_AUTH=1)")
+	}
+	if !isLoopbackBind(cfg.Listen) {
+		logger.Warn("listening on a non-loopback address: other machines can reach this proxy",
+			"listen", cfg.Listen)
+	}
 
 	client, err := gemini.New(cfg.Gemini, logger)
 	if err != nil {

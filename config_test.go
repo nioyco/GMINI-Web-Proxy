@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
@@ -173,8 +174,8 @@ func TestNormalizeListen(t *testing.T) {
 		"":                "127.0.0.1:8081", // default
 		"  ":              "127.0.0.1:8081", // whitespace → default
 		"127.0.0.1:8081":  "127.0.0.1:8081", // full host:port
-		":8081":           ":8081",          // port-only → all interfaces
-		"8081":            ":8081",          // bare port → :port
+		":8081":           "127.0.0.1:8081", // port-only → loopback
+		"8081":            "127.0.0.1:8081", // bare port → loopback
 		"0.0.0.0:9000":    "0.0.0.0:9000",   // explicit wildcard
 		"192.168.1.5:443": "192.168.1.5:443",
 	}
@@ -182,5 +183,17 @@ func TestNormalizeListen(t *testing.T) {
 		if got := normalizeListen(in); got != want {
 			t.Errorf("normalizeListen(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestValidateStartup(t *testing.T) {
+	if err := validateStartup(&Config{}); err == nil || !strings.Contains(err.Error(), "GEMINI_ALLOW_NO_AUTH") {
+		t.Errorf("empty keys must be refused with a clear message, got %v", err)
+	}
+	if err := validateStartup(&Config{AllowNoAuth: true}); err != nil {
+		t.Errorf("explicit opt-out must start, got %v", err)
+	}
+	if err := validateStartup(&Config{APIKeys: []string{"k"}}); err != nil {
+		t.Errorf("with a key must start, got %v", err)
 	}
 }

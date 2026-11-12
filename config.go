@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -31,6 +32,8 @@ type Config struct {
 	// CORSOrigins lists origins allowed to make cross-origin browser calls
 	// (GEMINI_CORS_ORIGINS, comma-separated). Empty = no CORS headers at all.
 	CORSOrigins []string
+	// AllowNoAuth lets the proxy start with no API key (GEMINI_ALLOW_NO_AUTH=1).
+	AllowNoAuth bool
 	// AllowedHosts are extra Host header values accepted beside the loopback names
 	// (GEMINI_ALLOWED_HOSTS, comma-separated).
 	AllowedHosts []string
@@ -80,21 +83,36 @@ func loadConfig(envFile string) *Config {
 	return cfg
 }
 
-// normalizeListen turns a listen value into a "host:port" bind address. It accepts
-// a full "host:port", a port-only ":port", or a bare numeric port (treated as
-// ":port", i.e. all interfaces). An empty value yields the default.
+// normalizeListen turns a listen value into a "host:port" bind address. A bare
+// numeric port ("8081") or a port-only ":8081" is bound to loopback
+// (127.0.0.1:port), never to all interfaces. An explicit host (including
+// 0.0.0.0) is kept as given; main warns when it is not loopback. An empty value
+// yields the default.
 func normalizeListen(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return defaultListen
 	}
-	// A bare numeric port ("8081") is shorthand for ":8081".
 	if !strings.Contains(s, ":") {
 		if _, err := strconv.Atoi(s); err == nil {
-			return ":" + s
+			return "127.0.0.1:" + s
 		}
+		return s
+	}
+	if strings.HasPrefix(s, ":") {
+		return "127.0.0.1" + s
 	}
 	return s
+}
+
+// validateStartup refuses an unauthenticated configuration unless explicitly
+// allowed with GEMINI_ALLOW_NO_AUTH=1.
+func validateStartup(cfg *Config) error {
+	if len(cfg.APIKeys) == 0 && !cfg.AllowNoAuth {
+		return errors.New("GEMINI_API_KEYS is empty: refusing to start without an API key. " +
+			"Set GEMINI_API_KEYS=<key>, or set GEMINI_ALLOW_NO_AUTH=1 to explicitly run without authentication")
+	}
+	return nil
 }
 
 // loadDotenv parses a simple KEY=VALUE file and sets variables that are not
