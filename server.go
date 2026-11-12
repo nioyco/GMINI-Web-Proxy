@@ -29,10 +29,27 @@ type Server struct {
 	cfg    *Config
 	client *gemini.Client
 	log    *slog.Logger
+	// generate is the blocking generation call used by the stream+tools keepalive
+	// path. It defaults to client.Generate and exists as a seam for tests.
+	generate func(ctx context.Context, p gemini.GenParams) (string, error)
+	// keepaliveOverride, when > 0, replaces the cfg-derived keepalive interval
+	// (sub-second values for tests). Never set in production.
+	keepaliveOverride time.Duration
+}
+
+// keepaliveInterval returns the SSE keepalive period; 0 means disabled.
+func (s *Server) keepaliveInterval() time.Duration {
+	if s.cfg.SSEKeepaliveSec <= 0 {
+		return 0
+	}
+	if s.keepaliveOverride > 0 {
+		return s.keepaliveOverride
+	}
+	return time.Duration(s.cfg.SSEKeepaliveSec) * time.Second
 }
 
 func newServer(cfg *Config, client *gemini.Client, logger *slog.Logger) *Server {
-	return &Server{cfg: cfg, client: client, log: logger}
+	return &Server{cfg: cfg, client: client, log: logger, generate: client.Generate}
 }
 
 // handler builds the routed, middleware-wrapped HTTP handler. Health and model
@@ -183,6 +200,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Stream + tools: the full response is still needed to parse tool calls, but
+	// the SSE stream is opened immediately and kept alive with comment frames so
+	// the client does not see a silent connection during long generations.
+	if interval := s.keepaliveInterval(); req.Stream && toolsActive && interval > 0 {
+		s.streamChatTools(r.Context(), w, cid, m.Name, p, interval)
+		return
+	}
+
 	// Blocking path (also used for tool calling, which needs the full response).
 	text, err := s.client.Generate(r.Context(), p)
 	if err != nil {
@@ -249,6 +274,81 @@ func (s *Server) streamChat(ctx context.Context, w http.ResponseWriter, cid, mod
 	}
 	writeSSEData(w, f, apiconv.ChatChunkStop(cid, created, model))
 	writeSSEDone(w, f)
+}
+
+// streamChatTools serves a stream=true request with active tools. Generation is
+// still blocking (ParseToolCalls needs the whole text), but the SSE response is
+// opened up front and a ": keepalive" comment is flushed every `interval` until
+// the result is ready, then the usual single complete chunk and [DONE] follow.
+//
+// Only this goroutine ever writes to w; the generation goroutine just reports
+// through a buffered channel, so it can always exit even if nobody reads it.
+func (s *Server) streamChatTools(ctx context.Context, w http.ResponseWriter, cid, model string, p gemini.GenParams, interval time.Duration) {
+	f, ok := openSSE(w)
+	if !ok {
+		sendError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+
+	// Cancelled on every return path so Generate never outlives the handler.
+	genCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type result struct {
+		text string
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		text, err := s.generate(genCtx, p)
+		done <- result{text, err}
+	}()
+
+	start := time.Now()
+	// First comment right away so the client sees bytes after the headers.
+	if err := writeSSEComment(w, f, "keepalive"); err != nil {
+		s.log.Warn("sse keepalive write failed", "err", err)
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			// Client went away: stop waiting, never write to the closed connection.
+			s.log.Warn("stream+tools cancelled by client",
+				"err", ctx.Err(), "elapsed", time.Since(start).Round(time.Millisecond))
+			return
+		case <-ticker.C:
+			if err := writeSSEComment(w, f, "keepalive"); err != nil {
+				s.log.Warn("sse keepalive write failed", "err", err,
+					"elapsed", time.Since(start).Round(time.Millisecond))
+				return
+			}
+		case res := <-done:
+			if res.err != nil {
+				if ctx.Err() != nil {
+					s.log.Warn("stream+tools cancelled by client",
+						"err", ctx.Err(), "elapsed", time.Since(start).Round(time.Millisecond))
+					return
+				}
+				// Headers are already sent: report in-band, in the same shape as streamChat.
+				s.log.Warn("stream+tools upstream error after SSE open",
+					"err", res.err, "elapsed", time.Since(start).Round(time.Millisecond))
+				writeSSEData(w, f, errorObj("upstream error: "+res.err.Error()))
+				writeSSEDone(w, f)
+				return
+			}
+			text, toolCalls := res.text, []apiconv.ToolCall(nil)
+			if text != "" {
+				text, toolCalls = apiconv.ParseToolCalls(text)
+			}
+			writeSSEData(w, f, apiconv.ChatChunkComplete(cid, model, text, toolCalls))
+			writeSSEDone(w, f)
+			return
+		}
+	}
 }
 
 // ─── OpenAI Responses API ────────────────────────────────────────────────────
@@ -673,6 +773,17 @@ func writeSSEData(w http.ResponseWriter, f http.Flusher, v any) {
 	}
 	_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
 	f.Flush()
+}
+
+// writeSSEComment writes an SSE comment line (": <text>") and flushes. Comments
+// are ignored by compliant SSE parsers but still put bytes on the wire. The
+// write error is returned so callers can stop on a closed connection.
+func writeSSEComment(w http.ResponseWriter, f http.Flusher, text string) error {
+	if _, err := fmt.Fprintf(w, ": %s\n\n", text); err != nil {
+		return err
+	}
+	f.Flush()
+	return nil
 }
 
 // writeSSEEvent writes a named SSE event with a JSON payload.

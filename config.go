@@ -24,7 +24,11 @@ type Config struct {
 	LogRequests   bool     // log each request at Info level
 	CookieRefresh int      // minutes between __Secure-1PSIDTS rotations (0 = off)
 	APIKeys       []string // allowed client keys; empty means open access
-	Gemini        gemini.Config
+	// SSEKeepaliveSec is the interval (seconds) between ": keepalive" SSE comments
+	// sent while a stream+tools request waits for the blocking generation (0 = off,
+	// which restores the legacy "single chunk after generation" behaviour).
+	SSEKeepaliveSec int
+	Gemini          gemini.Config
 }
 
 // loadConfig seeds env from a .env file, then reads all settings. The .env path
@@ -44,6 +48,8 @@ func loadConfig(envFile string) *Config {
 		LogRequests:   getEnvBool("GEMINI_LOG_REQUESTS", false),
 		CookieRefresh: getEnvInt("GEMINI_COOKIE_REFRESH_MIN", 9),
 		APIKeys:       splitKeys(getEnv("GEMINI_API_KEYS", "")),
+
+		SSEKeepaliveSec: getEnvInt("GEMINI_SSE_KEEPALIVE_SEC", 15),
 		Gemini: gemini.Config{
 			RetryAttempts:  getEnvInt("GEMINI_RETRY_ATTEMPTS", 3),
 			RetryDelaySec:  getEnvInt("GEMINI_RETRY_DELAY_SEC", 2),
