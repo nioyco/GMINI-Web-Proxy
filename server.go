@@ -213,13 +213,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	if req.Stream {
 		// Tools + stream: emit one chunk carrying the full message, then DONE.
-		f, ok := openSSE(w)
+		sse, ok := openSSE(w)
 		if !ok {
 			sendError(w, http.StatusInternalServerError, "streaming unsupported")
 			return
 		}
-		writeSSEData(w, f, apiconv.ChatChunkComplete(cid, m.Name, text, toolCalls))
-		writeSSEDone(w, f)
+		s.sseTail(r.Context(), sse, sse.data(apiconv.ChatChunkComplete(cid, m.Name, text, toolCalls)), sse.done())
 		return
 	}
 
@@ -229,116 +228,166 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 // streamChat performs true token streaming for a chat completion.
 func (s *Server) streamChat(ctx context.Context, w http.ResponseWriter, cid, model string, p gemini.GenParams) {
 	created := time.Now().Unix()
-	var f http.Flusher
-	headerWritten := false
+	gctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var sse *sseStream
+	noFlush := false
 
 	emit := func(text string) {
-		if !headerWritten {
-			fl, ok := openSSE(w)
-			if !ok {
+		if sse == nil {
+			var ok bool
+			if sse, ok = openSSE(w); !ok {
+				noFlush = true
+				cancel()
 				return
 			}
-			f = fl
-			headerWritten = true
 		}
-		writeSSEData(w, f, apiconv.ChatChunk(cid, created, model, text))
+		if err := sse.data(apiconv.ChatChunk(cid, created, model, text)); err != nil {
+			s.rlog(ctx).Warn("sse write failed; aborting generation", "err", err)
+			cancel() // client is gone: stop pulling tokens
+		}
 	}
 
-	err := s.client.GenerateStream(ctx, p, emit)
-	if !headerWritten {
+	err := s.client.GenerateStream(gctx, p, emit)
+	if sse == nil {
 		// Nothing was streamed yet, so a normal HTTP error status is still possible.
 		// No deltas and no error means the upstream produced no content.
-		if err != nil {
+		switch {
+		case noFlush:
+			sendError(w, http.StatusInternalServerError, "streaming unsupported")
+		case err != nil:
 			sendError(w, http.StatusBadGateway, "upstream error: "+err.Error())
-		} else {
+		default:
 			sendError(w, http.StatusBadGateway, gemini.ErrEmptyResponse.Error())
 		}
 		return
+	}
+	if sse.err != nil {
+		return // write already failed and was logged
 	}
 	if err != nil {
 		// The stream was interrupted after deltas were already sent; the status is
 		// committed, so surface the failure in-band as an error frame instead of a
 		// clean "stop" chunk that would read as a complete response.
 		s.rlog(ctx).Warn("stream interrupted", "err", err)
-		writeSSEData(w, f, errorObj("upstream error: "+err.Error()))
-		writeSSEDone(w, f)
+		s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+err.Error())), sse.done())
 		return
 	}
-	writeSSEData(w, f, apiconv.ChatChunkStop(cid, created, model))
-	writeSSEDone(w, f)
+	s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkStop(cid, created, model)), sse.done())
 }
 
-// streamChatTools serves a stream=true request with active tools. Generation is
-// still blocking (ParseToolCalls needs the whole text), but the SSE response is
-// opened up front and a ": keepalive" comment is flushed every `interval` until
-// the result is ready, then the usual single complete chunk and [DONE] follow.
-//
-// Only this goroutine ever writes to w; the generation goroutine just reports
-// through a buffered channel, so it can always exit even if nobody reads it.
+// streamChatTools serves a stream=true request with active tools: SSE is opened
+// up front and kept alive while the blocking generation runs (see awaitGenerate),
+// then the usual single complete chunk and [DONE] follow.
 func (s *Server) streamChatTools(ctx context.Context, w http.ResponseWriter, cid, model string, p gemini.GenParams, interval time.Duration) {
-	f, ok := openSSE(w)
+	sse, ok := openSSE(w)
 	if !ok {
 		sendError(w, http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
-
-	// Cancelled on every return path so Generate never outlives the handler.
-	genCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	type result struct {
-		text string
-		err  error
+	res := s.awaitGenerate(ctx, sse, p, interval)
+	switch res.out {
+	case kaGone:
+		return
+	case kaShutdown:
+		s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
+		return
 	}
-	done := make(chan result, 1)
+	if res.err != nil {
+		// Headers are already sent: report in-band, in the same shape as streamChat.
+		s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+res.err.Error())), sse.done())
+		return
+	}
+	text, toolCalls := res.text, []apiconv.ToolCall(nil)
+	if text != "" {
+		text, toolCalls = apiconv.ParseToolCalls(text)
+	}
+	s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
+}
+
+// ─── Shared keepalive helper ─────────────────────────────────────────────────
+
+// kaOutcome tells how awaitGenerate ended.
+type kaOutcome int
+
+const (
+	kaDone     kaOutcome = iota // generation finished (res.err may carry an upstream error)
+	kaGone                      // client went away or an SSE write failed: write nothing more
+	kaShutdown                  // request aborted by graceful-shutdown expiry
+)
+
+type kaResult struct {
+	text string
+	err  error
+	out  kaOutcome
+}
+
+// awaitGenerate runs the blocking generation (s.generate) while writing an SSE
+// ": keepalive" comment immediately and then every `interval` on an already-open
+// stream. It is shared by every route that streams with active tools
+// (/v1/chat/completions, /v1/responses, /v1/messages, /v1beta/...), so they all
+// behave identically. Write errors end the wait (kaGone) and cancel the
+// generation. Only this goroutine writes to the response; the generation goroutine
+// reports through a buffered channel and so can always exit.
+func (s *Server) awaitGenerate(ctx context.Context, sse *sseStream, p gemini.GenParams, interval time.Duration) kaResult {
+	genCtx, cancel := context.WithCancel(ctx)
+	defer cancel() // Generate never outlives the handler
+
+	done := make(chan kaResult, 1)
 	go func() {
 		text, err := s.generate(genCtx, p)
-		done <- result{text, err}
+		done <- kaResult{text: text, err: err}
 	}()
 
 	start := time.Now()
-	// First comment right away so the client sees bytes after the headers.
-	if err := writeSSEComment(w, f, "keepalive"); err != nil {
-		s.rlog(ctx).Warn("sse keepalive write failed", "err", err)
-		return
+	elapsed := func() time.Duration { return time.Since(start).Round(time.Millisecond) }
+	keepalive := func() bool {
+		if err := sse.comment("keepalive"); err != nil {
+			s.rlog(ctx).Warn("sse keepalive write failed", "err", err, "elapsed", elapsed())
+			return false
+		}
+		addKeepalive(ctx)
+		return true
 	}
-	addKeepalive(ctx)
+	cancelled := func() kaResult {
+		if errors.Is(context.Cause(ctx), errAbortedOnShutdown) {
+			return kaResult{out: kaShutdown}
+		}
+		s.rlog(ctx).Warn("stream+tools cancelled by client", "err", ctx.Err(), "elapsed", elapsed())
+		return kaResult{out: kaGone}
+	}
+
+	// First comment right away so the client sees bytes after the headers.
+	if !keepalive() {
+		return kaResult{out: kaGone}
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
-			// Client went away: stop waiting, never write to the closed connection.
-			s.rlog(ctx).Warn("stream+tools cancelled by client",
-				"err", ctx.Err(), "elapsed", time.Since(start).Round(time.Millisecond))
-			return
+			return cancelled()
 		case <-ticker.C:
-			if err := writeSSEComment(w, f, "keepalive"); err != nil {
-				s.rlog(ctx).Warn("sse keepalive write failed", "err", err,
-					"elapsed", time.Since(start).Round(time.Millisecond))
-				return
+			if !keepalive() {
+				return kaResult{out: kaGone}
 			}
 		case res := <-done:
+			if res.err != nil && ctx.Err() != nil {
+				return cancelled()
+			}
 			if res.err != nil {
-				if ctx.Err() != nil {
-					s.rlog(ctx).Warn("stream+tools cancelled by client",
-						"err", ctx.Err(), "elapsed", time.Since(start).Round(time.Millisecond))
-					return
-				}
-				// Headers are already sent: report in-band, in the same shape as streamChat.
-				s.rlog(ctx).Warn("stream+tools upstream error after SSE open",
-					"err", res.err, "elapsed", time.Since(start).Round(time.Millisecond))
-				writeSSEData(w, f, errorObj("upstream error: "+res.err.Error()))
-				writeSSEDone(w, f)
-				return
+				s.rlog(ctx).Warn("stream+tools upstream error after SSE open", "err", res.err, "elapsed", elapsed())
 			}
-			text, toolCalls := res.text, []apiconv.ToolCall(nil)
-			if text != "" {
-				text, toolCalls = apiconv.ParseToolCalls(text)
-			}
-			writeSSEData(w, f, apiconv.ChatChunkComplete(cid, model, text, toolCalls))
-			writeSSEDone(w, f)
+			return res
+		}
+	}
+}
+
+// sseTail logs the first write error among the final-frame writes, if any.
+func (s *Server) sseTail(ctx context.Context, _ *sseStream, errs ...error) {
+	for _, err := range errs {
+		if err != nil {
+			s.rlog(ctx).Warn("sse write failed", "err", err)
 			return
 		}
 	}
@@ -377,6 +426,34 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	setReqMeta(r.Context(), m.Name, req.Stream)
 	p := m.Params(prompt)
 	p.Images = images
+	rid := apiconv.ID("resp_", 16)
+	mid := apiconv.ID("msg_", 12)
+
+	// Stream + tools: same keepalive behaviour as chat completions.
+	if interval := s.keepaliveInterval(); req.Stream && toolsActive && interval > 0 {
+		ctx := r.Context()
+		sse, ok := openSSE(w)
+		if !ok {
+			sendError(w, http.StatusInternalServerError, "streaming unsupported")
+			return
+		}
+		res := s.awaitGenerate(ctx, sse, p, interval)
+		switch {
+		case res.out == kaGone:
+		case res.out == kaShutdown:
+			s.sseTail(ctx, sse, sse.event("error", responsesStreamError("server shutting down")))
+		case res.err != nil:
+			s.sseTail(ctx, sse, sse.event("error", responsesStreamError("upstream error: "+res.err.Error())))
+		default:
+			text, toolCalls := res.text, []apiconv.ToolCall(nil)
+			if text != "" {
+				text, toolCalls = apiconv.ParseToolCalls(text)
+			}
+			s.writeResponsesStream(ctx, sse, rid, mid, m.Name, prompt, text, toolCalls)
+		}
+		return
+	}
+
 	text, err := s.client.Generate(r.Context(), p)
 	if err != nil {
 		sendError(w, http.StatusBadGateway, "upstream error: "+err.Error())
@@ -387,27 +464,35 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		text, toolCalls = apiconv.ParseToolCalls(text)
 	}
 
-	rid := apiconv.ID("resp_", 16)
-	mid := apiconv.ID("msg_", 12)
-
 	if req.Stream {
-		f, ok := openSSE(w)
+		sse, ok := openSSE(w)
 		if !ok {
 			sendError(w, http.StatusInternalServerError, "streaming unsupported")
 			return
 		}
-		writeSSEEvent(w, f, "response.created", apiconv.ResponseCreated(rid, m.Name))
-		for _, tc := range toolCalls {
-			writeSSEEvent(w, f, "response.function_call_arguments.done", apiconv.ResponseFunctionCallDone(tc))
-		}
-		if text != "" || len(toolCalls) == 0 {
-			writeSSEEvent(w, f, "response.output_text.done", apiconv.ResponseOutputTextDone(mid, 0, text))
-		}
-		writeSSEEvent(w, f, "response.completed", apiconv.ResponseCompleted(rid, mid, m.Name, prompt, text, toolCalls))
+		s.writeResponsesStream(r.Context(), sse, rid, mid, m.Name, prompt, text, toolCalls)
 		return
 	}
 
 	sendJSON(w, http.StatusOK, apiconv.ResponseObject(rid, mid, m.Name, prompt, text, toolCalls))
+}
+
+// responsesStreamError is the in-band error event payload for /v1/responses.
+func responsesStreamError(msg string) any {
+	return map[string]any{"type": "error", "message": msg}
+}
+
+// writeResponsesStream replays a complete Responses API result as SSE events.
+func (s *Server) writeResponsesStream(ctx context.Context, sse *sseStream, rid, mid, model, prompt, text string, toolCalls []apiconv.ToolCall) {
+	errs := []error{sse.event("response.created", apiconv.ResponseCreated(rid, model))}
+	for _, tc := range toolCalls {
+		errs = append(errs, sse.event("response.function_call_arguments.done", apiconv.ResponseFunctionCallDone(tc)))
+	}
+	if text != "" || len(toolCalls) == 0 {
+		errs = append(errs, sse.event("response.output_text.done", apiconv.ResponseOutputTextDone(mid, 0, text)))
+	}
+	errs = append(errs, sse.event("response.completed", apiconv.ResponseCompleted(rid, mid, model, prompt, text, toolCalls)))
+	s.sseTail(ctx, sse, errs...)
 }
 
 // ─── Google native API ───────────────────────────────────────────────────────
@@ -455,6 +540,27 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Stream + tools: keepalive while the blocking generation runs.
+	if interval := s.keepaliveInterval(); stream && hasTools && interval > 0 {
+		ctx := r.Context()
+		sse, ok := openSSE(w)
+		if !ok {
+			sendError(w, http.StatusInternalServerError, "streaming unsupported")
+			return
+		}
+		res := s.awaitGenerate(ctx, sse, p, interval)
+		switch {
+		case res.out == kaGone:
+		case res.out == kaShutdown:
+			s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")))
+		case res.err != nil:
+			s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+res.err.Error())))
+		default:
+			s.sseTail(ctx, sse, sse.data(apiconv.GoogleResponse(m.Name, prompt, res.text, hasTools)))
+		}
+		return
+	}
+
 	text, err := s.client.Generate(r.Context(), p)
 	if err != nil {
 		sendError(w, http.StatusBadGateway, "upstream error: "+err.Error())
@@ -463,12 +569,12 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 	response := apiconv.GoogleResponse(m.Name, prompt, text, hasTools)
 
 	if stream {
-		f, ok := openSSE(w)
+		sse, ok := openSSE(w)
 		if !ok {
 			sendError(w, http.StatusInternalServerError, "streaming unsupported")
 			return
 		}
-		writeSSEData(w, f, response)
+		s.sseTail(r.Context(), sse, sse.data(response))
 		return
 	}
 	sendJSON(w, http.StatusOK, response)
@@ -476,40 +582,51 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 
 // streamGoogle performs incremental streaming for a tool-free Google native request.
 func (s *Server) streamGoogle(ctx context.Context, w http.ResponseWriter, model string, p gemini.GenParams) {
-	var f http.Flusher
-	started := false
+	gctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var sse *sseStream
+	noFlush := false
 	var full strings.Builder
 
 	emit := func(delta string) {
-		if !started {
-			fl, ok := openSSE(w)
-			if !ok {
+		if sse == nil {
+			var ok bool
+			if sse, ok = openSSE(w); !ok {
+				noFlush = true
+				cancel()
 				return
 			}
-			f = fl
-			started = true
 		}
 		full.WriteString(delta)
-		writeSSEData(w, f, apiconv.GoogleStreamChunk(model, delta))
+		if err := sse.data(apiconv.GoogleStreamChunk(model, delta)); err != nil {
+			s.rlog(ctx).Warn("sse write failed; aborting generation", "err", err)
+			cancel()
+		}
 	}
 
-	err := s.client.GenerateStream(ctx, p, emit)
-	if !started {
-		if err != nil {
+	err := s.client.GenerateStream(gctx, p, emit)
+	if sse == nil {
+		switch {
+		case noFlush:
+			sendError(w, http.StatusInternalServerError, "streaming unsupported")
+		case err != nil:
 			sendError(w, http.StatusBadGateway, "upstream error: "+err.Error())
-		} else {
+		default:
 			sendError(w, http.StatusBadGateway, gemini.ErrEmptyResponse.Error())
 		}
+		return
+	}
+	if sse.err != nil {
 		return
 	}
 	if err != nil {
 		// Interrupted after deltas: emit a final frame with a non-STOP finishReason
 		// so the client can tell the generation did not complete normally.
 		s.rlog(ctx).Warn("stream interrupted", "err", err)
-		writeSSEData(w, f, apiconv.GoogleStreamError(model, p.Prompt, full.String()))
+		s.sseTail(ctx, sse, sse.data(apiconv.GoogleStreamError(model, p.Prompt, full.String())))
 		return
 	}
-	writeSSEData(w, f, apiconv.GoogleStreamFinal(model, p.Prompt, full.String()))
+	s.sseTail(ctx, sse, sse.data(apiconv.GoogleStreamFinal(model, p.Prompt, full.String())))
 }
 
 func parseGoogleModel(path string) string {
@@ -555,6 +672,31 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Stream + tools: keepalive while the blocking generation runs.
+	if interval := s.keepaliveInterval(); req.Stream && toolsActive && interval > 0 {
+		ctx := r.Context()
+		sse, ok := openSSE(w)
+		if !ok {
+			sendAnthropicError(w, http.StatusInternalServerError, "streaming unsupported")
+			return
+		}
+		res := s.awaitGenerate(ctx, sse, p, interval)
+		switch {
+		case res.out == kaGone:
+		case res.out == kaShutdown:
+			s.sseTail(ctx, sse, sse.event("error", apiconv.AnthropicError("server shutting down")))
+		case res.err != nil:
+			s.sseTail(ctx, sse, sse.event("error", apiconv.AnthropicError("upstream error: "+res.err.Error())))
+		default:
+			text, toolCalls := res.text, []apiconv.ToolCall(nil)
+			if text != "" {
+				text, toolCalls = apiconv.ParseToolCalls(text)
+			}
+			s.streamMessagesFull(ctx, sse, msgID, m.Name, prompt, text, toolCalls)
+		}
+		return
+	}
+
 	text, err := s.client.Generate(r.Context(), p)
 	if err != nil {
 		sendAnthropicError(w, http.StatusBadGateway, "upstream error: "+err.Error())
@@ -566,8 +708,13 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Stream {
-		// Tools + stream: replay the full message as an SSE event sequence.
-		s.streamMessagesFull(w, msgID, m.Name, prompt, text, toolCalls)
+		// Tools + stream (keepalive disabled): replay the full message as SSE events.
+		sse, ok := openSSE(w)
+		if !ok {
+			sendAnthropicError(w, http.StatusInternalServerError, "streaming unsupported")
+			return
+		}
+		s.streamMessagesFull(r.Context(), sse, msgID, m.Name, prompt, text, toolCalls)
 		return
 	}
 	sendJSON(w, http.StatusOK, apiconv.AnthropicResponse(m.Name, prompt, text, toolCalls))
@@ -591,39 +738,51 @@ func (s *Server) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 // streamMessages performs true token streaming for a tool-free message request.
 func (s *Server) streamMessages(ctx context.Context, w http.ResponseWriter, msgID, model string, p gemini.GenParams) {
 	inputTokens := apiconv.ApproxTokens(p.Prompt)
-	var f http.Flusher
-	started := false
+	gctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var sse *sseStream
+	noFlush := false
 	var acc strings.Builder
 
 	open := func() bool {
-		fl, ok := openSSE(w)
-		if !ok {
+		var ok bool
+		if sse, ok = openSSE(w); !ok {
+			noFlush = true
+			cancel()
 			return false
 		}
-		f = fl
-		started = true
-		writeSSEEvent(w, f, "message_start", apiconv.AnthropicMessageStart(msgID, model, inputTokens))
-		writeSSEEvent(w, f, "content_block_start", apiconv.AnthropicTextBlockStart(0))
+		sse.event("message_start", apiconv.AnthropicMessageStart(msgID, model, inputTokens))
+		sse.event("content_block_start", apiconv.AnthropicTextBlockStart(0))
 		return true
 	}
 
 	emit := func(text string) {
-		if !started && !open() {
+		if sse == nil && !open() {
 			return
 		}
 		acc.WriteString(text)
-		writeSSEEvent(w, f, "content_block_delta", apiconv.AnthropicTextDelta(0, text))
+		if err := sse.event("content_block_delta", apiconv.AnthropicTextDelta(0, text)); err != nil {
+			s.rlog(ctx).Warn("sse write failed; aborting generation", "err", err)
+			cancel()
+		}
 	}
 
-	err := s.client.GenerateStream(ctx, p, emit)
-	if !started {
+	err := s.client.GenerateStream(gctx, p, emit)
+	if sse == nil {
 		// Nothing was streamed yet, so a normal HTTP error status is still possible.
 		// No deltas and no error means the upstream produced no content.
-		if err != nil {
+		switch {
+		case noFlush:
+			sendAnthropicError(w, http.StatusInternalServerError, "streaming unsupported")
+		case err != nil:
 			sendAnthropicError(w, http.StatusBadGateway, "upstream error: "+err.Error())
-		} else {
+		default:
 			sendAnthropicError(w, http.StatusBadGateway, gemini.ErrEmptyResponse.Error())
 		}
+		return
+	}
+	if sse.err != nil {
+		s.rlog(ctx).Warn("sse write failed", "err", sse.err)
 		return
 	}
 	if err != nil {
@@ -631,42 +790,41 @@ func (s *Server) streamMessages(ctx context.Context, w http.ResponseWriter, msgI
 		// `error` event instead of a clean message_stop, so the partial response is
 		// not presented as complete.
 		s.rlog(ctx).Warn("stream interrupted", "err", err)
-		writeSSEEvent(w, f, "content_block_stop", apiconv.AnthropicBlockStop(0))
-		writeSSEEvent(w, f, "error", apiconv.AnthropicError("upstream error: "+err.Error()))
+		s.sseTail(ctx, sse,
+			sse.event("content_block_stop", apiconv.AnthropicBlockStop(0)),
+			sse.event("error", apiconv.AnthropicError("upstream error: "+err.Error())))
 		return
 	}
-	writeSSEEvent(w, f, "content_block_stop", apiconv.AnthropicBlockStop(0))
-	writeSSEEvent(w, f, "message_delta", apiconv.AnthropicMessageDelta("end_turn", apiconv.ApproxTokens(acc.String())))
-	writeSSEEvent(w, f, "message_stop", apiconv.AnthropicMessageStop())
+	s.sseTail(ctx, sse,
+		sse.event("content_block_stop", apiconv.AnthropicBlockStop(0)),
+		sse.event("message_delta", apiconv.AnthropicMessageDelta("end_turn", apiconv.ApproxTokens(acc.String()))),
+		sse.event("message_stop", apiconv.AnthropicMessageStop()))
 }
 
-// streamMessagesFull replays an already-computed message as an SSE sequence, used
-// when tools are present (the tool calls need the full text first). It mirrors the
-// block layout of apiconv.AnthropicResponse: a text block (when there is text),
-// then a tool_use block per call, or a single empty text block when there is
-// neither.
-func (s *Server) streamMessagesFull(w http.ResponseWriter, msgID, model, prompt, text string, toolCalls []apiconv.ToolCall) {
-	f, ok := openSSE(w)
-	if !ok {
-		sendAnthropicError(w, http.StatusInternalServerError, "streaming unsupported")
-		return
-	}
-	writeSSEEvent(w, f, "message_start", apiconv.AnthropicMessageStart(msgID, model, apiconv.ApproxTokens(prompt)))
+// streamMessagesFull replays an already-computed message as an SSE sequence on an
+// already-open stream, used when tools are present (the tool calls need the full
+// text first). It mirrors the block layout of apiconv.AnthropicResponse: a text
+// block (when there is text), then a tool_use block per call, or a single empty
+// text block when there is neither.
+func (s *Server) streamMessagesFull(ctx context.Context, sse *sseStream, msgID, model, prompt, text string, toolCalls []apiconv.ToolCall) {
+	errs := []error{sse.event("message_start", apiconv.AnthropicMessageStart(msgID, model, apiconv.ApproxTokens(prompt)))}
 
 	idx := 0
 	emitTextBlock := func(t string) {
-		writeSSEEvent(w, f, "content_block_start", apiconv.AnthropicTextBlockStart(idx))
-		writeSSEEvent(w, f, "content_block_delta", apiconv.AnthropicTextDelta(idx, t))
-		writeSSEEvent(w, f, "content_block_stop", apiconv.AnthropicBlockStop(idx))
+		errs = append(errs,
+			sse.event("content_block_start", apiconv.AnthropicTextBlockStart(idx)),
+			sse.event("content_block_delta", apiconv.AnthropicTextDelta(idx, t)),
+			sse.event("content_block_stop", apiconv.AnthropicBlockStop(idx)))
 		idx++
 	}
 	if text != "" {
 		emitTextBlock(text)
 	}
 	for _, tc := range toolCalls {
-		writeSSEEvent(w, f, "content_block_start", apiconv.AnthropicToolUseBlockStart(idx, tc))
-		writeSSEEvent(w, f, "content_block_delta", apiconv.AnthropicToolUseDelta(idx, tc))
-		writeSSEEvent(w, f, "content_block_stop", apiconv.AnthropicBlockStop(idx))
+		errs = append(errs,
+			sse.event("content_block_start", apiconv.AnthropicToolUseBlockStart(idx, tc)),
+			sse.event("content_block_delta", apiconv.AnthropicToolUseDelta(idx, tc)),
+			sse.event("content_block_stop", apiconv.AnthropicBlockStop(idx)))
 		idx++
 	}
 	if text == "" && len(toolCalls) == 0 {
@@ -677,8 +835,10 @@ func (s *Server) streamMessagesFull(w http.ResponseWriter, msgID, model, prompt,
 	if len(toolCalls) > 0 {
 		stop = "tool_use"
 	}
-	writeSSEEvent(w, f, "message_delta", apiconv.AnthropicMessageDelta(stop, apiconv.ApproxTokens(text)))
-	writeSSEEvent(w, f, "message_stop", apiconv.AnthropicMessageStop())
+	errs = append(errs,
+		sse.event("message_delta", apiconv.AnthropicMessageDelta(stop, apiconv.ApproxTokens(text))),
+		sse.event("message_stop", apiconv.AnthropicMessageStop()))
+	s.sseTail(ctx, sse, errs...)
 }
 
 // sendAnthropicError writes an Anthropic-shaped error envelope.
@@ -747,8 +907,17 @@ func sendJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(b)
 }
 
-// openSSE writes SSE response headers and returns the flusher.
-func openSSE(w http.ResponseWriter) (http.Flusher, bool) {
+// sseStream wraps an open SSE response with a sticky error: after the first
+// failed write every later write is a no-op returning that error, so callers can
+// issue a sequence of writes and inspect the outcome once.
+type sseStream struct {
+	w   http.ResponseWriter
+	f   http.Flusher
+	err error
+}
+
+// openSSE writes SSE response headers and returns the stream.
+func openSSE(w http.ResponseWriter) (*sseStream, bool) {
 	f, ok := w.(http.Flusher)
 	if !ok {
 		return nil, false
@@ -758,22 +927,41 @@ func openSSE(w http.ResponseWriter) (http.Flusher, bool) {
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 	f.Flush()
-	return f, true
+	return &sseStream{w: w, f: f}, true
 }
 
+func (s *sseStream) do(fn func() error) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.err = fn()
+	return s.err
+}
+
+func (s *sseStream) data(v any) error { return s.do(func() error { return writeSSEData(s.w, s.f, v) }) }
+func (s *sseStream) event(name string, v any) error {
+	return s.do(func() error { return writeSSEEvent(s.w, s.f, name, v) })
+}
+func (s *sseStream) comment(text string) error {
+	return s.do(func() error { return writeSSEComment(s.w, s.f, text) })
+}
+func (s *sseStream) done() error { return s.do(func() error { return writeSSEDone(s.w, s.f) }) }
+
 // writeSSEData writes a `data: <json>` SSE frame.
-func writeSSEData(w http.ResponseWriter, f http.Flusher, v any) {
+func writeSSEData(w http.ResponseWriter, f http.Flusher, v any) error {
 	b, err := util.MarshalNoEscape(v)
 	if err != nil {
-		return
+		return err
 	}
-	_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
+		return err
+	}
 	f.Flush()
+	return nil
 }
 
 // writeSSEComment writes an SSE comment line (": <text>") and flushes. Comments
-// are ignored by compliant SSE parsers but still put bytes on the wire. The
-// write error is returned so callers can stop on a closed connection.
+// are ignored by compliant SSE parsers but still put bytes on the wire.
 func writeSSEComment(w http.ResponseWriter, f http.Flusher, text string) error {
 	if _, err := fmt.Fprintf(w, ": %s\n\n", text); err != nil {
 		return err
@@ -783,17 +971,23 @@ func writeSSEComment(w http.ResponseWriter, f http.Flusher, text string) error {
 }
 
 // writeSSEEvent writes a named SSE event with a JSON payload.
-func writeSSEEvent(w http.ResponseWriter, f http.Flusher, event string, v any) {
+func writeSSEEvent(w http.ResponseWriter, f http.Flusher, event string, v any) error {
 	b, err := util.MarshalNoEscape(v)
 	if err != nil {
-		return
+		return err
 	}
-	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
+	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b); err != nil {
+		return err
+	}
 	f.Flush()
+	return nil
 }
 
 // writeSSEDone writes the terminating [DONE] frame.
-func writeSSEDone(w http.ResponseWriter, f http.Flusher) {
-	_, _ = io.WriteString(w, "data: [DONE]\n\n")
+func writeSSEDone(w http.ResponseWriter, f http.Flusher) error {
+	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
+		return err
+	}
 	f.Flush()
+	return nil
 }
