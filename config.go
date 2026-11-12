@@ -38,6 +38,9 @@ type Config struct {
 	CORSOrigins []string
 	// AllowNoAuth lets the proxy start with no API key (GEMINI_ALLOW_NO_AUTH=1).
 	AllowNoAuth bool
+	// DisableEchoFilter turns the history-echo output filter off
+	// (GEMINI_STRIP_HISTORY_ECHO=0|false|off; emergency switch, default: filter on).
+	DisableEchoFilter bool
 	// AllowedHosts are extra Host header values accepted beside the loopback names
 	// (GEMINI_ALLOWED_HOSTS, comma-separated).
 	AllowedHosts []string
@@ -63,11 +66,12 @@ func loadConfig(envFile string) *Config {
 		CookieRefresh: getEnvInt("GEMINI_COOKIE_REFRESH_MIN", 9),
 		APIKeys:       splitKeys(getEnv("GEMINI_API_KEYS", "")),
 
-		SSEKeepaliveSec:  getEnvInt("GEMINI_SSE_KEEPALIVE_SEC", 15),
-		ShutdownGraceSec: shutdownGrace(getEnvInt("GEMINI_SHUTDOWN_GRACE_SEC", defaultShutdownGraceSec)),
-		AllowNoAuth:      getEnvBool("GEMINI_ALLOW_NO_AUTH", false),
-		CORSOrigins:      splitKeys(getEnv("GEMINI_CORS_ORIGINS", "")),
-		AllowedHosts:     splitKeys(getEnv("GEMINI_ALLOWED_HOSTS", "")),
+		SSEKeepaliveSec:   getEnvInt("GEMINI_SSE_KEEPALIVE_SEC", 15),
+		ShutdownGraceSec:  shutdownGrace(getEnvInt("GEMINI_SHUTDOWN_GRACE_SEC", defaultShutdownGraceSec)),
+		AllowNoAuth:       getEnvBool("GEMINI_ALLOW_NO_AUTH", false),
+		DisableEchoFilter: !getEnvBool("GEMINI_STRIP_HISTORY_ECHO", true),
+		CORSOrigins:       splitKeys(getEnv("GEMINI_CORS_ORIGINS", "")),
+		AllowedHosts:      splitKeys(getEnv("GEMINI_ALLOWED_HOSTS", "")),
 		Gemini: gemini.Config{
 			RetryAttempts:  getEnvInt("GEMINI_RETRY_ATTEMPTS", 3),
 			RetryDelaySec:  getEnvInt("GEMINI_RETRY_DELAY_SEC", 2),

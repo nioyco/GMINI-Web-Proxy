@@ -92,11 +92,11 @@ func TestEchoRegressionFromHistory(t *testing.T) {
 
 func TestGoogleResponseExStripsEchoKeepsCall(t *testing.T) {
 	text := "[Tool result for call_ab12cd34]: {\"a\":1}\n\nTexte\n```function_call\n{\"name\":\"f\",\"args\":{}}\n```"
-	_, st := GoogleResponseEx("m", "p", text, true)
+	resp, st := GoogleResponseEx("m", "p", text, true)
 	if st.Fabricated != 1 {
 		t.Fatalf("stats %+v", st)
 	}
-	b, _ := json.Marshal(GoogleResponse("m", "p", text, true))
+	b, _ := json.Marshal(resp)
 	if strings.Contains(string(b), "Tool result") || !strings.Contains(string(b), `"name":"f"`) {
 		t.Errorf("unexpected: %s", b)
 	}

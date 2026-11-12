@@ -117,3 +117,27 @@ func TestStatusExposesNewCounters(t *testing.T) {
 		t.Errorf("aggregates not updated")
 	}
 }
+
+func TestEchoFilterKillSwitch(t *testing.T) {
+	googleBody := `{"contents":[{"role":"user","parts":[{"text":"x"}]}]}`
+	paths := []struct{ name, path, body string }{
+		{"chat", "/v1/chat/completions", `{"model":"gemini-3.5-flash","messages":[{"role":"user","content":"x"}]}`},
+		{"chat-stream", "/v1/chat/completions", `{"model":"gemini-3.5-flash","stream":true,"messages":[{"role":"user","content":"x"}]}`},
+		{"google", "/v1beta/models/gemini-3.5-flash:generateContent", googleBody},
+		{"google-stream", "/v1beta/models/gemini-3.5-flash:streamGenerateContent", googleBody},
+	}
+	for _, disabled := range []bool{false, true} {
+		for _, c := range paths {
+			s, _ := echoServer(t, echoReply)
+			s.cfg.DisableEchoFilter = disabled
+			b := post(s, c.path, c.body).Body.String()
+			has := strings.Contains(b, "Tool result for")
+			if has != disabled {
+				t.Errorf("%s disabled=%v: echo present=%v: %s", c.name, disabled, has, b)
+			}
+			if got := s.stats.echoStripped.Load(); (got != 0) == disabled {
+				t.Errorf("%s disabled=%v: echoStripped=%d", c.name, disabled, got)
+			}
+		}
+	}
+}

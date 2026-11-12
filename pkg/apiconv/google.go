@@ -315,18 +315,24 @@ func decodeGoogleCall(s string) (GoogleFunctionCall, bool) {
 // When hasTools is set and the model emitted function_call blocks, the text is
 // replaced with the parsed call parts.
 func GoogleResponse(model, prompt, text string, hasTools bool) any {
-	r, _ := GoogleResponseEx(model, prompt, text, hasTools)
+	r, _ := googleResponse(model, prompt, text, hasTools, false)
 	return r
 }
 
 // GoogleResponseEx is GoogleResponse plus history-echo filtering of the returned
 // text (after function calls were extracted); it reports what was stripped.
 func GoogleResponseEx(model, prompt, text string, hasTools bool) (any, EchoStats) {
+	return googleResponse(model, prompt, text, hasTools, true)
+}
+
+func googleResponse(model, prompt, text string, hasTools, strip bool) (any, EchoStats) {
 	var st EchoStats
 	parts := []GooglePart{{Text: text}}
 	if hasTools && text != "" {
 		clean, calls := ParseGoogleFunctionCalls(text)
-		clean, st = StripEcho(clean)
+		if strip {
+			clean, st = StripEcho(clean)
+		}
 		if len(calls) > 0 {
 			parts = parts[:0]
 			if clean != "" {
@@ -339,7 +345,7 @@ func GoogleResponseEx(model, prompt, text string, hasTools bool) (any, EchoStats
 			parts[0].Text = clean
 			text = clean
 		}
-	} else if text != "" {
+	} else if text != "" && strip {
 		text, st = StripEcho(text)
 		parts[0].Text = text
 	}

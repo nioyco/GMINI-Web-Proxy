@@ -231,3 +231,22 @@ func TestSecurityDefaults(t *testing.T) {
 		t.Errorf("unexpected defaults: %+v", cfg)
 	}
 }
+
+func TestStripHistoryEchoEnvLoaded(t *testing.T) {
+	noEnv := filepath.Join(t.TempDir(), "none.env")
+	t.Setenv("GEMINI_STRIP_HISTORY_ECHO", "")
+	os.Unsetenv("GEMINI_STRIP_HISTORY_ECHO")
+	if cfg := loadConfig(noEnv); cfg.DisableEchoFilter {
+		t.Error("default must keep the echo filter active")
+	}
+	for _, v := range []string{"0", "false", "off", "OFF"} {
+		t.Setenv("GEMINI_STRIP_HISTORY_ECHO", v)
+		if cfg := loadConfig(noEnv); !cfg.DisableEchoFilter {
+			t.Errorf("%q must disable the filter", v)
+		}
+	}
+	t.Setenv("GEMINI_STRIP_HISTORY_ECHO", "1")
+	if cfg := loadConfig(noEnv); cfg.DisableEchoFilter {
+		t.Error("1 must keep the filter active")
+	}
+}

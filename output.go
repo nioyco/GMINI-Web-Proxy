@@ -44,14 +44,20 @@ func (s *Server) finishText(ctx context.Context, raw string, toolsActive bool) (
 	if toolsActive && text != "" {
 		text, calls = apiconv.ParseToolCalls(text)
 	}
-	text, st := apiconv.StripEcho(text)
-	s.noteEcho(ctx, st)
+	if !s.cfg.DisableEchoFilter {
+		var st apiconv.EchoStats
+		text, st = apiconv.StripEcho(text)
+		s.noteEcho(ctx, st)
+	}
 	return text, calls
 }
 
 // googleResponse builds a generateContent reply with echo filtering and markers.
 func (s *Server) googleResponse(ctx context.Context, model, prompt, text string, hasTools bool) any {
 	s.noteRefusal(ctx, text)
+	if s.cfg.DisableEchoFilter {
+		return apiconv.GoogleResponse(model, prompt, text, hasTools)
+	}
 	resp, st := apiconv.GoogleResponseEx(model, prompt, text, hasTools)
 	s.noteEcho(ctx, st)
 	return resp
@@ -62,6 +68,11 @@ func (s *Server) googleResponse(ctx context.Context, model, prompt, text string,
 // records the markers. acc holds the text emitted so far (for the refusal check).
 func (s *Server) echoEmitter(ctx context.Context, emitRaw func(string), acc *strings.Builder) (emit func(string), finish func()) {
 	var f apiconv.EchoFilter
+	if s.cfg.DisableEchoFilter {
+		emit = emitRaw
+		finish = func() { s.noteRefusal(ctx, acc.String()) }
+		return emit, finish
+	}
 	emit = func(d string) {
 		if out := f.Push(d); out != "" {
 			emitRaw(out)
