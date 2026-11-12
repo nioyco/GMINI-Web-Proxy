@@ -23,6 +23,7 @@ const defaultListen = "127.0.0.1:8081"
 type Config struct {
 	Listen        string   // bind address, e.g. 127.0.0.1:8081 or :8081
 	LogRequests   bool     // log each request at Info level
+	LogFormat     string   // "text" (default) or "json" (GEMINI_LOG_FORMAT)
 	CookieRefresh int      // minutes between __Secure-1PSIDTS rotations (0 = off)
 	APIKeys       []string // allowed client keys; empty means open access
 	// SSEKeepaliveSec is the interval (seconds) between ": keepalive" SSE comments
@@ -55,6 +56,7 @@ func loadConfig(envFile string) *Config {
 	cfg := &Config{
 		Listen:        normalizeListen(getEnv("GEMINI_LISTEN", defaultListen)),
 		LogRequests:   getEnvBool("GEMINI_LOG_REQUESTS", false),
+		LogFormat:     strings.ToLower(strings.TrimSpace(getEnv("GEMINI_LOG_FORMAT", "text"))),
 		CookieRefresh: getEnvInt("GEMINI_COOKIE_REFRESH_MIN", 9),
 		APIKeys:       splitKeys(getEnv("GEMINI_API_KEYS", "")),
 

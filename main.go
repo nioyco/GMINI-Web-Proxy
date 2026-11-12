@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -30,7 +31,7 @@ func main() {
 	if *listenAddr != "" {
 		cfg.Listen = normalizeListen(*listenAddr)
 	}
-	logger := newLogger(cfg.LogRequests)
+	logger := newLogger(cfg.LogRequests, cfg.LogFormat)
 	if err := validateStartup(cfg); err != nil {
 		logger.Error("config error", "err", err)
 		os.Exit(1)
@@ -134,12 +135,22 @@ func newHTTPServer(cfg *Config, handler http.Handler) *http.Server {
 // newLogger returns a slog text logger writing to stderr. When verbose is false
 // the level is raised to Warn, suppressing per-request Info logs while still
 // surfacing retries (Warn) and failures (Error).
-func newLogger(verbose bool) *slog.Logger {
+func newLogger(verbose bool, format string) *slog.Logger {
+	return newLoggerTo(os.Stderr, verbose, format)
+}
+
+// newLoggerTo builds the logger on an arbitrary writer. format "json" selects the
+// JSON handler (GEMINI_LOG_FORMAT=json); anything else keeps the default text one.
+func newLoggerTo(w io.Writer, verbose bool, format string) *slog.Logger {
 	level := slog.LevelWarn
 	if verbose {
 		level = slog.LevelInfo
 	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	opts := &slog.HandlerOptions{Level: level}
+	if strings.EqualFold(strings.TrimSpace(format), "json") {
+		return slog.New(slog.NewJSONHandler(w, opts))
+	}
+	return slog.New(slog.NewTextHandler(w, opts))
 }
 
 // printBanner writes the startup summary, mirroring the reference CLI output.

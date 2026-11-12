@@ -35,6 +35,18 @@ type Server struct {
 	// keepaliveOverride, when > 0, replaces the cfg-derived keepalive interval
 	// (sub-second values for tests). Never set in production.
 	keepaliveOverride time.Duration
+
+	started time.Time
+	active  activeSet
+	stats   statsCounters
+}
+
+// rlog returns the logger tagged with the request id carried by ctx.
+func (s *Server) rlog(ctx context.Context) *slog.Logger {
+	if ri := reqFrom(ctx); ri != nil {
+		return s.log.With("request_id", ri.id)
+	}
+	return s.log
 }
 
 // keepaliveInterval returns the SSE keepalive period; 0 means disabled.
@@ -49,7 +61,7 @@ func (s *Server) keepaliveInterval() time.Duration {
 }
 
 func newServer(cfg *Config, client *gemini.Client, logger *slog.Logger) *Server {
-	return &Server{cfg: cfg, client: client, log: logger, generate: client.Generate}
+	return &Server{cfg: cfg, client: client, log: logger, generate: client.Generate, started: time.Now()}
 }
 
 // handler builds the routed, middleware-wrapped HTTP handler. Health and model
@@ -65,15 +77,7 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("POST /v1/messages/count_tokens", s.withAuth(s.handleCountTokens))
 	mux.Handle("POST /v1beta/models/{model}", s.withAuth(s.handleGoogleGenerate))
 	mux.HandleFunc("/", s.handleNotFound)
-	return s.withHostCheck(s.withCORS(s.withLogging(mux)))
-}
-
-// withLogging logs each request at Info level (suppressed unless GEMINI_LOG_REQUESTS).
-func (s *Server) withLogging(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.log.Info("request", "method", r.Method, "path", r.URL.Path)
-		next.ServeHTTP(w, r)
-	})
+	return s.withTracking(s.withHostCheck(s.withCORS(mux)))
 }
 
 // withAuth enforces the optional API-key gate around a generation handler.
@@ -176,6 +180,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	setReqMeta(r.Context(), m.Name, req.Stream)
 	cid := apiconv.ID("chatcmpl-", 12)
 	p := m.Params(prompt)
 	p.Images = images
@@ -253,7 +258,7 @@ func (s *Server) streamChat(ctx context.Context, w http.ResponseWriter, cid, mod
 		// The stream was interrupted after deltas were already sent; the status is
 		// committed, so surface the failure in-band as an error frame instead of a
 		// clean "stop" chunk that would read as a complete response.
-		s.log.Warn("stream interrupted", "err", err)
+		s.rlog(ctx).Warn("stream interrupted", "err", err)
 		writeSSEData(w, f, errorObj("upstream error: "+err.Error()))
 		writeSSEDone(w, f)
 		return
@@ -293,9 +298,10 @@ func (s *Server) streamChatTools(ctx context.Context, w http.ResponseWriter, cid
 	start := time.Now()
 	// First comment right away so the client sees bytes after the headers.
 	if err := writeSSEComment(w, f, "keepalive"); err != nil {
-		s.log.Warn("sse keepalive write failed", "err", err)
+		s.rlog(ctx).Warn("sse keepalive write failed", "err", err)
 		return
 	}
+	addKeepalive(ctx)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -303,24 +309,24 @@ func (s *Server) streamChatTools(ctx context.Context, w http.ResponseWriter, cid
 		select {
 		case <-ctx.Done():
 			// Client went away: stop waiting, never write to the closed connection.
-			s.log.Warn("stream+tools cancelled by client",
+			s.rlog(ctx).Warn("stream+tools cancelled by client",
 				"err", ctx.Err(), "elapsed", time.Since(start).Round(time.Millisecond))
 			return
 		case <-ticker.C:
 			if err := writeSSEComment(w, f, "keepalive"); err != nil {
-				s.log.Warn("sse keepalive write failed", "err", err,
+				s.rlog(ctx).Warn("sse keepalive write failed", "err", err,
 					"elapsed", time.Since(start).Round(time.Millisecond))
 				return
 			}
 		case res := <-done:
 			if res.err != nil {
 				if ctx.Err() != nil {
-					s.log.Warn("stream+tools cancelled by client",
+					s.rlog(ctx).Warn("stream+tools cancelled by client",
 						"err", ctx.Err(), "elapsed", time.Since(start).Round(time.Millisecond))
 					return
 				}
 				// Headers are already sent: report in-band, in the same shape as streamChat.
-				s.log.Warn("stream+tools upstream error after SSE open",
+				s.rlog(ctx).Warn("stream+tools upstream error after SSE open",
 					"err", res.err, "elapsed", time.Since(start).Round(time.Millisecond))
 				writeSSEData(w, f, errorObj("upstream error: "+res.err.Error()))
 				writeSSEDone(w, f)
@@ -367,6 +373,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	setReqMeta(r.Context(), m.Name, req.Stream)
 	p := m.Params(prompt)
 	p.Images = images
 	text, err := s.client.Generate(r.Context(), p)
@@ -436,6 +443,7 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stream := strings.Contains(r.URL.Path, ":streamGenerateContent")
+	setReqMeta(r.Context(), m.Name, stream)
 	p := m.Params(prompt)
 	p.Images = images
 
@@ -496,7 +504,7 @@ func (s *Server) streamGoogle(ctx context.Context, w http.ResponseWriter, model 
 	if err != nil {
 		// Interrupted after deltas: emit a final frame with a non-STOP finishReason
 		// so the client can tell the generation did not complete normally.
-		s.log.Warn("stream interrupted", "err", err)
+		s.rlog(ctx).Warn("stream interrupted", "err", err)
 		writeSSEData(w, f, apiconv.GoogleStreamError(model, p.Prompt, full.String()))
 		return
 	}
@@ -535,6 +543,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	setReqMeta(r.Context(), m.Name, req.Stream)
 	p := m.Params(prompt)
 	p.Images = images
 	msgID := apiconv.ID("msg_", 24)
@@ -620,7 +629,7 @@ func (s *Server) streamMessages(ctx context.Context, w http.ResponseWriter, msgI
 		// Interrupted after deltas: close the open block and emit an Anthropic
 		// `error` event instead of a clean message_stop, so the partial response is
 		// not presented as complete.
-		s.log.Warn("stream interrupted", "err", err)
+		s.rlog(ctx).Warn("stream interrupted", "err", err)
 		writeSSEEvent(w, f, "content_block_stop", apiconv.AnthropicBlockStop(0))
 		writeSSEEvent(w, f, "error", apiconv.AnthropicError("upstream error: "+err.Error()))
 		return
