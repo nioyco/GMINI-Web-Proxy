@@ -110,6 +110,30 @@ func main() {
 	}
 }
 
+// shutdownServer stops accepting connections and waits up to grace for in-flight
+// requests (SSE streams included) to finish. When the grace expires, requests still
+// active are cancelled explicitly (logged as aborted_on_shutdown), given a short
+// window to flush their final frame, and any remaining connection is closed.
+func shutdownServer(httpServer *http.Server, srv *Server, grace time.Duration, logger *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	err := httpServer.Shutdown(ctx)
+	if err == nil {
+		return
+	}
+	n := srv.AbortActive()
+	logger.Warn("shutdown grace expired; active requests aborted", "grace", grace, "aborted", n)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), abortFlushWait)
+	defer cancel2()
+	if err := httpServer.Shutdown(ctx2); err != nil {
+		logger.Error("shutdown error", "err", err)
+		_ = httpServer.Close()
+	}
+}
+
+// abortFlushWait is how long aborted handlers get to write their final frame.
+const abortFlushWait = 2 * time.Second
+
 // HTTP server timeouts. WriteTimeout is intentionally unset: SSE streams must
 // stay open for the full generation. The others bound slow or idle peers without
 // affecting an in-flight streamed response (the request body is read up front,
