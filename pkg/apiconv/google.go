@@ -208,7 +208,8 @@ func buildGoogleToolPrompt(toolDefs []googleToolDef) string {
 		"When calling tools:\n" +
 		"- Output ONLY the function_call block(s), nothing else\n" +
 		"- You may call multiple tools with multiple blocks\n" +
-		"- After receiving a [Tool result for ...], use that data to answer the user\n\n" +
+		"- After receiving a [Tool result for ...], use that data to answer the user\n" +
+		noEchoRules + "\n\n" +
 		"Available tools:\n" + string(spec)
 }
 
@@ -314,9 +315,18 @@ func decodeGoogleCall(s string) (GoogleFunctionCall, bool) {
 // When hasTools is set and the model emitted function_call blocks, the text is
 // replaced with the parsed call parts.
 func GoogleResponse(model, prompt, text string, hasTools bool) any {
+	r, _ := GoogleResponseEx(model, prompt, text, hasTools)
+	return r
+}
+
+// GoogleResponseEx is GoogleResponse plus history-echo filtering of the returned
+// text (after function calls were extracted); it reports what was stripped.
+func GoogleResponseEx(model, prompt, text string, hasTools bool) (any, EchoStats) {
+	var st EchoStats
 	parts := []GooglePart{{Text: text}}
 	if hasTools && text != "" {
 		clean, calls := ParseGoogleFunctionCalls(text)
+		clean, st = StripEcho(clean)
 		if len(calls) > 0 {
 			parts = parts[:0]
 			if clean != "" {
@@ -325,7 +335,13 @@ func GoogleResponse(model, prompt, text string, hasTools bool) any {
 			for _, c := range calls {
 				parts = append(parts, GooglePart{FunctionCall: &googleFunctionCall{Name: c.Name, Args: c.Args}})
 			}
+		} else {
+			parts[0].Text = clean
+			text = clean
 		}
+	} else if text != "" {
+		text, st = StripEcho(text)
+		parts[0].Text = text
 	}
 	in, out := ApproxTokens(prompt), ApproxTokens(text)
 	return generateContentResponse{
@@ -340,7 +356,7 @@ func GoogleResponse(model, prompt, text string, hasTools bool) any {
 			TotalTokenCount:      in + out,
 		},
 		ModelVersion: model,
-	}
+	}, st
 }
 
 // GoogleStreamChunk builds a single incremental streamGenerateContent frame

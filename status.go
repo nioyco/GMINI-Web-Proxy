@@ -65,6 +65,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			"responses_5xx":       s.stats.status5xx.Load(),
 			"keepalives_sent":     s.stats.keepalives.Load(),
 			"aborted_on_shutdown": s.stats.abortedOnShutdown.Load(),
+			"echo_stripped":       s.stats.echoStripped.Load(),
+			"echo_fabricated":     s.stats.echoFabricated.Load(),
+			"upstream_refusal":    s.stats.upstreamRefusal.Load(),
 		},
 	}
 	if t := s.client.LastCookieRotation(); !t.IsZero() {

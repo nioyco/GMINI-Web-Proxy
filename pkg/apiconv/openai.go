@@ -245,6 +245,13 @@ func toolChoiceInstruction(tc toolChoiceMode) string {
 	return ""
 }
 
+// noEchoRules forbids the model from imitating the labels the proxy uses to
+// flatten the conversation history (they are input markers, not output format).
+const noEchoRules = "Rules about the conversation history:\n" +
+	"- Lines starting with [System instruction]:, [User]:, [Assistant]: or [Tool result for ...]: are input markers added by the system. NEVER write them in your answer.\n" +
+	"- NEVER repeat or replay earlier tool results or earlier assistant messages, and NEVER write, invent or simulate a tool result: tool results are supplied only by the system after your tool call is executed.\n" +
+	"- Answer only the latest request, using earlier results as context."
+
 // messagesToPrompt converts OpenAI messages (plus optional tools and tool_choice)
 // into a single prompt string with role markers.
 func messagesToPrompt(messages []Message, tools []Tool, tc toolChoiceMode) string {
@@ -259,7 +266,8 @@ func messagesToPrompt(messages []Message, tools []Tool, tc toolChoiceMode) strin
 				"These tools connect to the user's local environment and will execute when called.\n\n"+
 				"Call format (use this exact format):\n"+
 				"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n"+
-				"When calling tools, output ONLY the tool_call block(s), nothing else.\n\n"+
+				"When calling tools, output ONLY the tool_call block(s), nothing else.\n"+
+				noEchoRules+"\n\n"+
 				"Available tools:\n"+string(defsJSON)+
 				toolChoiceInstruction(tc))
 		}

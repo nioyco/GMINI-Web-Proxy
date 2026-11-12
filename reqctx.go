@@ -53,6 +53,10 @@ type reqInfo struct {
 	stream     bool
 	keepalives atomic.Int64
 	cancel     context.CancelCauseFunc
+
+	echoStripped   atomic.Int64
+	echoFabricated atomic.Int64
+	refusal        atomic.Bool
 }
 
 type ctxKey struct{}
@@ -85,6 +89,9 @@ type statsCounters struct {
 	status5xx         atomic.Int64
 	keepalives        atomic.Int64
 	abortedOnShutdown atomic.Int64
+	echoStripped      atomic.Int64
+	echoFabricated    atomic.Int64
+	upstreamRefusal   atomic.Int64
 }
 
 // activeSet tracks in-flight requests so shutdown can cancel them.
@@ -209,7 +216,8 @@ func (s *Server) withTracking(next http.Handler) http.Handler {
 				"request_id", id, "method", r.Method, "route", ri.route,
 				"model", ri.model, "stream", ri.stream, "status", status,
 				"duration_ms", time.Since(ri.start).Milliseconds(),
-				"keepalives", ri.keepalives.Load(), "bytes", sw.bytes)
+				"keepalives", ri.keepalives.Load(), "bytes", sw.bytes,
+				"echo_stripped", ri.echoStripped.Load(), "upstream_refusal", ri.refusal.Load())
 		}()
 		next.ServeHTTP(sw, r.WithContext(ctx))
 	})

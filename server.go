@@ -223,10 +223,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		sendError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
 	}
-	var toolCalls []apiconv.ToolCall
-	if toolsActive && text != "" {
-		text, toolCalls = apiconv.ParseToolCalls(text)
-	}
+	text, toolCalls := s.finishText(r.Context(), text, toolsActive)
 
 	if req.Stream {
 		// Tools + stream: emit one chunk carrying the full message, then DONE.
@@ -249,8 +246,9 @@ func (s *Server) streamChat(ctx context.Context, w http.ResponseWriter, cid, mod
 	defer cancel()
 	var sse *sseStream
 	noFlush := false
+	var acc strings.Builder
 
-	emit := func(text string) {
+	emitRaw := func(text string) {
 		if sse == nil {
 			var ok bool
 			if sse, ok = openSSE(w); !ok {
@@ -259,13 +257,16 @@ func (s *Server) streamChat(ctx context.Context, w http.ResponseWriter, cid, mod
 				return
 			}
 		}
+		acc.WriteString(text)
 		if err := sse.data(apiconv.ChatChunk(cid, created, model, text)); err != nil {
 			s.rlog(ctx).Warn("sse write failed; aborting generation", "err", err)
 			cancel() // client is gone: stop pulling tokens
 		}
 	}
+	emit, finish := s.echoEmitter(ctx, emitRaw, &acc)
 
 	err := s.client.GenerateStream(gctx, p, emit)
+	finish()
 	if sse == nil {
 		// Nothing was streamed yet, so a normal HTTP error status is still possible.
 		// No deltas and no error means the upstream produced no content.
@@ -315,10 +316,7 @@ func (s *Server) streamChatTools(ctx context.Context, w http.ResponseWriter, cid
 		s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+res.err.Error())), sse.done())
 		return
 	}
-	text, toolCalls := res.text, []apiconv.ToolCall(nil)
-	if text != "" {
-		text, toolCalls = apiconv.ParseToolCalls(text)
-	}
+	text, toolCalls := s.finishText(ctx, res.text, true)
 	s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
 }
 
@@ -466,10 +464,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		case res.err != nil:
 			s.sseTail(ctx, sse, sse.event("error", responsesStreamError("upstream error: "+res.err.Error())))
 		default:
-			text, toolCalls := res.text, []apiconv.ToolCall(nil)
-			if text != "" {
-				text, toolCalls = apiconv.ParseToolCalls(text)
-			}
+			text, toolCalls := s.finishText(ctx, res.text, true)
 			s.writeResponsesStream(ctx, sse, rid, mid, m.Name, prompt, text, toolCalls)
 		}
 		return
@@ -480,10 +475,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		sendError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
 	}
-	var toolCalls []apiconv.ToolCall
-	if toolsActive && text != "" {
-		text, toolCalls = apiconv.ParseToolCalls(text)
-	}
+	text, toolCalls := s.finishText(r.Context(), text, toolsActive)
 
 	if req.Stream {
 		sse, ok := openSSE(w)
@@ -581,7 +573,7 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		case res.err != nil:
 			s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+res.err.Error())))
 		default:
-			s.sseTail(ctx, sse, sse.data(apiconv.GoogleResponse(m.Name, prompt, res.text, hasTools)))
+			s.sseTail(ctx, sse, sse.data(s.googleResponse(ctx, m.Name, prompt, res.text, hasTools)))
 		}
 		return
 	}
@@ -591,7 +583,7 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		sendError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
 	}
-	response := apiconv.GoogleResponse(m.Name, prompt, text, hasTools)
+	response := s.googleResponse(r.Context(), m.Name, prompt, text, hasTools)
 
 	if stream {
 		sse, ok := openSSE(w)
@@ -613,7 +605,7 @@ func (s *Server) streamGoogle(ctx context.Context, w http.ResponseWriter, model 
 	noFlush := false
 	var full strings.Builder
 
-	emit := func(delta string) {
+	emitRaw := func(delta string) {
 		if sse == nil {
 			var ok bool
 			if sse, ok = openSSE(w); !ok {
@@ -628,8 +620,10 @@ func (s *Server) streamGoogle(ctx context.Context, w http.ResponseWriter, model 
 			cancel()
 		}
 	}
+	emit, finish := s.echoEmitter(ctx, emitRaw, &full)
 
 	err := s.client.GenerateStream(gctx, p, emit)
+	finish()
 	if sse == nil {
 		switch {
 		case noFlush:
@@ -717,10 +711,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		case res.err != nil:
 			s.sseTail(ctx, sse, sse.event("error", apiconv.AnthropicError("upstream error: "+res.err.Error())))
 		default:
-			text, toolCalls := res.text, []apiconv.ToolCall(nil)
-			if text != "" {
-				text, toolCalls = apiconv.ParseToolCalls(text)
-			}
+			text, toolCalls := s.finishText(ctx, res.text, true)
 			s.streamMessagesFull(ctx, sse, msgID, m.Name, prompt, text, toolCalls)
 		}
 		return
@@ -731,10 +722,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		sendAnthropicError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
 	}
-	var toolCalls []apiconv.ToolCall
-	if toolsActive && text != "" {
-		text, toolCalls = apiconv.ParseToolCalls(text)
-	}
+	text, toolCalls := s.finishText(r.Context(), text, toolsActive)
 
 	if req.Stream {
 		// Tools + stream (keepalive disabled): replay the full message as SSE events.
@@ -785,7 +773,7 @@ func (s *Server) streamMessages(ctx context.Context, w http.ResponseWriter, msgI
 		return true
 	}
 
-	emit := func(text string) {
+	emitRaw := func(text string) {
 		if sse == nil && !open() {
 			return
 		}
@@ -795,8 +783,10 @@ func (s *Server) streamMessages(ctx context.Context, w http.ResponseWriter, msgI
 			cancel()
 		}
 	}
+	emit, finish := s.echoEmitter(ctx, emitRaw, &acc)
 
 	err := s.client.GenerateStream(gctx, p, emit)
+	finish()
 	if sse == nil {
 		// Nothing was streamed yet, so a normal HTTP error status is still possible.
 		// No deltas and no error means the upstream produced no content.
