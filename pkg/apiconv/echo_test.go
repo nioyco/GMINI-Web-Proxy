@@ -101,3 +101,19 @@ func TestGoogleResponseExStripsEchoKeepsCall(t *testing.T) {
 		t.Errorf("unexpected: %s", b)
 	}
 }
+
+func TestToolPromptsForbidEcho(t *testing.T) {
+	req := ChatRequest{
+		Messages: []Message{{Role: "user", Content: jsonString("x")}},
+		Tools:    []Tool{{Type: "function", Function: &ToolFunction{Name: "run", Parameters: json.RawMessage(`{}`)}}},
+	}
+	p, _, _ := req.Prompt()
+	g := buildGoogleToolPrompt([]googleToolDef{{Name: "f"}})
+	for name, s := range map[string]string{"openai": p, "google": g} {
+		for _, want := range []string{"NEVER write them", "NEVER repeat or replay", "simulate a tool result"} {
+			if !strings.Contains(s, want) {
+				t.Errorf("%s prompt missing %q", name, want)
+			}
+		}
+	}
+}
