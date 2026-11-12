@@ -65,21 +65,7 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("POST /v1/messages/count_tokens", s.withAuth(s.handleCountTokens))
 	mux.Handle("POST /v1beta/models/{model}", s.withAuth(s.handleGoogleGenerate))
 	mux.HandleFunc("/", s.handleNotFound)
-	return s.withCORS(s.withLogging(mux))
-}
-
-// withCORS sets permissive CORS headers and answers preflight requests.
-func (s *Server) withCORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		if r.Method == http.MethodOptions {
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "*")
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+	return s.withHostCheck(s.withCORS(s.withLogging(mux)))
 }
 
 // withLogging logs each request at Info level (suppressed unless GEMINI_LOG_REQUESTS).

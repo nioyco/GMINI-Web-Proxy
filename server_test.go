@@ -54,7 +54,7 @@ func newTestServer(t *testing.T, cfg *Config) *Server {
 func TestAuthorized(t *testing.T) {
 	t.Run("open when no keys", func(t *testing.T) {
 		s := newTestServer(t, testConfig())
-		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		req := newReq(http.MethodPost, "/v1/chat/completions", nil)
 		if !s.authorized(req) {
 			t.Errorf("should be open with no keys configured")
 		}
@@ -65,7 +65,7 @@ func TestAuthorized(t *testing.T) {
 	s := newTestServer(t, cfg)
 
 	t.Run("valid bearer", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		req := newReq(http.MethodPost, "/v1/chat/completions", nil)
 		req.Header.Set("Authorization", "Bearer secret2")
 		if !s.authorized(req) {
 			t.Errorf("valid bearer rejected")
@@ -73,7 +73,7 @@ func TestAuthorized(t *testing.T) {
 	})
 
 	t.Run("invalid key", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		req := newReq(http.MethodPost, "/v1/chat/completions", nil)
 		req.Header.Set("Authorization", "Bearer wrong")
 		if s.authorized(req) {
 			t.Errorf("invalid key accepted")
@@ -81,14 +81,14 @@ func TestAuthorized(t *testing.T) {
 	})
 
 	t.Run("missing key", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		req := newReq(http.MethodPost, "/v1/chat/completions", nil)
 		if s.authorized(req) {
 			t.Errorf("missing key accepted")
 		}
 	})
 
 	t.Run("x-goog-api-key", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/v1beta/models/x:generateContent", nil)
+		req := newReq(http.MethodPost, "/v1beta/models/x:generateContent", nil)
 		req.Header.Set("x-goog-api-key", "secret1")
 		if !s.authorized(req) {
 			t.Errorf("x-goog-api-key rejected")
@@ -96,7 +96,7 @@ func TestAuthorized(t *testing.T) {
 	})
 
 	t.Run("query param key", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/v1beta/models/x:generateContent?key=secret1", nil)
+		req := newReq(http.MethodPost, "/v1beta/models/x:generateContent?key=secret1", nil)
 		if !s.authorized(req) {
 			t.Errorf("query key rejected")
 		}
@@ -106,7 +106,7 @@ func TestAuthorized(t *testing.T) {
 func TestHandleModelsOpenAI(t *testing.T) {
 	s := newTestServer(t, testConfig())
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := newReq(http.MethodGet, "/v1/models", nil)
 	s.handler().ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
@@ -128,7 +128,7 @@ func TestHandleModelsOpenAI(t *testing.T) {
 
 func TestHandleModelsAnthropic(t *testing.T) {
 	s := newTestServer(t, testConfig())
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := newReq(http.MethodGet, "/v1/models", nil)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	rr := httptest.NewRecorder()
 	s.handler().ServeHTTP(rr, req)
@@ -158,7 +158,7 @@ func TestModelsFormatDetection(t *testing.T) {
 
 	// Without the header → OpenAI format ("object":"list").
 	rr := httptest.NewRecorder()
-	s.handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	s.handler().ServeHTTP(rr, newReq(http.MethodGet, "/v1/models", nil))
 	if !strings.Contains(rr.Body.String(), `"object":"list"`) {
 		t.Errorf("expected OpenAI format, got: %s", rr.Body.String())
 	}
@@ -168,7 +168,7 @@ func TestHandleCountTokens(t *testing.T) {
 	s := newTestServer(t, testConfig())
 	body := `{"model":"claude-x","messages":[{"role":"user","content":"hello world here"}]}`
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(body))
+	req := newReq(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(body))
 	s.handler().ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
@@ -188,7 +188,7 @@ func TestHandleCountTokens(t *testing.T) {
 func TestHandleHealth(t *testing.T) {
 	s := newTestServer(t, testConfig())
 	rr := httptest.NewRecorder()
-	s.handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	s.handler().ServeHTTP(rr, newReq(http.MethodGet, "/", nil))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
 	}
@@ -201,15 +201,74 @@ func TestHandleHealth(t *testing.T) {
 	}
 }
 
-func TestCORSPreflight(t *testing.T) {
+func TestCORSDefaultNoHeaders(t *testing.T) {
 	s := newTestServer(t, testConfig())
 	rr := httptest.NewRecorder()
-	s.handler().ServeHTTP(rr, httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", nil))
-	if rr.Code != http.StatusNoContent {
-		t.Errorf("OPTIONS status = %d, want 204", rr.Code)
+	req := newReq(http.MethodGet, "/", nil)
+	req.Header.Set("Origin", "https://evil.example")
+	s.handler().ServeHTTP(rr, req)
+	if v := rr.Header().Get("Access-Control-Allow-Origin"); v != "" {
+		t.Errorf("ACAO = %q, want none by default", v)
 	}
-	if rr.Header().Get("Access-Control-Allow-Origin") != "*" {
-		t.Errorf("missing CORS header")
+}
+
+func TestCORSPreflightDisallowedOrigin(t *testing.T) {
+	s := newTestServer(t, testConfig())
+	rr := httptest.NewRecorder()
+	req := newReq(http.MethodOptions, "/v1/chat/completions", nil)
+	req.Header.Set("Origin", "https://evil.example")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	s.handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("OPTIONS status = %d, want 403", rr.Code)
+	}
+	if rr.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Errorf("must not emit ACAO for a disallowed origin")
+	}
+}
+
+func TestCORSAllowedOrigin(t *testing.T) {
+	cfg := testConfig()
+	cfg.CORSOrigins = []string{"https://app.example", "*"}
+	s := newTestServer(t, cfg)
+	rr := httptest.NewRecorder()
+	req := newReq(http.MethodOptions, "/v1/chat/completions", nil)
+	req.Header.Set("Origin", "https://app.example")
+	s.handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Errorf("status = %d, want 204", rr.Code)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example" {
+		t.Errorf("ACAO = %q", got)
+	}
+	// The literal "*" entry is never honoured.
+	rr = httptest.NewRecorder()
+	req = newReq(http.MethodGet, "/", nil)
+	req.Header.Set("Origin", "https://other.example")
+	s.handler().ServeHTTP(rr, req)
+	if rr.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Errorf("wildcard must not be honoured")
+	}
+}
+
+func TestHostCheck(t *testing.T) {
+	cfg := testConfig()
+	cfg.AllowedHosts = []string{"proxy.lan"}
+	s := newTestServer(t, cfg)
+	cases := map[string]int{
+		"127.0.0.1:8081": 200, "127.0.0.1": 200, "localhost:9": 200, "LOCALHOST": 200,
+		"[::1]:8081": 200, "[::1]": 200, "proxy.lan:8081": 200,
+		"evil.example": 403, "evil.example:8081": 403, "127.0.0.1.evil.example": 403,
+		"192.168.1.5:8081": 403, "": 403,
+	}
+	for host, want := range cases {
+		rr := httptest.NewRecorder()
+		req := newReq(http.MethodGet, "/", nil)
+		req.Host = host
+		s.handler().ServeHTTP(rr, req)
+		if rr.Code != want {
+			t.Errorf("Host %q: status = %d, want %d", host, rr.Code, want)
+		}
 	}
 }
 
@@ -219,7 +278,7 @@ func TestAuthGateBlocksUnauthorized(t *testing.T) {
 	s := newTestServer(t, cfg)
 
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req := newReq(http.MethodPost, "/v1/chat/completions", nil)
 	s.handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", rr.Code)
@@ -227,7 +286,7 @@ func TestAuthGateBlocksUnauthorized(t *testing.T) {
 
 	// Health stays open even with keys configured.
 	rr2 := httptest.NewRecorder()
-	s.handler().ServeHTTP(rr2, httptest.NewRequest(http.MethodGet, "/", nil))
+	s.handler().ServeHTTP(rr2, newReq(http.MethodGet, "/", nil))
 	if rr2.Code != http.StatusOK {
 		t.Errorf("health status = %d, want 200", rr2.Code)
 	}
@@ -239,9 +298,18 @@ func TestMessagesAuthGate(t *testing.T) {
 	s := newTestServer(t, cfg)
 
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	req := newReq(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
 	s.handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", rr.Code)
 	}
+}
+
+// newReq builds a test request addressed to the loopback host, as a real local
+// client would (httptest.NewRequest defaults to Host "example.com", which the
+// Host check rejects).
+func newReq(method, target string, body io.Reader) *http.Request {
+	r := httptest.NewRequest(method, target, body)
+	r.Host = "127.0.0.1:8081"
+	return r
 }

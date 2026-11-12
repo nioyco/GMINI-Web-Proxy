@@ -56,7 +56,7 @@ func TestReadBodyTooLargeReturns413(t *testing.T) {
 	// A body just over the cap must be rejected with an explicit 413, not silently
 	// truncated into a confusing JSON parse error (400).
 	big := strings.Repeat("a", maxBodyBytes+1)
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(big))
+	req := newReq(http.MethodPost, "/v1/chat/completions", strings.NewReader(big))
 	rr := httptest.NewRecorder()
 	s.handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusRequestEntityTooLarge {

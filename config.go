@@ -28,7 +28,13 @@ type Config struct {
 	// sent while a stream+tools request waits for the blocking generation (0 = off,
 	// which restores the legacy "single chunk after generation" behaviour).
 	SSEKeepaliveSec int
-	Gemini          gemini.Config
+	// CORSOrigins lists origins allowed to make cross-origin browser calls
+	// (GEMINI_CORS_ORIGINS, comma-separated). Empty = no CORS headers at all.
+	CORSOrigins []string
+	// AllowedHosts are extra Host header values accepted beside the loopback names
+	// (GEMINI_ALLOWED_HOSTS, comma-separated).
+	AllowedHosts []string
+	Gemini       gemini.Config
 }
 
 // loadConfig seeds env from a .env file, then reads all settings. The .env path
