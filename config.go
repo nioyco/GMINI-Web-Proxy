@@ -63,7 +63,11 @@ func loadConfig(envFile string) *Config {
 		CookieRefresh: getEnvInt("GEMINI_COOKIE_REFRESH_MIN", 9),
 		APIKeys:       splitKeys(getEnv("GEMINI_API_KEYS", "")),
 
-		SSEKeepaliveSec: getEnvInt("GEMINI_SSE_KEEPALIVE_SEC", 15),
+		SSEKeepaliveSec:  getEnvInt("GEMINI_SSE_KEEPALIVE_SEC", 15),
+		ShutdownGraceSec: shutdownGrace(getEnvInt("GEMINI_SHUTDOWN_GRACE_SEC", defaultShutdownGraceSec)),
+		AllowNoAuth:      getEnvBool("GEMINI_ALLOW_NO_AUTH", false),
+		CORSOrigins:      splitKeys(getEnv("GEMINI_CORS_ORIGINS", "")),
+		AllowedHosts:     splitKeys(getEnv("GEMINI_ALLOWED_HOSTS", "")),
 		Gemini: gemini.Config{
 			RetryAttempts:  getEnvInt("GEMINI_RETRY_ATTEMPTS", 3),
 			RetryDelaySec:  getEnvInt("GEMINI_RETRY_DELAY_SEC", 2),

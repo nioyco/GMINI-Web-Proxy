@@ -197,3 +197,37 @@ func TestValidateStartup(t *testing.T) {
 		t.Errorf("with a key must start, got %v", err)
 	}
 }
+
+func TestSecurityEnvVarsLoaded(t *testing.T) {
+	const none = "/nonexistent/.env"
+	t.Setenv("GEMINI_ALLOW_NO_AUTH", "1")
+	t.Setenv("GEMINI_CORS_ORIGINS", "https://a.example, https://b.example")
+	t.Setenv("GEMINI_ALLOWED_HOSTS", "proxy.lan")
+	t.Setenv("GEMINI_LOG_FORMAT", "JSON")
+	cfg := loadConfig(none)
+	if !cfg.AllowNoAuth {
+		t.Errorf("AllowNoAuth not loaded")
+	}
+	if len(cfg.CORSOrigins) != 2 || cfg.CORSOrigins[1] != "https://b.example" {
+		t.Errorf("CORSOrigins = %v", cfg.CORSOrigins)
+	}
+	if len(cfg.AllowedHosts) != 1 || cfg.AllowedHosts[0] != "proxy.lan" {
+		t.Errorf("AllowedHosts = %v", cfg.AllowedHosts)
+	}
+	if cfg.LogFormat != "json" {
+		t.Errorf("LogFormat = %q", cfg.LogFormat)
+	}
+}
+
+func TestSecurityDefaults(t *testing.T) {
+	const none = "/nonexistent/.env"
+	for _, k := range []string{"GEMINI_ALLOW_NO_AUTH", "GEMINI_CORS_ORIGINS", "GEMINI_ALLOWED_HOSTS", "GEMINI_LOG_FORMAT", "GEMINI_LISTEN"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+	cfg := loadConfig(none)
+	if cfg.AllowNoAuth || len(cfg.CORSOrigins) != 0 || len(cfg.AllowedHosts) != 0 || cfg.LogFormat != "text" ||
+		cfg.Listen != "127.0.0.1:8081" || cfg.SSEKeepaliveSec != 15 {
+		t.Errorf("unexpected defaults: %+v", cfg)
+	}
+}
