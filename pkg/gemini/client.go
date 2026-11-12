@@ -105,6 +105,7 @@ type Client struct {
 	cookieMtime  time.Time
 	cookieLoaded bool
 	rotatedAt    time.Time // last successful __Secure-1PSIDTS rotation (guarded by cookieMu)
+	rot          rotState  // rotation attempt tracking (guarded by cookieMu)
 
 	// Build label, optionally auto-resolved from the Gemini page.
 	blMu         sync.Mutex

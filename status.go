@@ -23,6 +23,30 @@ type statusResponse struct {
 	SSEKeepaliveSec    int              `json:"sse_keepalive_sec"`
 	ShutdownGraceSec   int              `json:"shutdown_grace_sec"`
 	Counters           map[string]int64 `json:"counters"`
+	CookieRotation     rotationStatus   `json:"cookie_rotation"`
+}
+
+// rotationStatus describes the cookie rotation state (no secrets).
+type rotationStatus struct {
+	AuthState            string `json:"auth_state"` // authenticated | anonymous
+	PSIDTSPresent        bool   `json:"psidts_present"`
+	LastAttemptAgeSec    *int64 `json:"last_attempt_age_sec"`
+	LastSuccessAgeSec    *int64 `json:"last_success_age_sec"`
+	LastResult           string `json:"last_result"`
+	Attempts             int64  `json:"attempts"`
+	Renewed              int64  `json:"renewed"`
+	NotRenewed           int64  `json:"not_renewed"`
+	ConsecutiveNoRenewal int64  `json:"consecutive_no_renewal"`
+	TokenAgeSec          *int64 `json:"token_age_sec"`
+	TokenAgeSource       string `json:"token_age_source"`
+}
+
+func ageSec(t time.Time) *int64 {
+	if t.IsZero() {
+		return nil
+	}
+	v := int64(time.Since(t).Seconds())
+	return &v
 }
 
 // buildInfo extracts the VCS revision stamped by `go build`.
@@ -80,6 +104,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	if t := s.client.LastCookieRotation(); !t.IsZero() {
 		age := int64(time.Since(t).Seconds())
 		resp.CookieRotationAgeS = &age
+	}
+	rs := s.client.RotationStatus()
+	resp.CookieRotation = rotationStatus{
+		AuthState: "anonymous", PSIDTSPresent: rs.PSIDTSPresent,
+		LastAttemptAgeSec: ageSec(rs.LastAttempt), LastSuccessAgeSec: ageSec(rs.LastSuccess),
+		LastResult: rs.LastResult, Attempts: rs.Attempts, Renewed: rs.Renewed, NotRenewed: rs.NotRenewed,
+		ConsecutiveNoRenewal: rs.ConsecutiveFailure, TokenAgeSource: rs.TokenAgeSource,
+	}
+	if resp.Authenticated {
+		resp.CookieRotation.AuthState = "authenticated"
+	}
+	if rs.TokenAgeSource != "unknown" {
+		a := int64(rs.TokenAge.Seconds())
+		resp.CookieRotation.TokenAgeSec = &a
 	}
 	sendJSON(w, http.StatusOK, resp)
 }

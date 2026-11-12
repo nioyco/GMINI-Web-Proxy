@@ -88,3 +88,29 @@ func TestModelsAndHealthStayOpen(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusCookieRotationBlock(t *testing.T) {
+	cfg := testConfig()
+	cfg.Gemini.Cookie = "SAPISID=SECRETCOOKIE; __Secure-1PSIDTS=SECRETTS"
+	s := newTestServer(t, cfg)
+	rr := httptest.NewRecorder()
+	s.handler().ServeHTTP(rr, newReq(http.MethodGet, "/_status", nil))
+	var st struct {
+		CR map[string]any `json:"cookie_rotation"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"auth_state", "psidts_present", "last_attempt_age_sec", "last_success_age_sec", "last_result",
+		"attempts", "renewed", "not_renewed", "consecutive_no_renewal", "token_age_sec", "token_age_source"} {
+		if _, ok := st.CR[k]; !ok {
+			t.Errorf("cookie_rotation missing %q: %s", k, rr.Body)
+		}
+	}
+	if st.CR["psidts_present"] != true || st.CR["auth_state"] != "anonymous" {
+		t.Errorf("block = %v", st.CR)
+	}
+	if strings.Contains(rr.Body.String(), "SECRET") {
+		t.Errorf("leak: %s", rr.Body)
+	}
+}

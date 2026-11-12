@@ -50,15 +50,19 @@ func (c *Client) CookieRefreshLoop(ctx context.Context, interval time.Duration) 
 func (c *Client) RotateCookie(ctx context.Context) {
 	cookie, sapisid := c.loadCookie()
 	if cookie == "" || cookieValue(cookie, cookiePSIDTS) == "" {
+		c.recordRotation(rotSkipped, nil)
 		return
 	}
 	newTS, err := c.fetchRotatedTS(ctx, cookie)
 	if err != nil {
 		c.log.Warn("cookie rotation request failed", "err", err)
+		c.recordRotation(rotError, err)
 		return
 	}
 	if newTS == "" {
-		return // Google issued no new token this cycle
+		// Google issued no new token this cycle: the session is not being renewed.
+		c.recordRotation(rotNoNewToken, nil)
+		return
 	}
 	newCookie := replaceCookieValue(cookie, cookiePSIDTS, newTS)
 
@@ -79,10 +83,106 @@ func (c *Client) RotateCookie(ctx context.Context) {
 		}
 	}
 	c.cookieMu.Unlock()
+	c.recordRotation(rotRenewed, nil)
 	c.log.Info("rotated __Secure-1PSIDTS cookie")
 	// Keep the XSRF "at" token in sync with the rotated session. The model list is
 	// refreshed by the caller (startup, then the periodic refresh loop).
 	c.refreshAtToken(ctx)
+}
+
+// Rotation outcomes.
+const (
+	rotRenewed    = "renewed"
+	rotNoNewToken = "no_new_token"
+	rotError      = "error"
+	rotSkipped    = "skipped_no_psidts"
+)
+
+// rotateWarnEvery rate-limits the "not renewed" WARN (a var so tests can shrink it).
+var rotateWarnEvery = 10 * time.Minute
+
+// rotState tracks rotation attempts (guarded by cookieMu).
+type rotState struct {
+	lastAttempt time.Time
+	lastResult  string
+	attempts    int64
+	renewed     int64
+	notRenewed  int64 // attempts that did not renew the token (total)
+	streak      int64 // consecutive attempts without renewal
+	lastWarn    time.Time
+}
+
+// RotationStatus is a secret-free snapshot of the cookie rotation state.
+type RotationStatus struct {
+	LastAttempt        time.Time
+	LastSuccess        time.Time
+	LastResult         string // renewed | no_new_token | error | skipped_no_psidts | "" (no attempt yet)
+	Attempts           int64
+	Renewed            int64
+	NotRenewed         int64
+	ConsecutiveFailure int64
+	TokenAge           time.Duration // age of the current token; 0 when unknown
+	TokenAgeSource     string        // rotation | file_mtime | unknown
+	PSIDTSPresent      bool
+}
+
+// recordRotation updates the rotation state and, when the token was not renewed,
+// emits a WARN (first occurrence, then at most once per rotateWarnEvery) that
+// carries the token age and the consecutive-failure count.
+func (c *Client) recordRotation(result string, err error) {
+	c.cookieMu.Lock()
+	r := &c.rot
+	r.lastAttempt, r.lastResult = time.Now(), result
+	r.attempts++
+	if result == rotRenewed {
+		r.renewed++
+		r.streak = 0
+		c.cookieMu.Unlock()
+		return
+	}
+	r.notRenewed++
+	r.streak++
+	streak := r.streak
+	warn := r.lastWarn.IsZero() || time.Since(r.lastWarn) >= rotateWarnEvery
+	if warn {
+		r.lastWarn = time.Now()
+	}
+	c.cookieMu.Unlock()
+	if !warn {
+		return
+	}
+	age, src := c.tokenAge()
+	c.log.Warn("cookie rotation did not renew the session token",
+		"result", result, "token_age_sec", int64(age.Seconds()), "token_age_source", src,
+		"consecutive_failures", streak)
+}
+
+// tokenAge returns the age of the current __Secure-1PSIDTS: since the last
+// successful rotation, else since the cookie file's mtime, else unknown.
+func (c *Client) tokenAge() (time.Duration, string) {
+	c.cookieMu.Lock()
+	defer c.cookieMu.Unlock()
+	switch {
+	case !c.rotatedAt.IsZero():
+		return time.Since(c.rotatedAt), "rotation"
+	case !c.cookieMtime.IsZero():
+		return time.Since(c.cookieMtime), "file_mtime"
+	}
+	return 0, "unknown"
+}
+
+// RotationStatus returns a snapshot of the rotation state. It exposes no secret.
+func (c *Client) RotationStatus() RotationStatus {
+	cookie, _ := c.loadCookie()
+	age, src := c.tokenAge()
+	c.cookieMu.Lock()
+	defer c.cookieMu.Unlock()
+	return RotationStatus{
+		LastAttempt: c.rot.lastAttempt, LastSuccess: c.rotatedAt, LastResult: c.rot.lastResult,
+		Attempts: c.rot.attempts, Renewed: c.rot.renewed, NotRenewed: c.rot.notRenewed,
+		ConsecutiveFailure: c.rot.streak, TokenAge: age, TokenAgeSource: src,
+		PSIDTSPresent: cookieValue(cookie, cookiePSIDTS) != "",
+	}
 }
 
 // renameFile is os.Rename; a variable so tests can simulate a failing rename.
