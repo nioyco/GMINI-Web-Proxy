@@ -3,12 +3,15 @@ package gemini
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -468,5 +471,64 @@ func TestNextReqIDUniqueConcurrent(t *testing.T) {
 			t.Fatalf("duplicate reqid %d", id)
 		}
 		seen[id] = true
+	}
+}
+
+func TestReadLimited(t *testing.T) {
+	if b, err := readLimited(strings.NewReader("abcd"), 4); err != nil || string(b) != "abcd" {
+		t.Errorf("at limit: %q %v", b, err)
+	}
+	if _, err := readLimited(strings.NewReader("abcde"), 4); !errors.Is(err, ErrResponseTooLarge) {
+		t.Errorf("over limit: err = %v", err)
+	}
+}
+
+type rtFunc func(*http.Request) (*http.Response, error)
+
+func (f rtFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// Simulated upstream (fake RoundTripper, no network): an oversized body must
+// fail fast with ErrResponseTooLarge and not be retried.
+func TestGenerateRejectsOversizedResponse(t *testing.T) {
+	c, err := New(Config{RetryAttempts: 3, RetryDelaySec: 1, GeminiBL: "test_bl"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	c.http.Transport = rtFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(&endlessReader{n: maxResponseBytes + 10})}, nil
+	})
+	_, err = c.Generate(context.Background(), GenParams{Prompt: "hi"})
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("err = %v, want ErrResponseTooLarge", err)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("calls = %d, want 1 (no retry)", n)
+	}
+}
+
+type endlessReader struct{ n int64 }
+
+func (r *endlessReader) Read(p []byte) (int, error) {
+	if r.n <= 0 {
+		return 0, io.EOF
+	}
+	k := int64(len(p))
+	if k > r.n {
+		k = r.n
+	}
+	for i := int64(0); i < k; i++ {
+		p[i] = 'x'
+	}
+	r.n -= k
+	return int(k), nil
+}
+
+func TestTransportPoolSettings(t *testing.T) {
+	c, _ := New(Config{}, nil)
+	tr := c.http.Transport.(*http.Transport)
+	if tr.MaxIdleConnsPerHost != 16 || tr.IdleConnTimeout != 90*time.Second {
+		t.Errorf("transport = %d / %v", tr.MaxIdleConnsPerHost, tr.IdleConnTimeout)
 	}
 }

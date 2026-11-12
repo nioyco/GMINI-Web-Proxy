@@ -64,6 +64,25 @@ var buildLabelRe = regexp.MustCompile(`"cfb2h":"(boq_[^"]+)"`)
 // its value is required as the "at" form field on authenticated StreamGenerate calls.
 var snlm0eRe = regexp.MustCompile(`"SNlM0e":"([^"]+)"`)
 
+// maxResponseBytes caps a blocking Generate response body (D04).
+const maxResponseBytes = 32 << 20 // 32 MiB
+
+// ErrResponseTooLarge is returned when the upstream response exceeds maxResponseBytes.
+var ErrResponseTooLarge = errors.New("gemini response exceeds the 32 MiB size limit")
+
+// readLimited reads at most max bytes, returning ErrResponseTooLarge when the
+// body is longer.
+func readLimited(r io.Reader, max int64) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, ErrResponseTooLarge
+	}
+	return b, nil
+}
+
 // buildLabelTTL is how long an auto-resolved build label is reused before refresh.
 const buildLabelTTL = 30 * time.Minute
 
@@ -113,7 +132,9 @@ func New(cfg Config, logger *slog.Logger) (*Client, error) {
 		logger = slog.Default()
 	}
 	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		Proxy:               http.ProxyFromEnvironment,
+		MaxIdleConnsPerHost: 16,
+		IdleConnTimeout:     90 * time.Second,
 	}
 	if cfg.Proxy != "" {
 		pu, err := url.Parse(cfg.Proxy)
@@ -426,8 +447,11 @@ func (c *Client) Generate(ctx context.Context, p GenParams) (string, error) {
 		}
 		resp, err := c.http.Do(req)
 		if err == nil {
-			raw, readErr := io.ReadAll(resp.Body)
+			raw, readErr := readLimited(resp.Body, maxResponseBytes)
 			resp.Body.Close()
+			if errors.Is(readErr, ErrResponseTooLarge) {
+				return "", readErr // deterministic: retrying would not help
+			}
 			switch {
 			case readErr != nil:
 				err = readErr
