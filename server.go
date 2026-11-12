@@ -41,6 +41,19 @@ type Server struct {
 	stats   statsCounters
 }
 
+// remoteImagesMsg is the 400 message for http(s) image URLs while they are disabled.
+const remoteImagesMsg = "remote image URLs are disabled; send the image as a data: URI (or set GEMINI_ALLOW_REMOTE_IMAGES=1 on the proxy)"
+
+// hasRemoteImage reports whether any image must be fetched from a remote URL.
+func hasRemoteImage(images []gemini.InputImage) bool {
+	for _, im := range images {
+		if len(im.Data) == 0 && im.URL != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // rlog returns the logger tagged with the request id carried by ctx.
 func (s *Server) rlog(ctx context.Context) *slog.Logger {
 	if ri := reqFrom(ctx); ri != nil {
@@ -174,6 +187,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	prompt, images, toolsActive := req.Prompt()
 	if len(images) > 0 && !s.client.ImagesSupported() {
 		sendError(w, http.StatusBadRequest, apiconv.ImagesNeedAuthMsg)
+		return
+	}
+	if hasRemoteImage(images) && !s.cfg.Gemini.AllowRemoteImages {
+		sendError(w, http.StatusBadRequest, remoteImagesMsg)
 		return
 	}
 	if strings.TrimSpace(prompt) == "" && len(images) == 0 {
@@ -418,6 +435,10 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		sendError(w, http.StatusBadRequest, apiconv.ImagesNeedAuthMsg)
 		return
 	}
+	if hasRemoteImage(images) && !s.cfg.Gemini.AllowRemoteImages {
+		sendError(w, http.StatusBadRequest, remoteImagesMsg)
+		return
+	}
 	if strings.TrimSpace(prompt) == "" && len(images) == 0 {
 		sendError(w, http.StatusBadRequest, "empty input")
 		return
@@ -522,6 +543,10 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 	prompt, images, hasTools := req.Prompt()
 	if len(images) > 0 && !s.client.ImagesSupported() {
 		sendError(w, http.StatusBadRequest, apiconv.ImagesNeedAuthMsg)
+		return
+	}
+	if hasRemoteImage(images) && !s.cfg.Gemini.AllowRemoteImages {
+		sendError(w, http.StatusBadRequest, remoteImagesMsg)
 		return
 	}
 	if strings.TrimSpace(prompt) == "" && len(images) == 0 {
@@ -654,6 +679,10 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	prompt, images, toolsActive := req.Prompt()
 	if len(images) > 0 && !s.client.ImagesSupported() {
 		sendAnthropicError(w, http.StatusBadRequest, apiconv.ImagesNeedAuthMsg)
+		return
+	}
+	if hasRemoteImage(images) && !s.cfg.Gemini.AllowRemoteImages {
+		sendAnthropicError(w, http.StatusBadRequest, remoteImagesMsg)
 		return
 	}
 	if strings.TrimSpace(prompt) == "" && len(images) == 0 {

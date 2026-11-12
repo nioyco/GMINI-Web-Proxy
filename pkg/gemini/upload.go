@@ -7,8 +7,12 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // uploadEndpoint is Google's push (Scotty) endpoint for image attachments. It
@@ -69,7 +73,15 @@ func (c *Client) uploadImages(ctx context.Context, imgs []InputImage) []uploaded
 	return out
 }
 
-// imageBytes returns the image's bytes, fetching a remote URL when needed.
+// ErrRemoteImagesDisabled is returned for a remote image_url when
+// GEMINI_ALLOW_REMOTE_IMAGES is not enabled.
+var ErrRemoteImagesDisabled = errors.New("remote image URLs are disabled (set GEMINI_ALLOW_REMOTE_IMAGES=1 to allow; data: URIs are always accepted)")
+
+// maxRedirects bounds redirect chains when fetching a remote image.
+const maxRedirects = 3
+
+// imageBytes returns the image's bytes. Inline data is used as is; a remote URL is
+// fetched only when remote images are explicitly allowed.
 func (c *Client) imageBytes(ctx context.Context, img InputImage) ([]byte, error) {
 	if len(img.Data) > 0 {
 		return img.Data, nil
@@ -77,12 +89,87 @@ func (c *Client) imageBytes(ctx context.Context, img InputImage) ([]byte, error)
 	if img.URL == "" {
 		return nil, errors.New("image has neither inline data nor URL")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, img.URL, nil)
+	if !c.cfg.AllowRemoteImages {
+		return nil, ErrRemoteImagesDisabled
+	}
+	return c.fetchRemoteImage(ctx, img.URL)
+}
+
+// destAllowed is the default destination policy for remote image fetches: only
+// public unicast addresses.
+func destAllowed(ip net.IP, _ string) bool {
+	return isPublicIP(ip)
+}
+
+var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
+// isPublicIP rejects loopback, private (RFC 1918 / ULA), link-local, CGNAT,
+// unspecified and multicast addresses (SSRF targets such as 127.0.0.1, 10.x,
+// 169.254.169.254).
+func isPublicIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		if ip4[0] == 0 || cgnat.Contains(ip4) {
+			return false
+		}
+	}
+	return !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() ||
+		ip.IsMulticast() || ip.IsUnspecified())
+}
+
+// newImageHTTPClient builds the client used for remote image fetches. Destination
+// filtering is done in the dialer's Control hook, i.e. on the *resolved* IP of
+// every connection attempt — so it also covers redirects (each hop dials anew),
+// literal IPs and DNS rebinding. It deliberately ignores any configured proxy:
+// dialing a proxy would make the check meaningless.
+func (c *Client) newImageHTTPClient() *http.Client {
+	dialer := &net.Dialer{
+		Timeout: 10 * time.Second,
+		Control: func(_, address string, _ syscall.RawConn) error {
+			host, port, err := net.SplitHostPort(address)
+			if err != nil {
+				return err
+			}
+			if !c.imageDest(net.ParseIP(host), port) {
+				return fmt.Errorf("remote image destination %s is not allowed (loopback/private/link-local)", host)
+			}
+			return nil
+		},
+	}
+	return &http.Client{
+		Timeout: time.Duration(c.cfg.RequestTimeout) * time.Second,
+		Transport: &http.Transport{
+			Proxy:       nil,
+			DialContext: dialer.DialContext,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) > maxRedirects {
+				return fmt.Errorf("stopped after %d redirects", maxRedirects)
+			}
+			if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+				return fmt.Errorf("redirect to unsupported scheme %q", req.URL.Scheme)
+			}
+			return nil // the destination itself is vetted by the dialer
+		},
+	}
+}
+
+// fetchRemoteImage downloads a remote image with destination filtering, a redirect
+// limit and a hard size cap (an oversized image is an error, not a truncation).
+func (c *Client) fetchRemoteImage(ctx context.Context, rawURL string) ([]byte, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, errors.New("invalid remote image URL")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", userAgent)
-	resp, err := c.http.Do(req)
+	resp, err := c.imageHTTP.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +177,14 @@ func (c *Client) imageBytes(ctx context.Context, img InputImage) ([]byte, error)
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch image: http %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxImageBytes))
+	if resp.ContentLength > maxImageBytes {
+		return nil, fmt.Errorf("remote image exceeds %d bytes", maxImageBytes)
+	}
+	b, err := readLimited(resp.Body, maxImageBytes)
+	if errors.Is(err, ErrResponseTooLarge) {
+		return nil, fmt.Errorf("remote image exceeds %d bytes", maxImageBytes)
+	}
+	return b, err
 }
 
 // uploadImage POSTs the image to the push endpoint (multipart, no auth) and

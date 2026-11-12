@@ -37,6 +37,9 @@ type Config struct {
 	CookieFile     string // path to a cookie file (raw "k=v; …" string)
 	RetryAttempts  int    // blocking-generate retry attempts
 	RetryDelaySec  int    // delay between retries, seconds
+	// AllowRemoteImages permits fetching http(s) image URLs (default false). Fetches
+	// refuse loopback/private/link-local destinations, limit redirects and size.
+	AllowRemoteImages bool
 }
 
 // applyDefaults fills any field left at its zero value with the corresponding

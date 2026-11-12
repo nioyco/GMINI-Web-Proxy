@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -92,6 +93,11 @@ type Client struct {
 	http *http.Client
 	log  *slog.Logger
 
+	// imageHTTP fetches remote image_url images through a destination-filtering
+	// dialer; imageDest is that filter (overridable in tests).
+	imageHTTP *http.Client
+	imageDest func(ip net.IP, port string) bool
+
 	// cookie file cache, keyed by file mtime to avoid re-reading every request.
 	cookieMu     sync.Mutex
 	cookieStr    string
@@ -144,16 +150,19 @@ func New(cfg Config, logger *slog.Logger) (*Client, error) {
 		}
 		transport.Proxy = http.ProxyURL(pu)
 	}
-	return &Client{
+	c := &Client{
 		cfg: cfg,
 		http: &http.Client{
 			Timeout:   time.Duration(cfg.RequestTimeout) * time.Second,
 			Transport: transport,
 		},
-		log:    logger,
-		bl:     cfg.GeminiBL,
-		blAuto: cfg.GeminiBLAuto,
-	}, nil
+		log:       logger,
+		bl:        cfg.GeminiBL,
+		blAuto:    cfg.GeminiBLAuto,
+		imageDest: destAllowed,
+	}
+	c.imageHTTP = c.newImageHTTPClient()
+	return c, nil
 }
 
 // GenParams carries everything needed for a single generation request.

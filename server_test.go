@@ -313,3 +313,25 @@ func newReq(method, target string, body io.Reader) *http.Request {
 	r.Host = "127.0.0.1:8081"
 	return r
 }
+
+func TestRemoteImageURLRejectedByDefault(t *testing.T) {
+	cfg := testConfig()
+	s := newTestServer(t, cfg)
+	body := `{"model":"gemini-3.5-flash","messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"http://169.254.169.254/x.png"}}]}]}`
+	rr := httptest.NewRecorder()
+	s.handler().ServeHTTP(rr, newReq(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+	// Without an authenticated session the images check answers first; either way it
+	// must be a 400 and never reach the network.
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHasRemoteImage(t *testing.T) {
+	if hasRemoteImage([]gemini.InputImage{{Data: []byte("x")}}) {
+		t.Error("data image is not remote")
+	}
+	if !hasRemoteImage([]gemini.InputImage{{Data: []byte("x")}, {URL: "https://a.example/i.png"}}) {
+		t.Error("URL image is remote")
+	}
+}

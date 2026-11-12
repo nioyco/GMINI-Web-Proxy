@@ -77,6 +77,8 @@ func loadConfig(envFile string) *Config {
 			Cookie:         getEnv("GEMINI_COOKIE", ""),
 			CookieFile:     getEnv("GEMINI_COOKIE_FILE", ""),
 			Proxy:          getEnv("GEMINI_PROXY", ""),
+
+			AllowRemoteImages: getEnvBool("GEMINI_ALLOW_REMOTE_IMAGES", false),
 		},
 	}
 
