@@ -98,6 +98,7 @@ type Client struct {
 	cookieSAPI   string
 	cookieMtime  time.Time
 	cookieLoaded bool
+	rotatedAt    time.Time // last successful __Secure-1PSIDTS rotation (guarded by cookieMu)
 
 	// Build label, optionally auto-resolved from the Gemini page.
 	blMu         sync.Mutex
@@ -372,6 +373,28 @@ func (c *Client) setAt(token string) {
 	c.atMu.Lock()
 	c.atToken = token
 	c.atMu.Unlock()
+}
+
+// Authenticated reports whether the cookie established a signed-in session (an
+// XSRF "at" token is held). It exposes no secret.
+func (c *Client) Authenticated() bool {
+	return c.currentAt() != ""
+}
+
+// LastCookieRotation returns the time of the last successful cookie rotation, or
+// the zero time if none happened in this process.
+func (c *Client) LastCookieRotation() time.Time {
+	c.cookieMu.Lock()
+	defer c.cookieMu.Unlock()
+	return c.rotatedAt
+}
+
+// DefaultModelName returns the name of the model used when a request names none.
+func (c *Client) DefaultModelName() string {
+	if m := c.defaultModel(); m != nil {
+		return m.Name
+	}
+	return c.cfg.DefaultModel
 }
 
 // ImagesSupported reports whether image attachments can be used. They require an

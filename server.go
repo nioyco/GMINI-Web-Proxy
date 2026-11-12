@@ -69,6 +69,7 @@ func newServer(cfg *Config, client *gemini.Client, logger *slog.Logger) *Server 
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleHealth)
+	mux.Handle("GET /_status", s.withAuth(s.handleStatus))
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /v1beta/models", s.handleModelsGoogle)
 	mux.Handle("POST /v1/chat/completions", s.withAuth(s.handleChat))

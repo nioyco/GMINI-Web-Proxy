@@ -30,6 +30,9 @@ type Config struct {
 	// sent while a stream+tools request waits for the blocking generation (0 = off,
 	// which restores the legacy "single chunk after generation" behaviour).
 	SSEKeepaliveSec int
+	// ShutdownGraceSec is how long in-flight requests may finish on SIGINT/SIGTERM
+	// before being aborted (GEMINI_SHUTDOWN_GRACE_SEC, default 30).
+	ShutdownGraceSec int
 	// CORSOrigins lists origins allowed to make cross-origin browser calls
 	// (GEMINI_CORS_ORIGINS, comma-separated). Empty = no CORS headers at all.
 	CORSOrigins []string
@@ -105,6 +108,18 @@ func normalizeListen(s string) string {
 		return "127.0.0.1" + s
 	}
 	return s
+}
+
+// defaultShutdownGraceSec is the default graceful-shutdown window.
+const defaultShutdownGraceSec = 30
+
+// shutdownGrace maps a negative setting back to the default; 0 means "abort
+// immediately".
+func shutdownGrace(n int) int {
+	if n < 0 {
+		return defaultShutdownGraceSec
+	}
+	return n
 }
 
 // validateStartup refuses an unauthenticated configuration unless explicitly

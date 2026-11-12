@@ -72,6 +72,7 @@ func (c *Client) RotateCookie(ctx context.Context) {
 
 	c.cookieMu.Lock()
 	c.cookieStr, c.cookieSAPI, c.cookieLoaded = newCookie, sapisid, true
+	c.rotatedAt = time.Now()
 	if c.cfg.CookieFile != "" {
 		if info, err := os.Stat(c.cfg.CookieFile); err == nil {
 			c.cookieMtime = info.ModTime()
