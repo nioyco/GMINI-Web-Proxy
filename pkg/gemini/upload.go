@@ -54,6 +54,9 @@ func (c *Client) uploadImages(ctx context.Context, imgs []InputImage) []uploaded
 	}
 	out := make([]uploadedImage, 0, len(imgs))
 	for i := range imgs {
+		if ctx.Err() != nil {
+			break // caller gone: stop fetching/uploading
+		}
 		data, err := c.imageBytes(ctx, imgs[i])
 		if err != nil {
 			c.log.Warn("skipping image: cannot obtain bytes", "index", i, "err", err)

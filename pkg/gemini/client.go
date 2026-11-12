@@ -474,6 +474,10 @@ func (c *Client) Generate(ctx context.Context, p GenParams) (string, error) {
 
 	met := metricsFrom(ctx)
 	met.request(len(p.Prompt), len(body))
+	start := time.Now()
+	if ctx.Err() != nil { // cancelled while uploading images: do not call Gemini
+		return "", c.clientCancelled(ctx, met, start)
+	}
 	var lastErr error
 	for attempt := 0; attempt < c.cfg.RetryAttempts; attempt++ {
 		req, err := c.newRequest(ctx, body, p.Model, reqUUID)
@@ -507,6 +511,10 @@ func (c *Client) Generate(ctx context.Context, p GenParams) (string, error) {
 			met.upstream(t0, 0) // transport error: time spent before failing
 		}
 		lastErr = err
+		if ctx.Err() != nil {
+			// The caller is gone: never retry, never sleep RetryDelaySec.
+			return "", c.clientCancelled(ctx, met, start)
+		}
 		if attempt < c.cfg.RetryAttempts-1 {
 			c.log.Warn("retrying gemini request",
 				"attempt", attempt+1, "max", c.cfg.RetryAttempts, "err", err)
@@ -514,7 +522,7 @@ func (c *Client) Generate(ctx context.Context, p GenParams) (string, error) {
 			w0 := time.Now()
 			select {
 			case <-ctx.Done():
-				return "", ctx.Err()
+				return "", c.clientCancelled(ctx, met, start)
 			case <-time.After(wait):
 			}
 			met.retryWait(time.Since(w0))
@@ -525,6 +533,21 @@ func (c *Client) Generate(ctx context.Context, p GenParams) (string, error) {
 		return "", ErrEmptyResponse
 	}
 	return "", fmt.Errorf("gemini request failed: %w", lastErr)
+}
+
+// clientCancelled logs one metadata-only "client_cancelled" WARN line for a
+// generation abandoned because ctx ended (client disconnect, deadline or shutdown
+// abort) and returns the context error.
+func (c *Client) clientCancelled(ctx context.Context, met *CallMetrics, start time.Time) error {
+	attrs := []any{"elapsed_ms", time.Since(start).Milliseconds(), "cause", context.Cause(ctx)}
+	if met != nil {
+		attrs = append(attrs,
+			"upstream_attempts", met.Attempts.Load(), "upstream_retries", met.Retries.Load(),
+			"first_byte_ms", met.FirstByteMS.Load(), "upstream_ms", met.UpstreamMS.Load(),
+			"upstream_req_bytes", met.ReqBytes.Load(), "upstream_resp_bytes", met.RespBytes.Load())
+	}
+	c.log.Warn("client_cancelled", attrs...)
+	return ctx.Err()
 }
 
 // GenerateStream sends a prompt and invokes emit for each incremental text delta.
@@ -545,8 +568,14 @@ func (c *Client) GenerateStream(ctx context.Context, p GenParams, emit func(delt
 	t0 := time.Now()
 	respBytes := 0
 	defer func() { met.upstream(t0, respBytes) }()
+	if ctx.Err() != nil {
+		return c.clientCancelled(ctx, met, t0)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return c.clientCancelled(ctx, met, t0)
+		}
 		return fmt.Errorf("gemini request failed: %w", err)
 	}
 	defer resp.Body.Close()
@@ -571,6 +600,9 @@ func (c *Client) GenerateStream(ctx context.Context, p GenParams, emit func(delt
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
 				return nil
+			}
+			if ctx.Err() != nil {
+				return c.clientCancelled(ctx, met, t0)
 			}
 			return readErr
 		}
