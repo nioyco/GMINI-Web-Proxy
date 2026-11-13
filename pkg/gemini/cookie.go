@@ -125,7 +125,7 @@ func (c *Client) AuthRecoveryLoop(ctx context.Context, onRecovered func()) {
 // cookie is rewritten in place (so it survives restarts); an inline cookie is
 // rotated in memory only (it survives the process run but not a restart).
 func (c *Client) RotateCookie(ctx context.Context) {
-	cookie, sapisid := c.loadCookie()
+	cookie, _ := c.loadCookie()
 	if cookie == "" || cookieValue(cookie, cookiePSIDTS) == "" {
 		c.recordRotation(rotSkipped, nil, rotateInfo{})
 		return
@@ -151,30 +151,45 @@ func (c *Client) RotateCookie(ctx context.Context) {
 		}
 		return
 	}
-	newCookie := replaceCookieValue(cookie, cookiePSIDTS, newTS)
-
-	// Persist to disk only for a file-backed cookie; an inline cookie has no file.
-	if c.cfg.Cookie == "" && c.cfg.CookieFile != "" {
-		if err := writeFileAtomic(c.cfg.CookieFile, []byte(newCookie), 0o600); err != nil {
+	// The response may already have been applied by the Set-Cookie capture in the
+	// transport; start from the current jar so nothing is overwritten.
+	cur, _ := c.loadCookie()
+	if cur == "" {
+		cur = cookie
+	}
+	if newCookie := replaceCookieValue(cur, cookiePSIDTS, newTS); newCookie != cur {
+		if err := c.storeCookie(newCookie); err != nil {
 			c.log.Warn("cookie rotation persist failed", "err", err)
 			return
 		}
 	}
-
 	c.cookieMu.Lock()
-	c.cookieStr, c.cookieSAPI, c.cookieLoaded = newCookie, sapisid, true
 	c.rotatedAt = time.Now()
-	if c.cfg.CookieFile != "" {
-		if info, err := os.Stat(c.cfg.CookieFile); err == nil {
-			c.cookieMtime = info.ModTime()
-		}
-	}
 	c.cookieMu.Unlock()
 	c.recordRotation(rotRenewed, nil, info)
 	c.log.Info("rotated __Secure-1PSIDTS cookie")
 	// Keep the XSRF "at" token in sync with the rotated session. The model list is
 	// refreshed by the caller (startup, then the periodic refresh loop).
 	c.refreshAtToken(ctx)
+}
+
+// storeCookie makes newCookie the current cookie jar: a file-backed cookie is
+// rewritten atomically (0600, DEC-33), an inline cookie is kept in memory only.
+func (c *Client) storeCookie(newCookie string) error {
+	if c.cfg.Cookie == "" && c.cfg.CookieFile != "" {
+		if err := writeFileAtomic(c.cfg.CookieFile, []byte(newCookie), 0o600); err != nil {
+			return err
+		}
+	}
+	c.cookieMu.Lock()
+	c.cookieStr, c.cookieSAPI, c.cookieLoaded = newCookie, cookieValue(newCookie, cookieSAPISID), true
+	if c.cfg.CookieFile != "" {
+		if info, err := os.Stat(c.cfg.CookieFile); err == nil {
+			c.cookieMtime = info.ModTime()
+		}
+	}
+	c.cookieMu.Unlock()
+	return nil
 }
 
 // Rotation outcomes.

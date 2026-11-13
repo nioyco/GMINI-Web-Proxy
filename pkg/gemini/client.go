@@ -107,6 +107,7 @@ type Client struct {
 	rotatedAt    time.Time // last successful __Secure-1PSIDTS rotation (guarded by cookieMu)
 	rot          rotState  // rotation attempt tracking (guarded by cookieMu)
 	block        blockState
+	captureMu    sync.Mutex // serialises Set-Cookie capture (read-modify-write of the jar)
 
 	// Cached /app page (shared by the build-label scrape and the auth check so a
 	// startup costs one Google call instead of two).
