@@ -89,3 +89,57 @@ func TestRotationTransportErrorAndSkipped(t *testing.T) {
 		t.Errorf("anon status = %+v", rs)
 	}
 }
+
+func TestRotationClassification(t *testing.T) {
+	type tc struct {
+		name   string
+		resp   func(r *http.Request) (*http.Response, error)
+		result string
+		status int
+		names  []string
+		redir  bool
+	}
+	h := func(kv ...string) http.Header {
+		hd := http.Header{}
+		for i := 0; i < len(kv); i += 2 {
+			hd.Add(kv[i], kv[i+1])
+		}
+		return hd
+	}
+	cases := []tc{
+		{"200 no cookie", func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Header: h(), Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+		}, rotNoNewToken, 200, nil, false},
+		{"200 other cookie only", func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Header: h("Set-Cookie", "NID=SECRETVAL; Path=/", "Set-Cookie", "AEC=SECRET2"), Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+		}, rotNoNewToken, 200, []string{"AEC", "NID"}, false},
+		{"500", func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 500, Header: h(), Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+		}, rotHTTPError, 500, nil, false},
+		{"redirected to other host", func(r *http.Request) (*http.Response, error) {
+			r2, _ := http.NewRequest("GET", "https://consent.google.com/x", nil)
+			return &http.Response{StatusCode: 200, Header: h(), Body: io.NopCloser(strings.NewReader("")), Request: r2}, nil
+		}, rotHTTPError, 200, nil, true},
+		{"429 blocked", func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 429, Header: h(), Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+		}, rotBlocked, 0, nil, false},
+		{"sorry redirect blocked", func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 302, Header: h("Location", "https://www.google.com/sorry/index?q=Z"), Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+		}, rotBlocked, 0, nil, false},
+		{"transport error", func(*http.Request) (*http.Response, error) { return nil, errors.New("boom") }, rotError, 0, nil, false},
+	}
+	for _, c := range cases {
+		cl, logs := rotClient(t, rtFunc(c.resp))
+		cl.RotateCookie(context.Background())
+		rs := cl.RotationStatus()
+		if rs.LastResult != c.result || rs.LastHTTPStatus != c.status || rs.LastRedirected != c.redir || strings.Join(rs.LastSetCookieNames, ",") != strings.Join(c.names, ",") {
+			t.Errorf("%s: %+v", c.name, rs)
+		}
+		if strings.Contains(logs.String(), "SECRETVAL") || strings.Contains(logs.String(), "SECRET2") {
+			t.Errorf("%s: value leaked in logs: %s", c.name, logs)
+		}
+		if c.result == rotNoNewToken && len(c.names) > 0 && !strings.Contains(logs.String(), "set_cookie_names=AEC,NID") {
+			t.Errorf("%s: names missing in log: %s", c.name, logs)
+		}
+	}
+}

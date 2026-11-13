@@ -2,10 +2,12 @@ package gemini
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -125,18 +127,28 @@ func (c *Client) AuthRecoveryLoop(ctx context.Context, onRecovered func()) {
 func (c *Client) RotateCookie(ctx context.Context) {
 	cookie, sapisid := c.loadCookie()
 	if cookie == "" || cookieValue(cookie, cookiePSIDTS) == "" {
-		c.recordRotation(rotSkipped, nil)
+		c.recordRotation(rotSkipped, nil, rotateInfo{})
 		return
 	}
-	newTS, err := c.fetchRotatedTS(ctx, cookie)
+	newTS, info, err := c.fetchRotatedTS(ctx, cookie)
 	if err != nil {
-		c.log.Warn("cookie rotation request failed", "err", err)
-		c.recordRotation(rotError, err)
+		if errors.Is(err, ErrGoogleBlocked) {
+			c.recordRotation(rotBlocked, err, info)
+			return
+		}
+		c.log.Warn("cookie rotation request failed", "err", cleanErr(err))
+		c.recordRotation(rotError, err, info)
 		return
 	}
 	if newTS == "" {
 		// Google issued no new token this cycle: the session is not being renewed.
-		c.recordRotation(rotNoNewToken, nil)
+		// A non-2xx status or a redirect is an HTTP-level failure, a plain 200
+		// without the cookie is "no_new_token".
+		if info.Status < 200 || info.Status > 299 || info.Redirected {
+			c.recordRotation(rotHTTPError, nil, info)
+		} else {
+			c.recordRotation(rotNoNewToken, nil, info)
+		}
 		return
 	}
 	newCookie := replaceCookieValue(cookie, cookiePSIDTS, newTS)
@@ -158,7 +170,7 @@ func (c *Client) RotateCookie(ctx context.Context) {
 		}
 	}
 	c.cookieMu.Unlock()
-	c.recordRotation(rotRenewed, nil)
+	c.recordRotation(rotRenewed, nil, info)
 	c.log.Info("rotated __Secure-1PSIDTS cookie")
 	// Keep the XSRF "at" token in sync with the rotated session. The model list is
 	// refreshed by the caller (startup, then the periodic refresh loop).
@@ -170,6 +182,8 @@ const (
 	rotRenewed    = "renewed"
 	rotNoNewToken = "no_new_token"
 	rotError      = "error"
+	rotBlocked    = "blocked"    // Google anti-bot (/sorry/ redirect or HTTP 429)
+	rotHTTPError  = "http_error" // non-2xx status or redirect, no token
 	rotSkipped    = "skipped_no_psidts"
 )
 
@@ -185,6 +199,14 @@ type rotState struct {
 	notRenewed  int64 // attempts that did not renew the token (total)
 	streak      int64 // consecutive attempts without renewal
 	lastWarn    time.Time
+	lastInfo    rotateInfo // HTTP-level details of the last attempt (no values)
+}
+
+// rotateInfo describes the RotateCookies exchange without any cookie value.
+type rotateInfo struct {
+	Status      int      // HTTP status of the final response (0: no response)
+	CookieNames []string // names of the Set-Cookie headers received, sorted
+	Redirected  bool     // the final response did not come from the endpoint itself
 }
 
 // RotationStatus is a secret-free snapshot of the cookie rotation state.
@@ -199,15 +221,18 @@ type RotationStatus struct {
 	TokenAge           time.Duration // age of the current token; 0 when unknown
 	TokenAgeSource     string        // rotation | file_mtime | unknown
 	PSIDTSPresent      bool
+	LastHTTPStatus     int      // HTTP status of the last RotateCookies call (0: none/transport error)
+	LastSetCookieNames []string // names (never values) of the Set-Cookie headers of the last call
+	LastRedirected     bool
 }
 
 // recordRotation updates the rotation state and, when the token was not renewed,
 // emits a WARN (first occurrence, then at most once per rotateWarnEvery) that
 // carries the token age and the consecutive-failure count.
-func (c *Client) recordRotation(result string, err error) {
+func (c *Client) recordRotation(result string, err error, info rotateInfo) {
 	c.cookieMu.Lock()
 	r := &c.rot
-	r.lastAttempt, r.lastResult = time.Now(), result
+	r.lastAttempt, r.lastResult, r.lastInfo = time.Now(), result, info
 	r.attempts++
 	if result == rotRenewed {
 		r.renewed++
@@ -228,7 +253,9 @@ func (c *Client) recordRotation(result string, err error) {
 	}
 	age, src := c.tokenAge()
 	c.log.Warn("cookie rotation did not renew the session token",
-		"result", result, "token_age_sec", int64(age.Seconds()), "token_age_source", src,
+		"result", result, "http_status", info.Status, "set_cookie_names", strings.Join(info.CookieNames, ","),
+		"redirected", info.Redirected,
+		"token_age_sec", int64(age.Seconds()), "token_age_source", src,
 		"consecutive_failures", streak)
 }
 
@@ -256,7 +283,9 @@ func (c *Client) RotationStatus() RotationStatus {
 		LastAttempt: c.rot.lastAttempt, LastSuccess: c.rotatedAt, LastResult: c.rot.lastResult,
 		Attempts: c.rot.attempts, Renewed: c.rot.renewed, NotRenewed: c.rot.notRenewed,
 		ConsecutiveFailure: c.rot.streak, TokenAge: age, TokenAgeSource: src,
-		PSIDTSPresent: cookieValue(cookie, cookiePSIDTS) != "",
+		PSIDTSPresent:  cookieValue(cookie, cookiePSIDTS) != "",
+		LastHTTPStatus: c.rot.lastInfo.Status, LastSetCookieNames: append([]string(nil), c.rot.lastInfo.CookieNames...),
+		LastRedirected: c.rot.lastInfo.Redirected,
 	}
 }
 
@@ -300,11 +329,13 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 }
 
 // fetchRotatedTS POSTs to RotateCookies and returns the fresh __Secure-1PSIDTS
-// value from the response Set-Cookie header (empty if none was issued).
-func (c *Client) fetchRotatedTS(ctx context.Context, cookie string) (string, error) {
+// value from the response Set-Cookie header (empty if none was issued) together
+// with the HTTP-level details of the exchange (status, Set-Cookie NAMES, redirect).
+func (c *Client) fetchRotatedTS(ctx context.Context, cookie string) (string, rotateInfo, error) {
+	var info rotateInfo
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rotateEndpoint, strings.NewReader(rotatePayload))
 	if err != nil {
-		return "", err
+		return "", info, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", userAgent)
@@ -312,17 +343,38 @@ func (c *Client) fetchRotatedTS(ctx context.Context, cookie string) (string, err
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", err
+		return "", info, cleanErr(err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 
+	info.Status = resp.StatusCode
+	if resp.Request != nil && resp.Request.URL != nil {
+		info.Redirected = resp.Request.URL.Host != req.URL.Host || resp.Request.URL.Path != req.URL.Path
+	}
+	info.CookieNames = setCookieNames(resp)
 	for _, sc := range resp.Header["Set-Cookie"] {
 		if v, ok := setCookieValue(sc, cookiePSIDTS); ok {
-			return v, nil
+			return v, info, nil
 		}
 	}
-	return "", nil
+	return "", info, nil
+}
+
+// setCookieNames returns the sorted, de-duplicated names of the Set-Cookie
+// headers of resp. Values are never read.
+func setCookieNames(resp *http.Response) []string {
+	seen := map[string]bool{}
+	var names []string
+	for _, sc := range resp.Header["Set-Cookie"] {
+		name, _, _ := strings.Cut(strings.TrimSpace(sc), "=")
+		if name != "" && !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // cookieValue returns the value of the named cookie in a "k=v; k=v" cookie jar

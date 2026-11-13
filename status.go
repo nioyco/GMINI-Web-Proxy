@@ -47,17 +47,20 @@ func rfc3339Ptr(t time.Time) *string {
 
 // rotationStatus describes the cookie rotation state (no secrets).
 type rotationStatus struct {
-	AuthState            string `json:"auth_state"` // authenticated | anonymous
-	PSIDTSPresent        bool   `json:"psidts_present"`
-	LastAttemptAgeSec    *int64 `json:"last_attempt_age_sec"`
-	LastSuccessAgeSec    *int64 `json:"last_success_age_sec"`
-	LastResult           string `json:"last_result"`
-	Attempts             int64  `json:"attempts"`
-	Renewed              int64  `json:"renewed"`
-	NotRenewed           int64  `json:"not_renewed"`
-	ConsecutiveNoRenewal int64  `json:"consecutive_no_renewal"`
-	TokenAgeSec          *int64 `json:"token_age_sec"`
-	TokenAgeSource       string `json:"token_age_source"`
+	AuthState            string   `json:"auth_state"` // authenticated | anonymous
+	PSIDTSPresent        bool     `json:"psidts_present"`
+	LastAttemptAgeSec    *int64   `json:"last_attempt_age_sec"`
+	LastSuccessAgeSec    *int64   `json:"last_success_age_sec"`
+	LastResult           string   `json:"last_result"`
+	Attempts             int64    `json:"attempts"`
+	Renewed              int64    `json:"renewed"`
+	NotRenewed           int64    `json:"not_renewed"`
+	ConsecutiveNoRenewal int64    `json:"consecutive_no_renewal"`
+	TokenAgeSec          *int64   `json:"token_age_sec"`
+	TokenAgeSource       string   `json:"token_age_source"`
+	LastHTTPStatus       int      `json:"last_http_status"`      // RotateCookies HTTP status (0: none)
+	LastSetCookieNames   []string `json:"last_set_cookie_names"` // names only, never values
+	LastRedirected       bool     `json:"last_redirected"`
 }
 
 func ageSec(t time.Time) *int64 {
@@ -130,6 +133,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		LastAttemptAgeSec: ageSec(rs.LastAttempt), LastSuccessAgeSec: ageSec(rs.LastSuccess),
 		LastResult: rs.LastResult, Attempts: rs.Attempts, Renewed: rs.Renewed, NotRenewed: rs.NotRenewed,
 		ConsecutiveNoRenewal: rs.ConsecutiveFailure, TokenAgeSource: rs.TokenAgeSource,
+		LastHTTPStatus: rs.LastHTTPStatus, LastSetCookieNames: rs.LastSetCookieNames, LastRedirected: rs.LastRedirected,
+	}
+	if resp.CookieRotation.LastSetCookieNames == nil {
+		resp.CookieRotation.LastSetCookieNames = []string{}
 	}
 	if resp.Authenticated {
 		resp.CookieRotation.AuthState = "authenticated"

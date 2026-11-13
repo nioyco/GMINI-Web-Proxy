@@ -102,7 +102,8 @@ func TestStatusCookieRotationBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, k := range []string{"auth_state", "psidts_present", "last_attempt_age_sec", "last_success_age_sec", "last_result",
-		"attempts", "renewed", "not_renewed", "consecutive_no_renewal", "token_age_sec", "token_age_source"} {
+		"attempts", "renewed", "not_renewed", "consecutive_no_renewal", "token_age_sec", "token_age_source",
+		"last_http_status", "last_set_cookie_names", "last_redirected"} {
 		if _, ok := st.CR[k]; !ok {
 			t.Errorf("cookie_rotation missing %q: %s", k, rr.Body)
 		}
