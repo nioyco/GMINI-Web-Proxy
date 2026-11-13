@@ -527,7 +527,7 @@ func (r *endlessReader) Read(p []byte) (int, error) {
 
 func TestTransportPoolSettings(t *testing.T) {
 	c, _ := New(Config{}, nil)
-	tr := c.http.Transport.(*http.Transport)
+	tr := c.http.Transport.(*googleTransport).base.(*http.Transport)
 	if tr.MaxIdleConnsPerHost != 16 || tr.IdleConnTimeout != 90*time.Second {
 		t.Errorf("transport = %d / %v", tr.MaxIdleConnsPerHost, tr.IdleConnTimeout)
 	}

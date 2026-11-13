@@ -114,3 +114,27 @@ func TestStatusCookieRotationBlock(t *testing.T) {
 		t.Errorf("leak: %s", rr.Body)
 	}
 }
+
+func TestStatusGoogleBlockBlock(t *testing.T) {
+	s := newTestServer(t, testConfig())
+	rr := httptest.NewRecorder()
+	s.handler().ServeHTTP(rr, newReq(http.MethodGet, "/_status", nil))
+	var st struct {
+		GB       map[string]any   `json:"google_block"`
+		Counters map[string]int64 `json:"counters"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"active", "since", "last_seen", "backoff_until", "level", "total"} {
+		if _, ok := st.GB[k]; !ok {
+			t.Errorf("google_block missing %q: %s", k, rr.Body)
+		}
+	}
+	if st.GB["active"] != false {
+		t.Errorf("block = %v", st.GB)
+	}
+	if _, ok := st.Counters["google_blocks"]; !ok {
+		t.Errorf("counter google_blocks missing")
+	}
+}

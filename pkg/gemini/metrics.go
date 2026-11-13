@@ -2,7 +2,6 @@ package gemini
 
 import (
 	"context"
-	"net/http"
 	"sync/atomic"
 	"time"
 )
@@ -75,7 +74,3 @@ func (m *CallMetrics) retryWait(d time.Duration) {
 	}
 	m.RetryWaitMS.Add(d.Milliseconds())
 }
-
-// SetTransport replaces the HTTP transport (test seam for simulated upstreams;
-// never used in production).
-func (c *Client) SetTransport(rt http.RoundTripper) { c.http.Transport = rt }

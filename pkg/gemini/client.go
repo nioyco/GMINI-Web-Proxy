@@ -106,6 +106,7 @@ type Client struct {
 	cookieLoaded bool
 	rotatedAt    time.Time // last successful __Secure-1PSIDTS rotation (guarded by cookieMu)
 	rot          rotState  // rotation attempt tracking (guarded by cookieMu)
+	block        blockState
 
 	// Build label, optionally auto-resolved from the Gemini page.
 	blMu         sync.Mutex
@@ -162,6 +163,7 @@ func New(cfg Config, logger *slog.Logger) (*Client, error) {
 		blAuto:    cfg.GeminiBLAuto,
 		imageDest: destAllowed,
 	}
+	c.http.Transport = &googleTransport{base: transport, c: c}
 	c.imageHTTP = c.newImageHTTPClient()
 	return c, nil
 }
@@ -318,7 +320,7 @@ func (c *Client) fetchAppPage(ctx context.Context) ([]byte, error) {
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, cleanErr(err)
 	}
 	defer resp.Body.Close()
 	return io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -357,6 +359,9 @@ func (c *Client) CheckAuth(ctx context.Context) string {
 	html, err := c.fetchAppPage(ctx)
 	if err != nil {
 		c.log.Warn("cookie auth check failed", "err", err)
+		if errors.Is(err, ErrGoogleBlocked) {
+			return "unknown (blocked by Google)"
+		}
 		return "unknown (fetch failed)"
 	}
 	if m := snlm0eRe.FindSubmatch(html); m != nil {
@@ -487,6 +492,7 @@ func (c *Client) Generate(ctx context.Context, p GenParams) (string, error) {
 		met.attempt(attempt)
 		t0 := time.Now()
 		resp, err := c.http.Do(req)
+		err = cleanErr(err)
 		if err == nil {
 			met.firstByte(t0)
 			raw, readErr := readLimited(resp.Body, maxResponseBytes)
@@ -511,6 +517,10 @@ func (c *Client) Generate(ctx context.Context, p GenParams) (string, error) {
 			met.upstream(t0, 0) // transport error: time spent before failing
 		}
 		lastErr = err
+		if errors.Is(err, ErrGoogleBlocked) {
+			// Retrying only feeds the anti-bot: fail fast, the backoff takes over.
+			return "", fmt.Errorf("gemini request failed: %w", err)
+		}
 		if ctx.Err() != nil {
 			// The caller is gone: never retry, never sleep RetryDelaySec.
 			return "", c.clientCancelled(ctx, met, start)
@@ -576,7 +586,7 @@ func (c *Client) GenerateStream(ctx context.Context, p GenParams, emit func(delt
 		if ctx.Err() != nil {
 			return c.clientCancelled(ctx, met, t0)
 		}
-		return fmt.Errorf("gemini request failed: %w", err)
+		return fmt.Errorf("gemini request failed: %w", cleanErr(err))
 	}
 	defer resp.Body.Close()
 

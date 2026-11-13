@@ -24,6 +24,25 @@ type statusResponse struct {
 	ShutdownGraceSec   int              `json:"shutdown_grace_sec"`
 	Counters           map[string]int64 `json:"counters"`
 	CookieRotation     rotationStatus   `json:"cookie_rotation"`
+	GoogleBlock        googleBlock      `json:"google_block"`
+}
+
+// googleBlock reports the anti-bot block state (no URLs, no query strings).
+type googleBlock struct {
+	Active       bool    `json:"active"`
+	Since        *string `json:"since"`
+	LastSeen     *string `json:"last_seen"`
+	BackoffUntil *string `json:"backoff_until"`
+	Level        int     `json:"level"`
+	Total        int64   `json:"total"`
+}
+
+func rfc3339Ptr(t time.Time) *string {
+	if t.IsZero() {
+		return nil
+	}
+	v := t.UTC().Format(time.RFC3339)
+	return &v
 }
 
 // rotationStatus describes the cookie rotation state (no secrets).
@@ -119,5 +138,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		a := int64(rs.TokenAge.Seconds())
 		resp.CookieRotation.TokenAgeSec = &a
 	}
+	bs := s.client.GoogleBlockStatus()
+	resp.GoogleBlock = googleBlock{Active: bs.Active, Since: rfc3339Ptr(bs.Since), LastSeen: rfc3339Ptr(bs.LastSeen),
+		BackoffUntil: rfc3339Ptr(bs.BackoffUntil), Level: bs.Level, Total: bs.Total}
+	resp.Counters["google_blocks"] = bs.Total
 	sendJSON(w, http.StatusOK, resp)
 }
