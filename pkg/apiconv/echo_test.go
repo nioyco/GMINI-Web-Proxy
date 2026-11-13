@@ -117,3 +117,22 @@ func TestToolPromptsForbidEcho(t *testing.T) {
 		}
 	}
 }
+
+// R7: a tool turn is rendered in the flattened history as the assistant call
+// (fenced, with name and arguments) followed by the labelled result.
+func TestToolTurnRenderedInHistory(t *testing.T) {
+	req := ChatRequest{
+		Messages: []Message{
+			{Role: "user", Content: jsonString("liste")},
+			{Role: "assistant", Content: jsonString(""), ToolCalls: []ToolCall{{ID: "call_1", Type: "function", Function: ToolCallFunction{Name: "run", Arguments: `{"cmd":"ls"}`}}}},
+			{Role: "tool", ToolCallID: "call_1", Content: jsonString("a.txt")},
+		},
+		Tools: []Tool{{Type: "function", Function: &ToolFunction{Name: "run", Parameters: json.RawMessage(`{}`)}}},
+	}
+	p, _, _ := req.Prompt()
+	call := strings.Index(p, "```tool_call\n{\"name\": \"run\", \"arguments\": {\"cmd\":\"ls\"}}")
+	res := strings.Index(p, "[Tool result for call_1]: a.txt")
+	if call < 0 || res < 0 || call > res {
+		t.Errorf("tool turn not rendered in order (call=%d result=%d):\n%s", call, res, p)
+	}
+}
