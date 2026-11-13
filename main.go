@@ -63,7 +63,7 @@ func main() {
 	if refresh {
 		// Rotate once up front so the model list is fetched against the freshest
 		// session; the periodic loop then only ticks on its interval.
-		client.RotateCookie(startCtx)
+		client.StartupRotate(startCtx) // skipped when the token is recent
 		authStatus = fmt.Sprintf("authenticated (auto-refresh %dm)", cfg.CookieRefresh)
 	}
 	client.ResolveModels(startCtx)
@@ -87,6 +87,16 @@ func main() {
 
 	if refresh {
 		go client.CookieRefreshLoop(ctx, time.Duration(cfg.CookieRefresh)*time.Minute)
+	}
+	// Started without a signed-in session although a cookie is configured (Google
+	// block, stale cookie): keep re-checking in the background, no restart needed.
+	if authStatus != "authenticated" && !refresh && authStatus != "anonymous" &&
+		(cfg.Gemini.Cookie != "" || cfg.Gemini.CookieFile != "") {
+		go client.AuthRecoveryLoop(ctx, func() {
+			if cfg.CookieRefresh > 0 {
+				go client.CookieRefreshLoop(ctx, time.Duration(cfg.CookieRefresh)*time.Minute)
+			}
+		})
 	}
 
 	errCh := make(chan error, 1)

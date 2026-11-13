@@ -108,6 +108,12 @@ type Client struct {
 	rot          rotState  // rotation attempt tracking (guarded by cookieMu)
 	block        blockState
 
+	// Cached /app page (shared by the build-label scrape and the auth check so a
+	// startup costs one Google call instead of two).
+	appMu   sync.Mutex
+	appBody []byte
+	appAt   time.Time
+
 	// Build label, optionally auto-resolved from the Gemini page.
 	blMu         sync.Mutex
 	bl           string
@@ -266,6 +272,12 @@ func (c *Client) CurrentBL() string {
 		c.blRefreshing = true
 	}
 	c.blMu.Unlock()
+	if stale && !c.acquireBackground() { // blocked: no background call yet
+		c.blMu.Lock()
+		c.blRefreshing = false
+		c.blMu.Unlock()
+		stale = false
+	}
 	if stale {
 		go c.fetchAndStoreBL(context.Background())
 	}
@@ -326,9 +338,51 @@ func (c *Client) fetchAppPage(ctx context.Context) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 }
 
+// appPageMaxAge is how long a fetched /app page may be reused by the build-label
+// scrape and the auth check (startup dedupe).
+const appPageMaxAge = 30 * time.Second
+
+// fetchAppPageCached returns the /app page, reusing a copy fetched less than
+// maxAge ago. While a block backoff is in force it does not touch the network.
+func (c *Client) fetchAppPageCached(ctx context.Context, maxAge time.Duration) ([]byte, error) {
+	c.appMu.Lock()
+	defer c.appMu.Unlock()
+	if c.appBody != nil && time.Since(c.appAt) < maxAge {
+		return c.appBody, nil
+	}
+	if c.blockedNow() {
+		return nil, &BlockedError{Host: "gemini.google.com", Path: "/app"}
+	}
+	body, err := c.fetchAppPage(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c.appBody, c.appAt = body, time.Now()
+	return body, nil
+}
+
+func (c *Client) invalidateAppPage() {
+	c.appMu.Lock()
+	c.appBody, c.appAt = nil, time.Time{}
+	c.appMu.Unlock()
+}
+
+// applyBuildLabel stores the build label found in an /app page, when
+// auto-resolution is on.
+func (c *Client) applyBuildLabel(html []byte) {
+	if !c.blAuto {
+		return
+	}
+	if m := buildLabelRe.FindSubmatch(html); m != nil {
+		c.blMu.Lock()
+		c.bl, c.blAt = string(m[1]), time.Now()
+		c.blMu.Unlock()
+	}
+}
+
 // fetchBuildLabel scrapes the current build label from the Gemini app page.
 func (c *Client) fetchBuildLabel(ctx context.Context) string {
-	html, err := c.fetchAppPage(ctx)
+	html, err := c.fetchAppPageCached(ctx, appPageMaxAge)
 	if err != nil {
 		c.log.Warn("build label fetch failed", "err", err)
 		return ""
@@ -356,7 +410,7 @@ func (c *Client) CheckAuth(ctx context.Context) string {
 	if cookie == "" {
 		return "anonymous"
 	}
-	html, err := c.fetchAppPage(ctx)
+	html, err := c.fetchAppPageCached(ctx, appPageMaxAge)
 	if err != nil {
 		c.log.Warn("cookie auth check failed", "err", err)
 		if errors.Is(err, ErrGoogleBlocked) {
@@ -364,6 +418,7 @@ func (c *Client) CheckAuth(ctx context.Context) string {
 		}
 		return "unknown (fetch failed)"
 	}
+	c.applyBuildLabel(html)
 	if m := snlm0eRe.FindSubmatch(html); m != nil {
 		c.setAt(string(m[1])) // authenticated requests must echo this XSRF token back
 		c.log.Info("gemini cookie authenticated")
@@ -423,7 +478,7 @@ func (c *Client) ImagesSupported() bool {
 // caches it. Called after a cookie rotation so the token stays in sync with the
 // refreshed session.
 func (c *Client) refreshAtToken(ctx context.Context) {
-	if cookie, _ := c.loadCookie(); cookie == "" {
+	if cookie, _ := c.loadCookie(); cookie == "" || c.blockedNow() {
 		return
 	}
 	html, err := c.fetchAppPage(ctx)

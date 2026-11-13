@@ -36,11 +36,86 @@ func (c *Client) CookieRefreshLoop(ctx context.Context, interval time.Duration) 
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			// While Google blocks us, background calls are suspended (one probe
+			// per window once the backoff elapsed).
+			if !c.acquireBackground() {
+				c.log.Debug("cookie refresh skipped: google block backoff in force")
+				continue
+			}
 			rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			c.RotateCookie(rctx)
-			c.fetchModels(rctx)
+			if !c.blockedNow() {
+				c.fetchModels(rctx)
+			}
 			cancel()
 		}
+	}
+}
+
+// startupRotateMinAge is how recent the token must be for the startup rotation to
+// be skipped (a restart right after a rotation must not call Google again).
+const startupRotateMinAge = 5 * time.Minute
+
+// RotateCookieIfStale rotates unless the current token is younger than minAge
+// (age from the last successful rotation, else the cookie file's mtime).
+func (c *Client) RotateCookieIfStale(ctx context.Context, minAge time.Duration) {
+	if age, src := c.tokenAge(); src != "unknown" && age < minAge {
+		c.log.Info("cookie rotation skipped: token is recent",
+			"token_age_sec", int64(age.Seconds()), "token_age_source", src)
+		return
+	}
+	c.RotateCookie(ctx)
+}
+
+// StartupRotate is RotateCookieIfStale with the default recency threshold.
+func (c *Client) StartupRotate(ctx context.Context) { c.RotateCookieIfStale(ctx, startupRotateMinAge) }
+
+// authRecoverySchedule spaces the auth re-checks while the session is not
+// authenticated (a var so tests can shrink it).
+var authRecoverySchedule = []time.Duration{time.Minute, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute, 15 * time.Minute}
+
+// AuthRecoveryLoop re-checks the session until it authenticates, so a proxy that
+// started anonymous (Google block, expired cookie later re-exported to the cookie
+// file) recovers without a restart. It honours the block backoff, spaces checks
+// by authRecoverySchedule (with jitter), and on success refreshes the model list
+// and calls onRecovered (e.g. to start the cookie refresh loop), then returns.
+func (c *Client) AuthRecoveryLoop(ctx context.Context, onRecovered func()) {
+	fails := 0
+	for {
+		i := fails
+		if i >= len(authRecoverySchedule) {
+			i = len(authRecoverySchedule) - 1
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(jitterFn(authRecoverySchedule[i])):
+		}
+		if !c.acquireBackground() {
+			continue
+		}
+		rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		c.invalidateAppPage() // a re-check must see the live page, not the startup copy
+		status := c.CheckAuth(rctx)
+		if status != "authenticated" {
+			cancel()
+			if status == "anonymous" {
+				continue // cookie not configured (yet): keep waiting at the slowest pace
+			}
+			fails++
+			continue
+		}
+		c.fetchModels(rctx)
+		cancel()
+		c.modelMu.Lock()
+		count, source := len(c.modelOrder), c.modelsSource
+		c.modelMu.Unlock()
+		c.log.Info("gemini session recovered: authenticated, model list refreshed",
+			"models", count, "source", source)
+		if onRecovered != nil {
+			onRecovered()
+		}
+		return
 	}
 }
 

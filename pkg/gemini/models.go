@@ -159,6 +159,12 @@ func (c *Client) maybeRefreshModels() {
 		c.modelsRefreshing = true
 	}
 	c.modelMu.Unlock()
+	if stale && !c.acquireBackground() { // blocked: no background call yet
+		c.modelMu.Lock()
+		c.modelsRefreshing = false
+		c.modelMu.Unlock()
+		stale = false
+	}
 	if stale {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
