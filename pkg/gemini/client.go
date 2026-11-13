@@ -650,15 +650,22 @@ func (c *Client) GenerateStream(ctx context.Context, p GenParams, emit func(delt
 	// batchexecute lines routinely exceed that.
 	reader := bufio.NewReader(resp.Body)
 	prevText := ""
+	emitted := false
 	for {
 		line, readErr := reader.ReadString('\n')
 		if line != "" {
 			respBytes += len(line)
 			met.firstByte(t0)
 			if text, ok := latestText(line); ok && len(text) > len(prevText) {
-				delta := cleanGeminiText(runeDelta(prevText, text))
+				// Whitespace at a chunk boundary is content: only artifacts are removed,
+				// and only the very first emitted text is left-trimmed.
+				delta := cleanGeminiDelta(runeDelta(prevText, text))
 				prevText = text
+				if !emitted {
+					delta = strings.TrimLeft(delta, " \t\r\n")
+				}
 				if delta != "" {
+					emitted = true
 					emit(delta)
 				}
 			}
@@ -799,6 +806,13 @@ func cleanGeminiText(text string) string {
 	text = codeArtifactRe.ReplaceAllString(text, "")
 	text = cardContentRe.ReplaceAllString(text, "")
 	return strings.TrimSpace(text)
+}
+
+// cleanGeminiDelta removes code-execution and card-content artifacts from a stream
+// delta without trimming it (see GenerateStream).
+func cleanGeminiDelta(text string) string {
+	text = codeArtifactRe.ReplaceAllString(text, "")
+	return cardContentRe.ReplaceAllString(text, "")
 }
 
 // ─── Cookie / SAPISIDHASH auth ───────────────────────────────────────────────
