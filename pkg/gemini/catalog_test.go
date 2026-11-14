@@ -187,3 +187,21 @@ func TestRefreshModelsOnRequest(t *testing.T) {
 		t.Errorf("calls = %d, want 1", log.count(""))
 	}
 }
+
+// AUDIT-13 A7: the rotation loop also runs for an unauthenticated session.
+func TestRotationLoopRunsWithoutSession(t *testing.T) {
+	var log callLog
+	c, _ := blockClient(t, rtFunc(func(r *http.Request) (*http.Response, error) {
+		log.add(r)
+		return resp200(r, ""), nil
+	}))
+	if c.Authenticated() || !c.HasRotatingToken() {
+		t.Fatal("setup")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	c.CookieRefreshLoop(ctx, 15*time.Millisecond)
+	if log.count(FamilyAccounts) == 0 || log.count("") != log.count(FamilyAccounts) {
+		t.Errorf("calls=%d accounts=%d", log.count(""), log.count(FamilyAccounts))
+	}
+}

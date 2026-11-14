@@ -52,6 +52,13 @@ func (c *Client) CookieRefreshLoop(ctx context.Context, interval time.Duration) 
 	}
 }
 
+// HasRotatingToken reports whether the configured cookie carries the rotating
+// __Secure-1PSIDTS token (local check, no Google call; exposes no value).
+func (c *Client) HasRotatingToken() bool {
+	cookie, _ := c.loadCookie()
+	return cookie != "" && cookieValue(cookie, cookiePSIDTS) != ""
+}
+
 // startupRotateMinAge is how recent the token must be for the startup rotation to
 // be skipped (a restart right after a rotation must not call Google again).
 const startupRotateMinAge = 5 * time.Minute

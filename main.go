@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -82,14 +81,7 @@ func main() {
 	// (Google block at startup, stale cookie, session lost after a generation
 	// error) it is re-checked sparingly; while signed in, no call is made.
 	if cfg.Gemini.Cookie != "" || cfg.Gemini.CookieFile != "" {
-		var startRotation sync.Once
-		go client.AuthRecoveryLoop(ctx, func() {
-			if !refresh && cfg.CookieRefresh > 0 {
-				startRotation.Do(func() {
-					go client.CookieRefreshLoop(ctx, time.Duration(cfg.CookieRefresh)*time.Minute)
-				})
-			}
-		})
+		go client.AuthRecoveryLoop(ctx, nil)
 	}
 
 	errCh := make(chan error, 1)
@@ -129,13 +121,16 @@ func startSession(ctx context.Context, cfg *Config, client *gemini.Client, logge
 	}
 
 	// Auto-refresh keeps the cookie's __Secure-1PSIDTS from expiring: a file-backed
-	// cookie is rewritten in place, an inline cookie is rotated in memory.
-	refresh = authStatus == "authenticated" && (cfg.Gemini.Cookie != "" || cfg.Gemini.CookieFile != "") && cfg.CookieRefresh > 0
+	// cookie is rewritten in place, an inline cookie is rotated in memory. It runs
+	// whenever the cookie carries the rotating token, signed in or not, so the
+	// session keeps being maintained through a block or an anonymous start
+	// (AUDIT-13 A7, S-03).
+	refresh = client.HasRotatingToken() && cfg.CookieRefresh > 0
 	if refresh {
 		// Rotate once up front (skipped when the token is recent); the periodic loop
 		// then only ticks on its interval.
 		client.StartupRotate(ctx)
-		authStatus = fmt.Sprintf("authenticated (auto-refresh %dm)", cfg.CookieRefresh)
+		authStatus = fmt.Sprintf("%s (auto-refresh %dm)", authStatus, cfg.CookieRefresh)
 	}
 	// The catalog is fetched at startup unless one was restored for a recent
 	// session (the catalog loop refreshes it when due).

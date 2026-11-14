@@ -165,3 +165,36 @@ func TestStateFilePath(t *testing.T) {
 		}
 	}
 }
+
+// AUDIT-13 A7 (S-03): the rotation runs even when the startup finds no signed-in
+// session, as long as the cookie carries the rotating token.
+func TestRotationEnabledWhenStartingUnauthenticated(t *testing.T) {
+	dir := t.TempDir()
+	cfg := startupConfig(t, dir)
+	c, err := gemini.New(cfg.Gemini, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetTransport(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := ""
+		if strings.HasSuffix(r.URL.Path, "/app") {
+			body = `<html>"cfb2h":"boq_x"</html>` // page served without a session token
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	}))
+	auth, refresh := startSession(context.Background(), cfg, c, testLogger())
+	if !refresh || !strings.HasPrefix(auth, "NOT authenticated") {
+		t.Errorf("auth=%q refresh=%v: rotation must run without a signed-in session", auth, refresh)
+	}
+	cfg.Gemini.CookieFile = ""
+	cfg.Gemini.Cookie = "SAPISID=s" // no rotating token
+	c2, _ := gemini.New(cfg.Gemini, testLogger())
+	c2.SetTransport(&googleSim{})
+	if _, refresh := startSession(context.Background(), cfg, c2, testLogger()); refresh {
+		t.Error("no rotation without __Secure-1PSIDTS")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
