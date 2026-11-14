@@ -18,7 +18,7 @@ type statusResponse struct {
 	UptimeSec          int64                 `json:"uptime_sec"`
 	Authenticated      bool                  `json:"authenticated"`
 	CookieRotationAgeS *int64                `json:"cookie_last_rotation_age_sec"` // null: no rotation yet in this process
-	ModelsSource       string                `json:"models_source"`                // dynamic | fallback | static
+	ModelsSource       string                `json:"models_source"`                // dynamic | fallback | static | persisted
 	ModelsCount        int                   `json:"models_count"`
 	DefaultModel       string                `json:"default_model"`
 	ActiveRequests     int                   `json:"active_requests"` // includes this /_status request
@@ -30,6 +30,18 @@ type statusResponse struct {
 	UpstreamParams     gemini.UpstreamParams `json:"upstream_params"`
 	ToolPromptRules    bool                  `json:"tool_prompt_noecho_rules"` // GEMINI_TOOL_PROMPT_NOECHO_RULES
 	IgnoredFields      ignoredFields         `json:"ignored_request_fields"`
+	SessionState       sessionState          `json:"session_state"`
+}
+
+// sessionState describes the persisted session state by ages only: never the
+// token, never the file path (AUDIT-13 A5).
+type sessionState struct {
+	Persisted       bool   `json:"persisted"`
+	LastSavedAgeSec *int64 `json:"last_saved_age_sec"`
+	TokenAgeSec     *int64 `json:"token_age_sec"`       // XSRF "at" token (value never exposed)
+	BuildLabelAge   *int64 `json:"build_label_age_sec"` // null: fallback label
+	CatalogAgeSec   *int64 `json:"catalog_age_sec"`     // null: never fetched from Google
+	CatalogStale    bool   `json:"catalog_stale"`       // persisted catalog served without a session
 }
 
 // ignoredFields lists request fields received but not used by the proxy.
@@ -188,6 +200,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			TargetPath: fs.LastTargetPath, LastStatus: fs.LastStatus}
 	}
 	resp.Counters["google_blocks"] = bs.Total
+	ss := s.client.SessionState()
+	resp.SessionState = sessionState{Persisted: ss.Persisted, LastSavedAgeSec: ageSec(ss.LastSaved),
+		TokenAgeSec: ageSec(ss.TokenAt), BuildLabelAge: ageSec(ss.BuildLabelAt),
+		CatalogAgeSec: ageSec(ss.CatalogAt), CatalogStale: ss.CatalogStale}
 	resp.UpstreamParams = s.client.UpstreamParams()
 	resp.ToolPromptRules = apiconv.ToolPromptRules()
 	resp.IgnoredFields = ignoredFields{

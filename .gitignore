@@ -8,3 +8,6 @@
 
 # Editor / OS
 .DS_Store
+
+# Persisted session state (secret: XSRF token)
+*.state.json

@@ -139,6 +139,10 @@ type Client struct {
 	catalogAt      time.Time // last successful listModels fetch (or restored state)
 	catalogTriedAt time.Time // last listModels attempt (success or not)
 	catalogWarnAt  time.Time // last "model list refresh failed" WARN (guarded by modelMu)
+
+	// Session state file (AUDIT-13 A5).
+	stateMu      sync.Mutex
+	stateSavedAt time.Time
 }
 
 // New builds a Client with an HTTP client honouring the configured timeout and
@@ -434,11 +438,13 @@ func (c *Client) CheckAuth(ctx context.Context) string {
 	if m := snlm0eRe.FindSubmatch(html); m != nil {
 		c.setAt(string(m[1])) // authenticated requests must echo this XSRF token back
 		c.recordAuthCheck(authOK, gen)
+		c.saveState()
 		c.log.Info("gemini cookie authenticated")
 		return "authenticated"
 	}
 	c.setAt("")
 	c.recordAuthCheck(authNoToken, gen)
+	c.saveState()
 	c.log.Warn("gemini cookie is NOT authenticating — requests run anonymously",
 		"hint", "the session needs __Secure-1PSIDTS (it expires; re-export the cookie)")
 	return "NOT authenticated"

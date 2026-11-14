@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
 )
@@ -50,7 +51,14 @@ type Config struct {
 	// ModelsRefreshHours spaces the periodic catalog refresh (listModels)
 	// (GEMINI_MODELS_REFRESH_HOURS, default 24; 0 = startup and explicit requests only).
 	ModelsRefreshHours int
-	Gemini             gemini.Config
+	// BlockMaxBackoffMin is the top step of the anti-bot backoff
+	// (GEMINI_BLOCK_MAX_BACKOFF_MIN, default 60).
+	BlockMaxBackoffMin int
+	// StateFile / StateMaxAgeMin: persisted session state (GEMINI_STATE_FILE,
+	// default "<cookie file>.state.json", "off" to disable; always off for an
+	// inline cookie) and its reuse threshold (GEMINI_STATE_MAX_AGE_MIN, default 360).
+	StateMaxAgeMin int
+	Gemini         gemini.Config
 }
 
 // loadConfig seeds env from a .env file, then reads all settings. The .env path
@@ -80,6 +88,8 @@ func loadConfig(envFile string) *Config {
 		CORSOrigins:            splitKeys(getEnv("GEMINI_CORS_ORIGINS", "")),
 		AllowedHosts:           splitKeys(getEnv("GEMINI_ALLOWED_HOSTS", "")),
 		ModelsRefreshHours:     nonNegative(getEnvInt("GEMINI_MODELS_REFRESH_HOURS", 24), 24),
+		BlockMaxBackoffMin:     positive(getEnvInt("GEMINI_BLOCK_MAX_BACKOFF_MIN", 60), 60),
+		StateMaxAgeMin:         positive(getEnvInt("GEMINI_STATE_MAX_AGE_MIN", 360), 360),
 		Gemini: gemini.Config{
 			LogParams:      getEnvBool("GEMINI_LOG_REQUESTS", false),
 			RetryAttempts:  getEnvInt("GEMINI_RETRY_ATTEMPTS", 3),
@@ -94,6 +104,10 @@ func loadConfig(envFile string) *Config {
 			AllowRemoteImages: getEnvBool("GEMINI_ALLOW_REMOTE_IMAGES", false),
 		},
 	}
+
+	cfg.Gemini.BlockMaxBackoff = time.Duration(cfg.BlockMaxBackoffMin) * time.Minute
+	cfg.Gemini.StateMaxAge = time.Duration(cfg.StateMaxAgeMin) * time.Minute
+	cfg.Gemini.StateFile = stateFilePath(getEnv("GEMINI_STATE_FILE", ""), cfg.Gemini.CookieFile, cfg.Gemini.Cookie)
 
 	// GEMINI_BL: empty or "auto" → auto-resolve from the Gemini page (with the
 	// baked-in default as fallback); an explicit value disables auto-resolution.
@@ -137,6 +151,33 @@ const defaultShutdownGraceSec = 30
 func shutdownGrace(n int) int {
 	if n < 0 {
 		return defaultShutdownGraceSec
+	}
+	return n
+}
+
+// stateFilePath resolves GEMINI_STATE_FILE: "off"/"none"/"0" disables it; an
+// explicit path is used as is; empty defaults to "<cookie file>.state.json" next
+// to the cookie file. It is always disabled for an inline cookie (whose session
+// lives in memory only) and when no cookie file is configured.
+func stateFilePath(setting, cookieFile, inlineCookie string) string {
+	setting = strings.TrimSpace(setting)
+	switch strings.ToLower(setting) {
+	case "off", "none", "0", "false", "no":
+		return ""
+	}
+	if inlineCookie != "" || cookieFile == "" {
+		return ""
+	}
+	if setting != "" {
+		return setting
+	}
+	return cookieFile + ".state.json"
+}
+
+// positive maps a setting below 1 back to def.
+func positive(n, def int) int {
+	if n < 1 {
+		return def
 	}
 	return n
 }

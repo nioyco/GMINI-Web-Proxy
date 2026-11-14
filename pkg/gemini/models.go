@@ -294,6 +294,7 @@ func (c *Client) fetchModels(ctx context.Context) error {
 		c.modelMu.Lock()
 		c.catalogAt = time.Now()
 		c.modelMu.Unlock()
+		c.saveState()
 		c.log.Debug("refreshed gemini model list", "count", len(models), "source", "dynamic")
 		return nil
 	}

@@ -48,6 +48,14 @@ type Config struct {
 	// keeps the built-in schedule (60 min at the top); the proxy sets it from
 	// GEMINI_BLOCK_MAX_BACKOFF_MIN.
 	BlockMaxBackoff time.Duration
+
+	// StateFile persists the XSRF token, build label and catalog with their
+	// timestamps (0600, atomic) so a restart need not load /app (AUDIT-13 A5).
+	// Empty disables it; it is always disabled for an inline Cookie.
+	StateFile string
+	// StateMaxAge is how recent a persisted token must be to be reused at startup
+	// (default DefaultStateMaxAge).
+	StateMaxAge time.Duration
 }
 
 // applyDefaults fills any field left at its zero value with the corresponding
@@ -76,5 +84,8 @@ func (c *Config) applyDefaults() {
 	}
 	if c.DefaultModel == "" {
 		c.DefaultModel = DefaultModel
+	}
+	if c.StateMaxAge <= 0 {
+		c.StateMaxAge = DefaultStateMaxAge
 	}
 }

@@ -28,6 +28,7 @@ func main() {
 	cfg := loadConfig(*configPath)
 	if *cookieFile != "" {
 		cfg.Gemini.CookieFile = *cookieFile
+		cfg.Gemini.StateFile = stateFilePath(os.Getenv("GEMINI_STATE_FILE"), cfg.Gemini.CookieFile, cfg.Gemini.Cookie)
 	}
 	if *listenAddr != "" {
 		cfg.Listen = normalizeListen(*listenAddr)
@@ -51,23 +52,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Resolve the build label, verify cookie auth, and fetch the account model
-	// list up front (bounded so a slow or unreachable Gemini doesn't block startup
-	// indefinitely).
 	startCtx, startCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	client.ResolveBuildLabel(startCtx)
-	authStatus := client.CheckAuth(startCtx)
-
-	// Auto-refresh keeps the cookie's __Secure-1PSIDTS from expiring: a file-backed
-	// cookie is rewritten in place, an inline cookie is rotated in memory.
-	refresh := authStatus == "authenticated" && (cfg.Gemini.Cookie != "" || cfg.Gemini.CookieFile != "") && cfg.CookieRefresh > 0
-	if refresh {
-		// Rotate once up front so the model list is fetched against the freshest
-		// session; the periodic loop then only ticks on its interval.
-		client.StartupRotate(startCtx) // skipped when the token is recent
-		authStatus = fmt.Sprintf("authenticated (auto-refresh %dm)", cfg.CookieRefresh)
-	}
-	client.ResolveModels(startCtx)
+	authStatus, refresh := startSession(startCtx, cfg, client, logger)
 	startCancel()
 
 	srv := newServer(cfg, client, logger)
@@ -125,6 +111,38 @@ func main() {
 			logger.Error("shutdown error", "err", err)
 		}
 	}
+}
+
+// startSession prepares the Google session at startup and reports the auth
+// status for the banner and whether the cookie rotation loop must run. It first
+// restores the persisted session state (no Google call); only without a recent
+// state is the /app page loaded (build label + auth check, one shared call) —
+// AUDIT-13 A5/A6. ctx bounds the whole startup.
+func startSession(ctx context.Context, cfg *Config, client *gemini.Client, logger *slog.Logger) (authStatus string, refresh bool) {
+	restored := client.RestoreState()
+	if restored.SessionFresh {
+		authStatus = "authenticated"
+		logger.Info("startup: recent session state restored; /app not loaded")
+	} else {
+		client.ResolveBuildLabel(ctx)
+		authStatus = client.CheckAuth(ctx)
+	}
+
+	// Auto-refresh keeps the cookie's __Secure-1PSIDTS from expiring: a file-backed
+	// cookie is rewritten in place, an inline cookie is rotated in memory.
+	refresh = authStatus == "authenticated" && (cfg.Gemini.Cookie != "" || cfg.Gemini.CookieFile != "") && cfg.CookieRefresh > 0
+	if refresh {
+		// Rotate once up front (skipped when the token is recent); the periodic loop
+		// then only ticks on its interval.
+		client.StartupRotate(ctx)
+		authStatus = fmt.Sprintf("authenticated (auto-refresh %dm)", cfg.CookieRefresh)
+	}
+	// The catalog is fetched at startup unless one was restored for a recent
+	// session (the catalog loop refreshes it when due).
+	if !restored.SessionFresh || !restored.CatalogRestored {
+		client.ResolveModels(ctx)
+	}
+	return authStatus, refresh
 }
 
 // shutdownServer stops accepting connections and waits up to grace for in-flight
