@@ -85,6 +85,8 @@ func OpenAIModelList(models []*gemini.AvailableModel) any {
 			Created:     modelCreated,
 			OwnedBy:     "google",
 			Description: m.Description,
+			DisplayName: m.DisplayName,
+			ModelID:     m.ModelID,
 		})
 	}
 	return modelsListResponse{Object: "list", Data: data}
@@ -249,6 +251,10 @@ type modelObject struct {
 	Created     int64  `json:"created"`
 	OwnedBy     string `json:"owned_by"`
 	Description string `json:"description"`
+	// DisplayName is the short label of the real catalog (e.g. "Pro"); ModelID its
+	// stable hexadecimal id. Both help tools map catalog entries to client entries.
+	DisplayName string `json:"display_name,omitempty"`
+	ModelID     string `json:"model_id,omitempty"`
 }
 
 // responseObject is a Responses API response, used for both the non-streaming
