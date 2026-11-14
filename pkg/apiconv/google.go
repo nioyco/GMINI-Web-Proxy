@@ -278,19 +278,37 @@ func ParseGoogleFunctionCalls(text string) (string, []GoogleFunctionCall) {
 func ParseGoogleFunctionCallsWith(text string, declared []DeclaredTool) (string, []GoogleFunctionCall, ParseReport) {
 	var calls []GoogleFunctionCall
 	var rep ParseReport
+	names := declaredNameSet(declared)
 	clean := text
 	for _, re := range googleFCParsers {
-		for _, m := range re.FindAllStringSubmatch(clean, -1) {
-			for _, tc := range decodeIntentBlock(m[1], "function_call", declared, &rep) {
+		var sb strings.Builder
+		last := 0
+		for _, m := range re.FindAllStringSubmatchIndex(clean, -1) {
+			inferredBefore := len(rep.Inferred)
+			block := decodeIntentBlock(clean[m[2]:m[3]], "function_call", declared, &rep)
+			// Declared functions only: a block naming anything else stays text.
+			if bad := rejectUndeclared(block, names); len(bad) > 0 {
+				noteUndeclared(&rep, "function_call", len(declared), bad)
+				rep.Inferred = rep.Inferred[:inferredBefore]
+				continue
+			}
+			for _, tc := range block {
 				calls = append(calls, GoogleFunctionCall{Name: tc.Function.Name, Args: json.RawMessage(tc.Function.Arguments)})
 			}
+			sb.WriteString(clean[last:m[0]])
+			last = m[1]
 		}
-		clean = strings.TrimSpace(re.ReplaceAllString(clean, ""))
+		sb.WriteString(clean[last:])
+		clean = strings.TrimSpace(sb.String())
 	}
 	if len(calls) == 0 && googleJSONObject.MatchString(clean) {
 		if call, ok := decodeGoogleCall(clean); ok {
-			calls = append(calls, call)
-			clean = ""
+			if names != nil && !names[call.Name] {
+				noteUndeclared(&rep, "bare_json", len(declared), []string{call.Name})
+			} else {
+				calls = append(calls, call)
+				clean = ""
+			}
 		}
 	}
 	return clean, calls, rep

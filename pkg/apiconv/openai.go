@@ -357,11 +357,13 @@ func ParseToolCallsWith(text string, declared []DeclaredTool) (string, []ToolCal
 	var rep ParseReport
 	var clean strings.Builder
 	last := 0
+	names := declaredNameSet(declared)
 
 	for _, fb := range findFences(text) {
 		tag := strings.ToLower(fb.tag)
 		body := strings.TrimSpace(text[fb.bodyStart:fb.bodyEnd])
 		var blockCalls []ToolCall
+		inferredBefore := len(rep.Inferred)
 		if toolFenceTags[tag] {
 			blockCalls = decodeIntentBlock(body, tag, declared, &rep)
 		} else {
@@ -369,6 +371,13 @@ func ParseToolCallsWith(text string, declared []DeclaredTool) (string, []ToolCal
 		}
 		if len(blockCalls) == 0 {
 			continue // not a tool call: leave the block where it is
+		}
+		// A request that declares tools only accepts those names; anything else
+		// (an example block, an invented tool) stays text and is reported.
+		if bad := rejectUndeclared(blockCalls, names); len(bad) > 0 {
+			noteUndeclared(&rep, tag, len(declared), bad)
+			rep.Inferred = rep.Inferred[:inferredBefore]
+			continue
 		}
 		clean.WriteString(text[last:fb.start])
 		last = fb.end
@@ -380,6 +389,10 @@ func ParseToolCallsWith(text string, declared []DeclaredTool) (string, []ToolCal
 	if len(calls) == 0 {
 		// Bare-JSON fallback: the entire reply is a tool call with no code fence.
 		if bare := toolCallsFromJSON([]byte(result), false); len(bare) > 0 {
+			if bad := rejectUndeclared(bare, names); len(bad) > 0 {
+				noteUndeclared(&rep, "bare_json", len(declared), bad)
+				return result, calls, rep
+			}
 			return "", bare, rep
 		}
 	}
