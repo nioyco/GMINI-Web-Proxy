@@ -443,6 +443,9 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 		return echo.Push(d)
 	}
 	start, lastWrite, forwarded := time.Now(), time.Now(), false
+	const earlyHold = 400
+	var early strings.Builder
+	released := false
 	write := func(err error) bool {
 		if err != nil {
 			s.rlog(ctx).Warn("sse write failed; aborting generation", "err", err)
@@ -458,7 +461,17 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 			return write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, e.thought)))
 		}
 		raw.WriteString(e.text)
-		if out := gate.Push(filter(e.text)); out != "" {
+		out := gate.Push(filter(e.text))
+		if !released {
+			// The first few hundred bytes are held back: a canned non-answer of
+			// Gemini is short, and holding it lets the request be retried instead.
+			early.WriteString(out)
+			if raw.Len() < earlyHold {
+				return true
+			}
+			released, out = true, early.String()
+		}
+		if out != "" {
 			forwarded = true
 			return write(sse.data(apiconv.ChatChunk(cid, created, model, out)))
 		}
@@ -568,6 +581,44 @@ loop:
 		return
 	}
 
+	if !released && apiconv.IsUpstreamGlitch(raw.String()) {
+		// Gemini sent a canned non-answer (generic refusal, "can't use Workspace",
+		// a bare widget placeholder). Nothing of it reached the client: try once more.
+		s.rlog(ctx).Warn("upstream_glitch", "bytes", raw.Len(), "action", "retry_once")
+		if s.cfg.StreamThoughts {
+			if !write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, "\nGemini a renvoyé un message de service au lieu de traiter la demande : nouvelle tentative…\n"))) {
+				return
+			}
+		}
+		res := s.awaitGenerate(ctx, sse, p, interval)
+		switch {
+		case res.out == kaGone:
+		case res.out == kaShutdown:
+			s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
+		case res.err != nil:
+			s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+res.err.Error())), sse.done())
+		case apiconv.IsUpstreamGlitch(res.text):
+			s.rlog(ctx).Warn("upstream_glitch", "bytes", len(res.text), "action", "reported")
+			msg := "GMINI : Gemini a répondu deux fois par un message de service au lieu de traiter la demande (« " +
+				strings.TrimSpace(res.text) + " »). Reformulez la demande en donnant le chemin complet du dossier ou du fichier, puis relancez."
+			if strings.Contains(res.text, "<GenerateWidget") {
+				msg = "GMINI : Gemini a tenté deux fois d'ouvrir un de ses propres outils d'affichage au lieu de répondre. Relancez la demande, ou ouvrez une nouvelle conversation."
+			}
+			s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
+		default:
+			text, toolCalls := s.finishText(ctx, res.text, true, declared)
+			s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
+		}
+		return
+	}
+	if !released {
+		released = true
+		if out := early.String(); out != "" {
+			if !write(sse.data(apiconv.ChatChunk(cid, created, model, out))) {
+				return
+			}
+		}
+	}
 	if !s.cfg.DisableEchoFilter {
 		if out := gate.Push(echo.Flush()); out != "" {
 			if !write(sse.data(apiconv.ChatChunk(cid, created, model, out))) {

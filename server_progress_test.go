@@ -162,7 +162,7 @@ func TestProgressiveFallbackAndError(t *testing.T) {
 	}
 
 	g := progressServer(t, func(_ context.Context, _ gemini.GenParams, h gemini.StreamHandlers) error {
-		h.Text("Début de réponse")
+		h.Text(strings.Repeat("Début de réponse. ", 40)) // long enough to have left the early hold
 		return errors.New("connection reset")
 	})
 	g.srv.generate = func(context.Context, gemini.GenParams) (string, error) {

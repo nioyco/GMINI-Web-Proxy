@@ -226,3 +226,17 @@ func IsUpstreamRefusal(text string) bool {
 	t := strings.TrimSpace(text)
 	return t != "" && len(t) <= 300 && refusalRe.MatchString(t)
 }
+
+var glitchRe = regexp.MustCompile(`(?i)can['’]t use workspace because|turn on these settings to continue`)
+var widgetOnlyRe = regexp.MustCompile(`^(\s*<GenerateWidget\b[^>]*/>\s*)+$`)
+
+// IsUpstreamGlitch reports whether text is a canned non-answer of Gemini web:
+// the generic refusal, the "can't use Workspace" sentence, or a reply made only
+// of widget placeholders. Only short replies qualify.
+func IsUpstreamGlitch(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" || len(t) > 400 {
+		return false
+	}
+	return refusalRe.MatchString(t) || glitchRe.MatchString(t) || widgetOnlyRe.MatchString(t)
+}

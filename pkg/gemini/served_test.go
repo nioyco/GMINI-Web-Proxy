@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -136,5 +137,44 @@ func TestCallByRequest(t *testing.T) {
 	}
 	if _, ok := c.CallByRequest("zzz"); ok {
 		t.Fatal("unknown id found")
+	}
+}
+
+// Response body positions 39 (model id) and 42 (model name), as found in the
+// real traces of 2026-11-14.
+func servedLine(id, name string) string {
+	body := make([]any, 43)
+	body[4] = []any{[]any{"rc_x", []any{"texte"}}}
+	body[39], body[42] = id, name
+	ib, _ := json.Marshal(body)
+	line, _ := json.Marshal([]any{[]any{"wrb.fr", nil, string(ib)}})
+	return string(line)
+}
+
+func TestServedModelFromReply(t *testing.T) {
+	c, _ := New(Config{}, nil)
+	pro := &AvailableModel{Name: "pro", ModelID: "e6fa609c3fa255c0"}
+	c.storeModels([]*AvailableModel{pro, {Name: "lite", ModelID: "8c46e95b1a07cecc"}}, "dynamic")
+	rec := func(line string, thought int) CallRecord {
+		s := &idScan{}
+		s.add(line)
+		r := newCallRecord(&CallMetrics{ID: line[len(line)-8:]}, GenParams{Model: pro}, time.Now())
+		r.Stream, r.TextBytes, r.ThoughtBytes = true, 50, thought
+		c.recordCall(r, s)
+		return c.RecentCalls()[0]
+	}
+	rec(servedLine("e6fa609c3fa255c0", "3.1 Pro"), 300)
+	rec(servedLine("e6fa609c3fa255c0", "3.1 Pro"), 300)
+	// Right model, no thoughts (short answer): confirmed, never suspect.
+	if r := rec(servedLine("e6fa609c3fa255c0", "3.1 Pro"), 0); r.Identity != "confirmed" || r.Suspect != "" || r.ServedName != "3.1 Pro" {
+		t.Fatalf("r=%+v", r)
+	}
+	// Another model named by Google.
+	if r := rec(servedLine("8c46e95b1a07cecc", "3.5 Flash-Lite"), 0); r.Identity != "other_model" || r.ServedName != "3.5 Flash-Lite" {
+		t.Fatalf("r=%+v", r)
+	}
+	// Nothing stated and no thoughts: suspect.
+	if r := rec(servedLine("", ""), 0); r.Identity != "not_stated" || r.Suspect != "no_thoughts" {
+		t.Fatalf("r=%+v", r)
 	}
 }

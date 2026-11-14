@@ -98,6 +98,8 @@ type uiModel struct {
 	LastIdentity   string `json:"last_identity"`
 	LastSuspect    string `json:"last_suspect"`
 	LastSeenModels string `json:"last_seen_models"` // display names of catalogue ids found in the last reply
+	LastServed     string `json:"last_served"`      // model name stated by Google in the last reply
+	Calls5h        int    `json:"calls_5h"`         // generations sent to Gemini in the last 5 hours
 }
 
 type uiAntigravity struct {
@@ -148,7 +150,10 @@ func (s *Server) uiModels() []uiModel {
 	list := s.client.ListModels()
 	for _, m := range list {
 		if m.ModelID != "" {
-			byID[m.ModelID] = m.DisplayName
+			byID[m.ModelID] = m.Description
+			if byID[m.ModelID] == "" {
+				byID[m.ModelID] = m.DisplayName
+			}
 		}
 	}
 	def := s.client.DefaultModelName()
@@ -161,8 +166,15 @@ func (s *Server) uiModels() []uiModel {
 			if c.Model != m.Name {
 				continue
 			}
+			if t, err := time.Parse(time.RFC3339, c.Time); err == nil && time.Since(t) < 5*time.Hour {
+				u.Calls5h++
+			}
 			if u.LastTime == "" {
 				u.LastTime, u.LastIdentity, u.LastSuspect = c.Time, c.Identity, c.Suspect
+				u.LastServed = c.ServedName
+				if u.LastServed == "" && c.ServedID != "" {
+					u.LastServed = byID[c.ServedID]
+				}
 				names := []string{}
 				for _, id := range c.SeenModelIDs {
 					names = append(names, byID[id])

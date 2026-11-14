@@ -196,7 +196,7 @@ func googleToolDefs(req *GenerateContentRequest) []googleToolDef {
 // buildGoogleToolPrompt builds a natural tool-use prompt using the function_call
 // format, designed to be followed reliably by Gemini Web.
 func buildGoogleToolPrompt(toolDefs []googleToolDef) string {
-	spec, _ := json.MarshalIndent(toolDefs, "", "  ")
+	spec := marshalToolDefs(toolDefs)
 	return "# Tool Use\n\n" +
 		"You can call the following tools to help accomplish tasks. " +
 		"These tools connect to the user's local environment and will execute when called.\n\n" +

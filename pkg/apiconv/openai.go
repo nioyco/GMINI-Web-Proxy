@@ -277,7 +277,11 @@ const toolNameRule = "The \"name\" field is REQUIRED in every tool call and must
 const noEchoRules = "Rules about the conversation history:\n" +
 	"- Lines starting with [System instruction]:, [User]:, [Assistant]: or [Tool result for ...]: are input markers added by the system. NEVER write them in your answer.\n" +
 	"- NEVER repeat or replay earlier tool results or earlier assistant messages, and NEVER write, invent or simulate a tool result: tool results are supplied only by the system after your tool call is executed.\n" +
-	"- Answer only the latest request, using earlier results as context."
+	"- Answer only the latest request, using earlier results as context.\n" +
+	"Rules about the environment:\n" +
+	"- Files, folders and projects named by the user are on the user's local machine: reach them only with the tools above. You have NO Google Workspace, Gmail, Drive, Canvas, widget or other Google extension here: never use or mention them.\n" +
+	"- Answer in plain text or with tool_call blocks only.\n" +
+	"- When several tool calls are independent (for example reading several files), output them together in the same answer, one tool_call block each: every answer is costly."
 
 // messagesToPrompt converts OpenAI messages (plus optional tools and tool_choice)
 // into a single prompt string with role markers.
@@ -287,7 +291,7 @@ func messagesToPrompt(messages []Message, tools []Tool, tc toolChoiceMode) strin
 	if len(tools) > 0 && tc.mode != "none" {
 		defs := normalizeTools(tools)
 		if len(defs) > 0 {
-			defsJSON, _ := json.MarshalIndent(defs, "", "  ")
+			defsJSON := marshalToolDefs(defs)
 			parts = append(parts, "# Tool Use\n\n"+
 				"You can call the following tools to help accomplish tasks. "+
 				"These tools connect to the user's local environment and will execute when called.\n\n"+
@@ -676,5 +680,17 @@ func stringifyContent(v any) string {
 // jsonString wraps a plain string as a json.RawMessage for use as Message.Content.
 func jsonString(s string) json.RawMessage {
 	b, _ := json.Marshal(s)
+	return b
+}
+
+// marshalToolDefs renders the tool definitions for the prompt. They are resent
+// with every request, so they are compact; with the extra rules switched off the
+// historical indented form is kept (byte-identical prompt).
+func marshalToolDefs(defs any) []byte {
+	if !ToolPromptRules() {
+		b, _ := json.MarshalIndent(defs, "", "  ")
+		return b
+	}
+	b, _ := json.Marshal(defs)
 	return b
 }

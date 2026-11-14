@@ -28,25 +28,29 @@ import (
 
 // CallRecord is one generation, described by sizes, timings and ids only.
 type CallRecord struct {
-	Time           string   `json:"time"`
-	RequestID      string   `json:"request_id,omitempty"`
-	Model          string   `json:"model"`
-	ModelID        string   `json:"model_id,omitempty"`
-	Level          int      `json:"thinking_level"`
-	Mode           int      `json:"mode"`
-	Stream         bool     `json:"stream"`
-	DurationMS     int64    `json:"duration_ms"`
-	FirstTextMS    int64    `json:"first_text_ms"`    // -1: unknown / none
-	FirstThoughtMS int64    `json:"first_thought_ms"` // -1: unknown / none
-	Frames         int      `json:"frames"`
-	PromptBytes    int      `json:"prompt_bytes"`
-	TextBytes      int      `json:"text_bytes"`
-	ThoughtBytes   int      `json:"thought_bytes"`
-	SeenModelIDs   []string `json:"seen_model_ids"`  // catalogue ids present in the raw reply
-	OtherHexIDs    int      `json:"other_hex_ids"`   // 16-hex tokens that are not catalogue ids
-	Identity       string   `json:"identity"`        // confirmed | other_model | not_stated
-	Suspect        string   `json:"suspect"`         // "" | no_thoughts
-	Error          string   `json:"error,omitempty"` // error kind, never content
+	Time           string `json:"time"`
+	RequestID      string `json:"request_id,omitempty"`
+	Model          string `json:"model"`
+	ModelID        string `json:"model_id,omitempty"`
+	Level          int    `json:"thinking_level"`
+	Mode           int    `json:"mode"`
+	Stream         bool   `json:"stream"`
+	DurationMS     int64  `json:"duration_ms"`
+	FirstTextMS    int64  `json:"first_text_ms"`    // -1: unknown / none
+	FirstThoughtMS int64  `json:"first_thought_ms"` // -1: unknown / none
+	Frames         int    `json:"frames"`
+	PromptBytes    int    `json:"prompt_bytes"`
+	TextBytes      int    `json:"text_bytes"`
+	ThoughtBytes   int    `json:"thought_bytes"`
+	// ServedID / ServedName: the model Google names in the reply itself (response
+	// body positions 39 and 42, located in real traces on 2026-11-14).
+	ServedID     string   `json:"served_id,omitempty"`
+	ServedName   string   `json:"served_name,omitempty"`
+	SeenModelIDs []string `json:"seen_model_ids"`  // catalogue ids present in the raw reply
+	OtherHexIDs  int      `json:"other_hex_ids"`   // 16-hex tokens that are not catalogue ids
+	Identity     string   `json:"identity"`        // confirmed | other_model | not_stated
+	Suspect      string   `json:"suspect"`         // "" | no_thoughts
+	Error        string   `json:"error,omitempty"` // error kind, never content
 }
 
 // hexIDRe matches a bare 16-hex token (the shape of a model id). A leading "_"
@@ -54,9 +58,57 @@ type CallRecord struct {
 var hexIDRe = regexp.MustCompile(`(?:^|[^0-9A-Za-z_])([0-9a-f]{16})(?:[^0-9A-Za-z]|$)`)
 
 // idScan collects 16-hex tokens of a raw response (bounded).
-type idScan struct{ seen map[string]struct{} }
+type idScan struct {
+	seen                 map[string]struct{}
+	servedID, servedName string
+}
+
+// Positions of the model id and model name in the response body.
+const (
+	servedIDIndex   = 39
+	servedNameIndex = 42
+)
+
+// servedFromLine reads the model id and name Google states in a response line.
+func servedFromLine(line string) (id, name string) {
+	if !strings.Contains(line, `"wrb.fr"`) {
+		return "", ""
+	}
+	var arr []any
+	if json.Unmarshal([]byte(line), &arr) != nil {
+		return "", ""
+	}
+	first, ok := indexSlice(arr, 0)
+	if !ok {
+		return "", ""
+	}
+	innerStr, ok := indexString(first, 2)
+	if !ok {
+		return "", ""
+	}
+	var body []any
+	if json.Unmarshal([]byte(innerStr), &body) != nil {
+		return "", ""
+	}
+	id, _ = indexAny(body, servedIDIndex).(string)
+	name, _ = indexAny(body, servedNameIndex).(string)
+	if !hexIDOnlyRe.MatchString(id) {
+		id = ""
+	}
+	if len(name) > 60 {
+		name = ""
+	}
+	return id, name
+}
+
+var hexIDOnlyRe = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
 func (s *idScan) add(line string) {
+	if s.servedID == "" {
+		if id, name := servedFromLine(line); id != "" {
+			s.servedID, s.servedName = id, name
+		}
+	}
 	if len(s.seen) >= 64 {
 		return
 	}
@@ -176,9 +228,19 @@ func (c *Client) recordCall(r CallRecord, scan *idScan) {
 		}
 	}
 	r.SeenModelIDs, r.OtherHexIDs, r.Identity = scan.classify(r.ModelID, catalogue)
+	if scan.servedID != "" {
+		// Google names the model in the reply: that is the verdict.
+		r.ServedID, r.ServedName = scan.servedID, scan.servedName
+		r.Identity = "confirmed"
+		if r.ModelID != "" && r.ServedID != r.ModelID {
+			r.Identity = "other_model"
+		}
+	}
 
 	c.calls.mu.Lock()
-	if r.Error == "" && r.Stream && r.TextBytes > 0 && r.ThoughtBytes == 0 && c.calls.thinksUsually(r.Model) {
+	// The absence of thoughts only counts when Google did not name the model: a
+	// short answer of the right model can come without thoughts (seen 2026-11-14).
+	if r.Identity == "not_stated" && r.Error == "" && r.Stream && r.TextBytes > 0 && r.ThoughtBytes == 0 && c.calls.thinksUsually(r.Model) {
 		r.Suspect = "no_thoughts"
 	}
 	c.calls.recs = append(c.calls.recs, r)
@@ -188,15 +250,17 @@ func (c *Client) recordCall(r CallRecord, scan *idScan) {
 	c.appendCallLocked(r)
 	c.calls.mu.Unlock()
 
-	if r.Suspect != "" {
+	if r.Suspect != "" || r.Identity == "other_model" {
 		go c.checkCatalogueAfterSuspect()
 	}
 	if r.Suspect != "" || r.Identity == "other_model" {
 		c.log.Warn("served_model_doubt", "request_id", r.RequestID, "model", r.Model, "model_id", r.ModelID,
-			"identity", r.Identity, "seen_model_ids", strings.Join(r.SeenModelIDs, ","), "suspect", r.Suspect,
+			"identity", r.Identity, "served_id", r.ServedID, "served_name", r.ServedName,
+			"seen_model_ids", strings.Join(r.SeenModelIDs, ","), "suspect", r.Suspect,
 			"first_text_ms", r.FirstTextMS, "thought_bytes", r.ThoughtBytes)
 	} else if c.cfg.LogParams {
 		c.log.Info("served_model", "request_id", r.RequestID, "model", r.Model, "identity", r.Identity,
+			"served_id", r.ServedID, "served_name", r.ServedName,
 			"seen_model_ids", strings.Join(r.SeenModelIDs, ","), "other_hex_ids", r.OtherHexIDs)
 	}
 }
