@@ -129,9 +129,9 @@ type Client struct {
 
 	// Model registry, populated from the listModels RPC (or the static fallback
 	// set). modelOrder preserves a stable listing order.
-	modelMu          sync.Mutex
-	models           map[string]*AvailableModel
-	modelOrder       []string
+	modelMu        sync.Mutex
+	models         map[string]*AvailableModel
+	modelOrder     []string
 	modelsSource   string    // "dynamic" | "fallback" | "static" | "persisted"
 	catalogAt      time.Time // last successful listModels fetch (or restored state)
 	catalogTriedAt time.Time // last listModels attempt (success or not)
@@ -465,6 +465,10 @@ func (c *Client) ImagesSupported() bool {
 	return c.currentAt() != ""
 }
 
+// reloadSession is the session-reload hook used after a session error of a
+// generation. It returns true when a new attempt is worthwhile.
+func (c *Client) reloadSession(ctx context.Context) bool { return false }
+
 // refreshAtToken re-scrapes the SNlM0e XSRF token from the signed-in page and
 // caches it. Called after a cookie rotation so the token stays in sync with the
 // refreshed session.
@@ -515,52 +519,160 @@ func (c *Client) newRequest(ctx context.Context, body string, model *AvailableMo
 	return req, nil
 }
 
-// Generate sends a prompt and returns the final response text (blocking, with retry).
+// Typed upstream status errors (AUDIT-13 A8). Use errors.Is; the concrete type
+// is *UpstreamStatusError, which carries the HTTP status.
+var (
+	// ErrSessionAuth: Gemini refused the session — HTTP 401/403, or HTTP 400 on a
+	// request that carried an XSRF "at" token (the observed symptom of an expired
+	// token; see statusError). Never retried as is.
+	ErrSessionAuth = errors.New("gemini refused the session (authentication: cookie or XSRF token)")
+	// ErrUpstreamServer: HTTP 5xx from Gemini (retried like a transport error).
+	ErrUpstreamServer = errors.New("gemini server error")
+	// ErrUpstreamRejected: any other non-2xx status (other 4xx, unexpected 3xx).
+	// Never retried.
+	ErrUpstreamRejected = errors.New("gemini rejected the request")
+)
+
+// UpstreamStatusError is a non-2xx answer of a generation call. It holds the
+// status only (never the body, which may echo the request).
+type UpstreamStatusError struct {
+	Status int
+	Kind   error // ErrSessionAuth | ErrUpstreamServer | ErrUpstreamRejected
+}
+
+func (e *UpstreamStatusError) Error() string { return fmt.Sprintf("%v (http %d)", e.Kind, e.Status) }
+func (e *UpstreamStatusError) Unwrap() error { return e.Kind }
+
+// statusError classifies the HTTP status of a generation response; nil for 2xx.
+//
+// Choice for 400: the web endpoint answers 400 when the "at" XSRF token no longer
+// matches the session (LU in the reference clients; never OBSERVÉ here). A 400 on
+// a request that carried a token is therefore treated as a session error, which
+// allows ONE /app reload + ONE new attempt (rate-limited, see reloadSession). A
+// 400 without a token cannot be a token problem and is a plain rejection.
+func statusError(status int, hadAt bool) error {
+	var kind error
+	switch {
+	case status >= 200 && status <= 299:
+		return nil
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		kind = ErrSessionAuth
+	case status == http.StatusBadRequest && hadAt:
+		kind = ErrSessionAuth
+	case status >= 500:
+		kind = ErrUpstreamServer
+	default:
+		kind = ErrUpstreamRejected
+	}
+	return &UpstreamStatusError{Status: status, Kind: kind}
+}
+
+// statusKind names the class of err for logs.
+func statusKind(err error) string {
+	switch {
+	case errors.Is(err, ErrSessionAuth):
+		return "session_auth"
+	case errors.Is(err, ErrUpstreamServer):
+		return "server"
+	}
+	return "rejected"
+}
+
+// retryable reports whether a failed attempt may be retried as is: transport
+// errors, read errors, 5xx and empty 200 answers. Never a 4xx, a block or a
+// session error.
+func retryable(err error) bool {
+	var se *UpstreamStatusError
+	if errors.As(err, &se) {
+		return se.Kind == ErrUpstreamServer
+	}
+	return !errors.Is(err, ErrGoogleBlocked) && !errors.Is(err, ErrResponseTooLarge)
+}
+
+// checkGenerateStatus turns a non-2xx generation response into a typed error,
+// draining and closing its body and logging one metadata-only line.
+func (c *Client) checkGenerateStatus(resp *http.Response, hadAt bool, attempt int) error {
+	err := statusError(resp.StatusCode, hadAt)
+	if err == nil {
+		return nil
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	resp.Body.Close()
+	c.log.Warn("upstream_status", "status", resp.StatusCode, "kind", statusKind(err),
+		"attempt", attempt+1, "at_present", hadAt)
+	return err
+}
+
+// Generate sends a prompt and returns the final response text (blocking). A
+// transport error, a 5xx or an empty 200 is retried up to RetryAttempts; a 4xx,
+// a block or a cancellation is not. A session error (401/403, or 400 with a
+// token) triggers at most one session reload followed by one new attempt.
 func (c *Client) Generate(ctx context.Context, p GenParams) (string, error) {
 	images := c.uploadImages(ctx, p.Images)
+	met := metricsFrom(ctx)
+	start := time.Now()
+	text, err := c.generateAttempts(ctx, p, images, met, start, c.cfg.RetryAttempts, true)
+	if errors.Is(err, ErrSessionAuth) && c.reloadSession(ctx) {
+		text, err = c.generateAttempts(ctx, p, images, met, start, 1, false)
+	}
+	return text, err
+}
+
+// generateAttempts runs up to attempts blocking generations. first marks the
+// initial call (request metrics and parameter log are recorded once).
+func (c *Client) generateAttempts(ctx context.Context, p GenParams, images []uploadedImage, met *CallMetrics, start time.Time, attempts int, first bool) (string, error) {
+	// The body carries the XSRF token: rebuild it for each series of attempts so a
+	// reloaded token is used.
 	body, reqUUID, err := c.buildBody(p, images)
 	if err != nil {
 		return "", err
 	}
-
-	met := metricsFrom(ctx)
-	met.request(len(p.Prompt), len(body))
-	c.logUpstreamParams(p)
-	start := time.Now()
+	hadAt := c.currentAt() != ""
+	if first {
+		met.request(len(p.Prompt), len(body))
+		c.logUpstreamParams(p)
+	}
 	if ctx.Err() != nil { // cancelled while uploading images: do not call Gemini
 		return "", c.clientCancelled(ctx, met, start)
 	}
 	var lastErr error
-	for attempt := 0; attempt < c.cfg.RetryAttempts; attempt++ {
+	for attempt := 0; attempt < attempts; attempt++ {
 		req, err := c.newRequest(ctx, body, p.Model, reqUUID)
 		if err != nil {
 			return "", err
 		}
-		met.attempt(attempt)
+		n := attempt
+		if !first {
+			n = 1 // a post-reload attempt counts as a retry
+		}
+		met.attempt(n)
 		t0 := time.Now()
 		resp, err := c.http.Do(req)
 		err = cleanErr(err)
 		if err == nil {
 			met.firstByte(t0)
-			raw, readErr := readLimited(resp.Body, maxResponseBytes)
-			resp.Body.Close()
-			met.upstream(t0, len(raw))
-			if errors.Is(readErr, ErrResponseTooLarge) {
-				return "", readErr // deterministic: retrying would not help
-			}
-			switch {
-			case readErr != nil:
-				err = readErr
-			default:
-				// An empty body is treated as a (retryable) failure rather than a
-				// silent empty answer.
-				if text := extractResponseText(string(raw)); text != "" {
-					return text, nil
+			if err = c.checkGenerateStatus(resp, hadAt, attempt); err != nil {
+				met.upstream(t0, 0)
+			} else {
+				raw, readErr := readLimited(resp.Body, maxResponseBytes)
+				resp.Body.Close()
+				met.upstream(t0, len(raw))
+				if errors.Is(readErr, ErrResponseTooLarge) {
+					return "", readErr // deterministic: retrying would not help
 				}
-				err = ErrEmptyResponse
+				switch {
+				case readErr != nil:
+					err = readErr
+				default:
+					// A 200 without text is treated as a (retryable) failure rather than a
+					// silent empty answer; only this case carries the size-limit hint.
+					if text := extractResponseText(string(raw)); text != "" {
+						return text, nil
+					}
+					err = ErrEmptyResponse
+				}
 			}
-		}
-		if resp == nil {
+		} else {
 			met.upstream(t0, 0) // transport error: time spent before failing
 		}
 		lastErr = err
@@ -572,9 +684,12 @@ func (c *Client) Generate(ctx context.Context, p GenParams) (string, error) {
 			// The caller is gone: never retry, never sleep RetryDelaySec.
 			return "", c.clientCancelled(ctx, met, start)
 		}
-		if attempt < c.cfg.RetryAttempts-1 {
+		if !retryable(err) {
+			return "", fmt.Errorf("gemini request failed: %w", err)
+		}
+		if attempt < attempts-1 {
 			c.log.Warn("retrying gemini request",
-				"attempt", attempt+1, "max", c.cfg.RetryAttempts, "err", err)
+				"attempt", attempt+1, "max", attempts, "err", err)
 			wait := time.Duration(c.cfg.RetryDelaySec) * time.Second
 			w0 := time.Now()
 			select {
@@ -609,20 +724,35 @@ func (c *Client) clientCancelled(ctx context.Context, met *CallMetrics, start ti
 
 // GenerateStream sends a prompt and invokes emit for each incremental text delta.
 // Gemini sends cumulative text per chunk, so deltas are computed against prevText.
+// A session error answered before any byte triggers at most one session reload
+// followed by one new attempt; nothing is retried once streaming has begun.
 func (c *Client) GenerateStream(ctx context.Context, p GenParams, emit func(delta string)) error {
 	images := c.uploadImages(ctx, p.Images)
+	err := c.streamOnce(ctx, p, images, emit, 0)
+	if errors.Is(err, ErrSessionAuth) && c.reloadSession(ctx) {
+		err = c.streamOnce(ctx, p, images, emit, 1)
+	}
+	return err
+}
+
+// streamOnce performs one streaming generation attempt (n: 0 first, 1 after a
+// session reload).
+func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedImage, emit func(delta string), n int) error {
 	body, reqUUID, err := c.buildBody(p, images)
 	if err != nil {
 		return err
 	}
+	hadAt := c.currentAt() != ""
 	req, err := c.newRequest(ctx, body, p.Model, reqUUID)
 	if err != nil {
 		return err
 	}
 	met := metricsFrom(ctx)
-	met.request(len(p.Prompt), len(body))
-	c.logUpstreamParams(p)
-	met.attempt(0)
+	if n == 0 {
+		met.request(len(p.Prompt), len(body))
+		c.logUpstreamParams(p)
+	}
+	met.attempt(n)
 	t0 := time.Now()
 	respBytes := 0
 	defer func() { met.upstream(t0, respBytes) }()
@@ -635,6 +765,9 @@ func (c *Client) GenerateStream(ctx context.Context, p GenParams, emit func(delt
 			return c.clientCancelled(ctx, met, t0)
 		}
 		return fmt.Errorf("gemini request failed: %w", cleanErr(err))
+	}
+	if err := c.checkGenerateStatus(resp, hadAt, n); err != nil {
+		return fmt.Errorf("gemini request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
