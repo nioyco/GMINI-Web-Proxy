@@ -63,20 +63,41 @@ func findFences(text string) []fenceBlock {
 // body starts at bodyStart (see findFences).
 func fenceClose(text string, bodyStart int) (bodyEnd, end int) {
 	searchFrom := bodyStart
-	dec := json.NewDecoder(strings.NewReader(text[bodyStart:]))
+	// The JSON may need the tolerant reading (see repairJSONStrings): decode the
+	// repaired text and map the end of the last value back to the original.
+	src, ins := text[bodyStart:], []int(nil)
+	if lead := strings.TrimLeft(src, " \t\r\n"); lead != "" && (lead[0] == '{' || lead[0] == '[') {
+		src, ins = repairJSONStrings(src)
+	}
+	dec := json.NewDecoder(strings.NewReader(src))
 	for {
-		q := bodyStart + int(dec.InputOffset())
-		for q < len(text) && isJSONSpace(text[q]) {
+		q := int(dec.InputOffset())
+		for q < len(src) && isJSONSpace(src[q]) {
 			q++
 		}
-		if q >= len(text) || (text[q] != '{' && text[q] != '[') {
+		if q >= len(src) || (src[q] != '{' && src[q] != '[') {
 			break
 		}
 		var raw json.RawMessage
 		if err := dec.Decode(&raw); err != nil {
 			break
 		}
-		searchFrom = bodyStart + int(dec.InputOffset())
+		searchFrom = bodyStart + originalOffset(int(dec.InputOffset()), ins)
+	}
+	if lead := strings.TrimLeft(src, " \t\r\n"); searchFrom == bodyStart && lead != "" && lead[0] == '{' {
+		// No complete JSON value: the reply may be ONE tool call whose closing
+		// brackets are missing (see closeJSON), possibly followed by a last fence.
+		// The block then runs to the end, whatever ``` its strings contain.
+		rest := strings.TrimRight(text[bodyStart:], " \t\r\n")
+		bodyEnd = bodyStart + len(rest)
+		if strings.HasSuffix(rest, "```") {
+			rest = rest[:len(rest)-3]
+			bodyEnd = bodyStart + len(rest)
+		}
+		fixed, _ := repairJSONStrings(rest)
+		if closed, ok := closeJSON(fixed); ok && json.Valid([]byte(closed)) {
+			return bodyEnd, len(text)
+		}
 	}
 	if c := strings.Index(text[searchFrom:], "```"); c >= 0 {
 		return searchFrom + c, searchFrom + c + 3

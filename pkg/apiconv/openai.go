@@ -379,16 +379,34 @@ func ParseToolCallsWith(text string, declared []DeclaredTool) (string, []ToolCal
 			rep.Inferred = rep.Inferred[:inferredBefore]
 			continue
 		}
-		clean.WriteString(text[last:fb.start])
+		// Text between/after tool calls is dropped (see dropAfterToolCall): only what
+		// precedes the first call is kept.
+		if len(calls) == 0 || !DropTextAfterToolCall() {
+			clean.WriteString(text[last:fb.start])
+		} else {
+			rep.DroppedAfter += len(strings.TrimSpace(text[last:fb.start]))
+		}
 		last = fb.end
 		calls = append(calls, blockCalls...)
 	}
-	clean.WriteString(text[last:])
+	if len(calls) == 0 || !DropTextAfterToolCall() {
+		clean.WriteString(text[last:])
+	} else {
+		rep.DroppedAfter += len(strings.TrimSpace(text[last:]))
+	}
 	result := strings.TrimSpace(clean.String())
 
 	if len(calls) == 0 {
 		// Bare-JSON fallback: the entire reply is a tool call with no code fence.
-		if bare := toolCallsFromJSON([]byte(result), false); len(bare) > 0 {
+		bare := toolCallsFromJSON([]byte(result), false)
+		if len(bare) == 0 && result != "" && (result[0] == '{' || result[0] == '[') {
+			if fixed, ins := repairJSONStrings(result); len(ins) > 0 {
+				if bare = toolCallsFromJSON([]byte(fixed), false); len(bare) > 0 {
+					rep.Repaired++
+				}
+			}
+		}
+		if len(bare) > 0 {
 			if bad := rejectUndeclared(bare, names); len(bad) > 0 {
 				noteUndeclared(&rep, "bare_json", len(declared), bad)
 				return result, calls, rep
@@ -403,13 +421,9 @@ func ParseToolCallsWith(text string, declared []DeclaredTool) (string, []ToolCal
 // each that names a tool into a ToolCall. tagIntent reports whether the fence tag
 // already signalled tool-call intent (see toolFenceTags).
 func decodeToolCalls(body string, tagIntent bool) []ToolCall {
-	dec := json.NewDecoder(strings.NewReader(body))
+	vals, _ := jsonValues(body)
 	var out []ToolCall
-	for {
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			break
-		}
+	for _, raw := range vals {
 		out = append(out, toolCallsFromJSON(raw, tagIntent)...)
 	}
 	return out

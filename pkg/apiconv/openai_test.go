@@ -62,6 +62,8 @@ func TestMessagesToPromptFlatTool(t *testing.T) {
 }
 
 func TestParseToolCalls(t *testing.T) {
+	SetDropTextAfterToolCall(false) // this test covers the "keep the text" mode
+	defer SetDropTextAfterToolCall(true)
 	text := "before text\n```tool_call\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"NYC\"}}\n```\nafter text"
 	clean, calls := ParseToolCalls(text)
 

@@ -46,6 +46,8 @@ func TestFenceInsideArgumentsNoDeclared(t *testing.T) {
 }
 
 func TestFenceBlockFollowedByText(t *testing.T) {
+	SetDropTextAfterToolCall(false) // this test covers the "keep the text" mode
+	defer SetDropTextAfterToolCall(true)
 	content := "x" + fence + "y"
 	reply := "Je crée le fichier.\n" + fence + "tool_call\n" + callJSON("w", "c", content) + "\n" + fence + "\nVoilà."
 	text, calls := ParseToolCalls(reply)
@@ -89,6 +91,8 @@ func TestFenceArrayWithFence(t *testing.T) {
 }
 
 func TestFenceCloseOnSameLineWithFenceInside(t *testing.T) {
+	SetDropTextAfterToolCall(false) // this test covers the "keep the text" mode
+	defer SetDropTextAfterToolCall(true)
 	content := "a" + fence + "b"
 	reply := fence + "tool_call\n" + callJSON("w", "c", content) + fence + "\nfin"
 	text, calls := ParseToolCalls(reply)
@@ -126,6 +130,8 @@ func TestFenceNonJSONBodyKeepsOldRule(t *testing.T) {
 
 // Large argument (> 1 MiB) containing fences.
 func TestFenceHugeArgument(t *testing.T) {
+	SetDropTextAfterToolCall(false) // this test covers the "keep the text" mode
+	defer SetDropTextAfterToolCall(true)
 	content := strings.Repeat("ligne de texte "+fence+"\n", 80000) // ~1.4 MB
 	if len(content) < 1<<20 {
 		t.Fatalf("test content too small: %d", len(content))

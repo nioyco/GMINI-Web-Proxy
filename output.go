@@ -97,6 +97,12 @@ func (s *Server) noteParse(ctx context.Context, rep apiconv.ParseReport) {
 		s.rlog(ctx).Warn("tool_call_unparsed", "tag", u.Tag, "keys", safeKeyList(u.Keys),
 			"declared_tools", u.Declared, "reason", u.Reason)
 	}
+	if rep.Repaired > 0 {
+		s.rlog(ctx).Warn("tool_call_json_repaired", "blocks", rep.Repaired)
+	}
+	if rep.DroppedAfter > 0 {
+		s.rlog(ctx).Warn("text_after_tool_call_dropped", "bytes", rep.DroppedAfter)
+	}
 	for _, name := range rep.Inferred {
 		s.stats.toolNameInferred.Add(1)
 		s.rlog(ctx).Info("tool_name_inferred", "tool", safeKeyList([]string{name}))

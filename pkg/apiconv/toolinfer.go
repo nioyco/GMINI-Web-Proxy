@@ -37,6 +37,11 @@ type Unparsed struct {
 type ParseReport struct {
 	Unparsed []Unparsed
 	Inferred []string // names of tools whose name was inferred from the declared set
+	// Repaired counts tool-call blocks whose JSON needed the tolerant reading
+	// (invalid escape, raw line break in a string). DroppedAfter is the number of
+	// bytes of text removed because they followed a tool call.
+	Repaired     int
+	DroppedAfter int
 }
 
 // declaredFromSchema builds a DeclaredTool from a JSON-schema-like value.
@@ -280,18 +285,15 @@ func toolIntentCalls(raw []byte, tag string, declared []DeclaredTool, rep *Parse
 
 // decodeIntentBlock decodes a tool-intent fence body (one or more JSON values).
 func decodeIntentBlock(body, tag string, declared []DeclaredTool, rep *ParseReport) []ToolCall {
-	dec := json.NewDecoder(strings.NewReader(body))
+	vals, repaired := jsonValues(body)
 	var out []ToolCall
-	values := 0
-	for {
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			break
-		}
-		values++
+	for _, raw := range vals {
 		out = append(out, toolIntentCalls(raw, tag, declared, rep)...)
 	}
-	if values == 0 && strings.TrimSpace(body) != "" {
+	if repaired && len(out) > 0 {
+		rep.Repaired++
+	}
+	if len(vals) == 0 && strings.TrimSpace(body) != "" {
 		rep.Unparsed = append(rep.Unparsed, Unparsed{Tag: tag, Declared: len(declared), Reason: "body is not JSON"})
 	}
 	return out

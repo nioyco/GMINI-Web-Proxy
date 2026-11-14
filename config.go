@@ -48,6 +48,9 @@ type Config struct {
 	// DisableMarkerNeutralization stops escaping history markers ([User]:, ...) found
 	// in input contents (GEMINI_NEUTRALIZE_HISTORY_MARKERS=0|false|off; default: on).
 	DisableMarkerNeutralization bool
+	// KeepTextAfterToolCall keeps the text a model writes after a tool call
+	// (GEMINI_DROP_TEXT_AFTER_TOOL_CALL=0; default: that text is dropped).
+	KeepTextAfterToolCall bool
 	// StreamToolsProgress forwards text and thoughts as they arrive on the
 	// stream+tools chat path instead of one final chunk (GEMINI_STREAM_TOOLS_PROGRESS,
 	// default on; 0 restores the buffered behaviour).
@@ -105,6 +108,7 @@ func loadConfig(envFile string) *Config {
 		DisableEchoFilter:           !getEnvBool("GEMINI_STRIP_HISTORY_ECHO", true),
 		DisableToolPromptRules:      !getEnvBool("GEMINI_TOOL_PROMPT_NOECHO_RULES", true),
 		DisableMarkerNeutralization: !getEnvBool("GEMINI_NEUTRALIZE_HISTORY_MARKERS", true),
+		KeepTextAfterToolCall:       !getEnvBool("GEMINI_DROP_TEXT_AFTER_TOOL_CALL", true),
 		StreamToolsProgress:         getEnvBool("GEMINI_STREAM_TOOLS_PROGRESS", true),
 		StreamThoughts:              getEnvBool("GEMINI_STREAM_THOUGHTS", true),
 		DefaultThinkingLevel:        strings.ToLower(strings.TrimSpace(getEnv("GEMINI_THINKING_LEVEL", ""))),
