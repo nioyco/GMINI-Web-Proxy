@@ -84,24 +84,34 @@ func main() {
 		go client.AuthRecoveryLoop(ctx, nil)
 	}
 
+	if err := runServer(ctx, httpServer, srv, cfg, logger); err != nil {
+		logger.Error("server error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// shutdownFn is shutdownServer; a variable so tests can observe the call.
+var shutdownFn = shutdownServer
+
+// runServer serves until ctx is cancelled (SIGINT/SIGTERM), then shuts down
+// gracefully with the configured grace (GEMINI_SHUTDOWN_GRACE_SEC): in-flight
+// requests, SSE streams included, may finish; requests still active when the
+// grace expires are aborted (AUDIT-13 A13, F-01 — was a fixed 5 s Shutdown).
+func runServer(ctx context.Context, httpServer *http.Server, srv *Server, cfg *Config, logger *slog.Logger) error {
 	errCh := make(chan error, 1)
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
-
 	select {
 	case err := <-errCh:
-		logger.Error("server error", "err", err)
-		os.Exit(1)
+		return err
 	case <-ctx.Done():
-		logger.Info("shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := httpServer.Shutdown(shutdownCtx); err != nil {
-			logger.Error("shutdown error", "err", err)
-		}
+		grace := time.Duration(cfg.ShutdownGraceSec) * time.Second
+		logger.Info("shutting down", "grace", grace)
+		shutdownFn(httpServer, srv, grace, logger)
+		return nil
 	}
 }
 

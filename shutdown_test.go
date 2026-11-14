@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -146,5 +147,39 @@ func TestShutdownGraceConfig(t *testing.T) {
 	t.Setenv("GEMINI_SHUTDOWN_GRACE_SEC", "-3")
 	if got := loadConfig(none).ShutdownGraceSec; got != 30 {
 		t.Errorf("negative → %d, want 30", got)
+	}
+}
+
+// AUDIT-13 A13 (F-01): main's serve loop shuts down through shutdownServer with
+// the configured grace, not a fixed 5 s Shutdown.
+func TestRunServerUsesConfiguredGrace(t *testing.T) {
+	cfg := testConfig()
+	cfg.Listen = "127.0.0.1:0"
+	cfg.ShutdownGraceSec = 42
+	s := newTestServer(t, cfg)
+	hs := newHTTPServer(cfg, s.handler())
+	var got time.Duration
+	called := false
+	old := shutdownFn
+	shutdownFn = func(h *http.Server, srv *Server, grace time.Duration, l *slog.Logger) {
+		called, got = true, grace
+		_ = h.Close()
+	}
+	defer func() { shutdownFn = old }()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runServer(ctx, hs, s, cfg, testLogger()) }()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runServer did not return")
+	}
+	if !called || got != 42*time.Second {
+		t.Errorf("shutdownServer called=%v grace=%v, want 42s", called, got)
 	}
 }
