@@ -872,7 +872,7 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 			met.firstByte(t0)
 			fr, ok := parseFrame(line)
 			if ok {
-				shape.add(fr)
+				shape.add(fr, time.Since(t0))
 			}
 			if ok && h.Thought != nil && len(fr.thought) > len(prevThought) {
 				delta := runeDelta(prevThought, fr.thought)
@@ -1023,9 +1023,10 @@ const thoughtIndex = 37
 
 // frame is the useful content of one streamed line.
 type frame struct {
-	text    string
-	thought string
-	sizes   map[int]int // first candidate: index → string bytes in that subtree
+	text     string
+	thought  string
+	sizes    map[int]int // first candidate: index → string bytes in that subtree
+	thoughts []int       // sizes of the strings found under the thinking slot, in order
 }
 
 // parseFrame extracts the answer text, the thinking text and the size profile of
@@ -1059,6 +1060,7 @@ func parseFrame(line string) (frame, bool) {
 				if l2, ok := indexAny(l1, 0).([]any); ok {
 					fr.thought, _ = indexAny(l2, 0).(string)
 				}
+				fr.thoughts = leafSizes(l1, 0, nil)
 			}
 		}
 	}
@@ -1083,6 +1085,22 @@ func stringBytes(v any, depth int) int {
 	return 0
 }
 
+// leafSizes lists the sizes of the strings found in v, depth first (at most 16).
+func leafSizes(v any, depth int, out []int) []int {
+	if len(out) >= 16 || depth > 8 {
+		return out
+	}
+	switch x := v.(type) {
+	case string:
+		return append(out, len(x))
+	case []any:
+		for _, e := range x {
+			out = leafSizes(e, depth+1, out)
+		}
+	}
+	return out
+}
+
 // frameShape accumulates a content-free profile of a streamed response: number of
 // frames and, per index of the first candidate, the largest string volume seen.
 type frameShape struct {
@@ -1090,12 +1108,33 @@ type frameShape struct {
 	text    int
 	thought int
 	max     map[int]int
+	// Arrival times (ms since the request was sent; -1: never) and the profile of
+	// the thinking slot in the last frame that carried one.
+	firstThoughtMS, firstTextMS, lastFrameMS int64
+	thoughts                                 []int
+	times                                    []int64 // arrival of each frame (first 24)
 }
 
-func newFrameShape() *frameShape { return &frameShape{max: map[int]int{}} }
+func newFrameShape() *frameShape {
+	return &frameShape{max: map[int]int{}, firstThoughtMS: -1, firstTextMS: -1}
+}
 
-func (s *frameShape) add(fr frame) {
+func (s *frameShape) add(fr frame, at time.Duration) {
+	ms := at.Milliseconds()
 	s.frames++
+	s.lastFrameMS = ms
+	if len(s.times) < 24 {
+		s.times = append(s.times, ms)
+	}
+	if fr.thought != "" && s.firstThoughtMS < 0 {
+		s.firstThoughtMS = ms
+	}
+	if fr.text != "" && s.firstTextMS < 0 {
+		s.firstTextMS = ms
+	}
+	if len(fr.thoughts) > 0 {
+		s.thoughts = fr.thoughts
+	}
 	if len(fr.text) > s.text {
 		s.text = len(fr.text)
 	}
@@ -1126,7 +1165,9 @@ func (c *Client) logFrameShape(s *frameShape) {
 	}
 	c.log.Info("upstream_frame_shape", "frames", s.frames, "text_bytes", s.text,
 		"thought_bytes", s.thought, "thought_index", thoughtIndex,
-		"candidate_string_bytes", strings.Join(parts, ","))
+		"candidate_string_bytes", strings.Join(parts, ","),
+		"first_thought_ms", s.firstThoughtMS, "first_text_ms", s.firstTextMS, "last_frame_ms", s.lastFrameMS,
+		"frame_times_ms", fmt.Sprint(s.times), "thought_leaf_bytes", fmt.Sprint(s.thoughts))
 }
 
 // indexSlice returns arr[i] as a []any if possible.
