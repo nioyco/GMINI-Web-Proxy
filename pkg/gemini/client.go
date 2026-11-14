@@ -143,6 +143,8 @@ type Client struct {
 	// withdrawn holds models that a later catalogue no longer lists (observed when
 	// the web usage limit is reached). In memory only (guarded by modelMu).
 	withdrawn map[string]WithdrawnModel
+	// suspectCheckAt is the last catalogue check triggered by a suspect reply.
+	suspectCheckAt time.Time
 
 	// Session state file (AUDIT-13 A5).
 	stateMu      sync.Mutex

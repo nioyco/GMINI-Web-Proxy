@@ -110,6 +110,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /_ui", s.handleUI)
 	mux.HandleFunc("GET /_ui/api/state", s.handleUIState)
 	mux.HandleFunc("POST /_ui/api/models/refresh", s.handleUIRefresh)
+	mux.HandleFunc("POST /_ui/api/antigravity/launch", s.handleUILaunch)
 	mux.HandleFunc("/", s.handleNotFound)
 	return s.withTracking(s.withHostCheck(s.withCORS(mux)))
 }
@@ -570,6 +571,16 @@ loop:
 	if !s.cfg.DisableEchoFilter {
 		if out := gate.Push(echo.Flush()); out != "" {
 			if !write(sse.data(apiconv.ChatChunk(cid, created, model, out))) {
+				return
+			}
+		}
+	}
+	// Say so when another model than the one asked for probably answered.
+	if ri := reqFrom(ctx); ri != nil && s.cfg.WarnSuspectFallback && s.cfg.StreamThoughts {
+		if rec, found := s.client.CallByRequest(ri.id); found && (rec.Suspect != "" || rec.Identity == "other_model") {
+			note := "\n⚠ GMINI : cette réponse ne vient probablement pas du modèle demandé (" + model +
+				"). Google sert un autre modèle quand la limite d'utilisation du site Gemini est atteinte. Vérifiez la page GMINI Control avant de vous fier au résultat.\n"
+			if !write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note))) {
 				return
 			}
 		}

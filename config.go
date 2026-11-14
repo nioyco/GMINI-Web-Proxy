@@ -54,7 +54,10 @@ type Config struct {
 	// UIEnabled serves the local management page at /_ui (GEMINI_UI, default on;
 	// loopback clients only). AntigravityModelsFile is the Antigravity custom
 	// models file shown there (GEMINI_ANTIGRAVITY_MODELS_FILE; "off" hides it).
-	UIEnabled             bool
+	UIEnabled bool
+	// WarnSuspectFallback adds a note (as reasoning text) to a streamed reply that
+	// probably came from another model (GEMINI_WARN_SUSPECT_FALLBACK, default on).
+	WarnSuspectFallback   bool
 	AntigravityModelsFile string
 	// StreamToolsProgress forwards text and thoughts as they arrive on the
 	// stream+tools chat path instead of one final chunk (GEMINI_STREAM_TOOLS_PROGRESS,
@@ -116,6 +119,7 @@ func loadConfig(envFile string) *Config {
 		DisableMarkerNeutralization: !getEnvBool("GEMINI_NEUTRALIZE_HISTORY_MARKERS", true),
 		KeepTextAfterToolCall:       !getEnvBool("GEMINI_DROP_TEXT_AFTER_TOOL_CALL", true),
 		UIEnabled:                   getEnvBool("GEMINI_UI", true),
+		WarnSuspectFallback:         getEnvBool("GEMINI_WARN_SUSPECT_FALLBACK", true),
 		AntigravityModelsFile:       getEnv("GEMINI_ANTIGRAVITY_MODELS_FILE", ""),
 		StreamToolsProgress:         getEnvBool("GEMINI_STREAM_TOOLS_PROGRESS", true),
 		StreamThoughts:              getEnvBool("GEMINI_STREAM_THOUGHTS", true),

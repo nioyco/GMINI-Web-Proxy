@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"os"
 	"regexp"
@@ -187,6 +188,9 @@ func (c *Client) recordCall(r CallRecord, scan *idScan) {
 	c.appendCallLocked(r)
 	c.calls.mu.Unlock()
 
+	if r.Suspect != "" {
+		go c.checkCatalogueAfterSuspect()
+	}
 	if r.Suspect != "" || r.Identity == "other_model" {
 		c.log.Warn("served_model_doubt", "request_id", r.RequestID, "model", r.Model, "model_id", r.ModelID,
 			"identity", r.Identity, "seen_model_ids", strings.Join(r.SeenModelIDs, ","), "suspect", r.Suspect,
@@ -245,4 +249,46 @@ func newCallRecord(met *CallMetrics, p GenParams, start time.Time) CallRecord {
 		r.Model, r.ModelID = p.Model.Name, p.Model.ModelID
 	}
 	return r
+}
+
+// suspectCheckEvery bounds the catalogue checks triggered by suspect replies.
+const suspectCheckEvery = 30 * time.Minute
+
+// checkCatalogueAfterSuspect asks Google for the catalogue once (at most every
+// suspectCheckEvery, and subject to the usual refusals: no session, block in
+// force, recent attempt). When the usage limit is reached the catalogue no
+// longer lists the model, which turns a suspicion into a withdrawal: the next
+// requests are then refused instead of being answered by another model.
+func (c *Client) checkCatalogueAfterSuspect() {
+	c.modelMu.Lock()
+	due := time.Since(c.suspectCheckAt) >= suspectCheckEvery
+	if due {
+		c.suspectCheckAt = time.Now()
+	}
+	c.modelMu.Unlock()
+	if !due {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := c.RefreshModels(ctx); err != nil {
+		c.log.Info("catalogue check after a suspect reply not done", "err", cleanErr(err))
+		return
+	}
+	c.log.Info("catalogue checked after a suspect reply", "models", len(c.ModelNames()), "withdrawn", len(c.WithdrawnModels()))
+}
+
+// CallByRequest returns the newest journal record of a proxy request id.
+func (c *Client) CallByRequest(id string) (CallRecord, bool) {
+	if id == "" {
+		return CallRecord{}, false
+	}
+	c.calls.mu.Lock()
+	defer c.calls.mu.Unlock()
+	for i := len(c.calls.recs) - 1; i >= 0; i-- {
+		if c.calls.recs[i].RequestID == id {
+			return c.calls.recs[i], true
+		}
+	}
+	return CallRecord{}, false
 }

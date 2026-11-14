@@ -130,6 +130,7 @@ func (s *Server) handleUIState(w http.ResponseWriter, r *http.Request) {
 		"models":      models,
 		"calls":       calls,
 		"antigravity": s.uiAntigravity(models),
+		"apps":        listAntigravity(),
 		"listen":      s.cfg.Listen,
 	})
 }

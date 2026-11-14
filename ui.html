@@ -49,6 +49,12 @@ button:hover{border-color:var(--mute)}
 </section>
 
 <section class="card">
+<h2>Antigravity sur ce Mac</h2>
+<table id="apps"></table>
+<p class="note" id="appmsg">Une seule copie à la fois : elles partagent leurs réglages. « Relais anti-coupure » est nécessaire pour les demandes de plus de 300 secondes.</p>
+</section>
+
+<section class="card">
 <h2>Correspondance avec Antigravity</h2>
 <table id="ag"></table>
 <div id="agcmd"></div>
@@ -111,6 +117,17 @@ async function load(){
   $("tiles").innerHTML=t.map(([k,v])=>`<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
   $("models").innerHTML="<tr><th>Nom chez Google</th><th>Nom à utiliser (proxy)</th><th>Identifiant stable</th><th>Qui répond (dernier appel)</th><th class=num>Appels</th><th class=num>Avec pensées</th><th class=num>1er texte (médiane)</th><th>Dernier appel</th></tr>"+
     d.models.map(m=>`<tr><td><b>${esc(m.description||m.display_name||"—")}</b>${m.default?' <span class="sub">défaut</span>':""}<div class="sub">${esc([m.menu_label,m.family].filter(Boolean).join(" · "))}</div></td><td><code>${esc(m.name)}</code></td><td><code>${esc(m.model_id||"—")}</code></td><td>${m.withdrawn_since?badge("bad","Retiré par Google depuis "+hm(m.withdrawn_since))+'<div class="sub">limite d\'utilisation atteinte ou accès retiré : les demandes sont refusées</div>':who(m.last_time?m.last_identity:"",m.last_suspect,m.last_seen_models)}</td><td class=num>${m.calls}</td><td class=num>${m.calls?m.with_thoughts+" / "+m.calls:"—"}</td><td class=num>${dur(m.median_first_text_ms)}</td><td>${hm(m.last_time)}</td></tr>`).join("");
+  const apps=d.apps||[],anyRun=apps.some(x=>x.running);
+  $("apps").innerHTML=apps.length?"<tr><th>Copie</th><th>Version</th><th>Modèles du proxy</th><th>Relais anti-coupure</th><th>État</th><th></th></tr>"+
+    apps.map((x,i)=>`<tr><td><b>${esc(x.name)}</b></td><td>${esc(x.version||"—")}</td><td>${x.custom_models?badge("ok","Oui"):badge("none","Non (officielle)")}</td><td>${x.relay?badge("ok","Oui"):x.custom_models?badge("warn","Non : coupure à 300 s"):"—"}</td><td>${x.running?badge("info","Ouverte"):badge("none","Fermée")}</td><td>${anyRun?"":`<button data-app="${i}">Ouvrir</button>`}</td></tr>`).join(""):"<tr><td class=sub>Aucune copie d'Antigravity trouvée.</td></tr>";
+  document.querySelectorAll("button[data-app]").forEach(b=>b.onclick=async()=>{
+    const x=apps[+b.dataset.app];
+    if(!x.relay&&x.custom_models&&!confirm("Cette copie n'a pas le relais : les demandes de plus de 300 secondes seront coupées. Ouvrir quand même ?"))return;
+    try{const r=await fetch("/_ui/api/antigravity/launch",{method:"POST",headers:{"X-GMINI-UI":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({path:x.path})});const j=await r.json();
+      $("appmsg").textContent=j.launched?`${j.name} s'ouvre.`:j.error==="already_running"?`${j.name} est déjà ouverte : fermez-la d'abord.`:"Ouverture impossible."}
+    catch(e){$("appmsg").textContent="Échec : "+e.message}
+    setTimeout(load,2500);
+  });
   const a=d.antigravity;
   if(a.file_state!=="ok"){$("ag").innerHTML=`<tr><td>Fichier des modèles d'Antigravity ${a.file_state==="off"?"non consulté (désactivé)":a.file_state==="absent"?"introuvable":"illisible"}.</td></tr>`;$("agcmd").innerHTML=""}
   else{

@@ -33,6 +33,7 @@ type persistedState struct {
 	Models      []*AvailableModel `json:"models,omitempty"`
 	ModelsAt    time.Time         `json:"models_at,omitempty"`
 	ModelsSaved string            `json:"models_source,omitempty"`
+	Withdrawn   []WithdrawnModel  `json:"withdrawn,omitempty"` // models a later catalogue dropped
 }
 
 // stateEnabled reports whether the session state is persisted: a state file is
@@ -82,6 +83,9 @@ func (c *Client) saveState() {
 			}
 		}
 		st.ModelsAt, st.ModelsSaved = c.catalogAt, "dynamic"
+		for _, w := range c.withdrawn {
+			st.Withdrawn = append(st.Withdrawn, w)
+		}
 	}
 	c.modelMu.Unlock()
 
@@ -168,6 +172,14 @@ func (c *Client) RestoreState() StateRestore {
 		c.storeModels(st.Models, "persisted")
 		c.modelMu.Lock()
 		c.catalogAt = st.ModelsAt
+		for _, w := range st.Withdrawn {
+			if _, listed := c.models[w.Model.Name]; !listed && w.Model.Name != "" {
+				if c.withdrawn == nil {
+					c.withdrawn = map[string]WithdrawnModel{}
+				}
+				c.withdrawn[w.Model.Name] = w
+			}
+		}
 		c.modelMu.Unlock()
 		out.CatalogRestored, out.CatalogAt = true, st.ModelsAt
 	}

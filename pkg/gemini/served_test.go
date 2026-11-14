@@ -126,3 +126,15 @@ func TestWithdrawnModels(t *testing.T) {
 		t.Errorf("err=%v", err)
 	}
 }
+
+func TestCallByRequest(t *testing.T) {
+	c, _ := New(Config{}, nil)
+	r := newCallRecord(&CallMetrics{ID: "abc"}, GenParams{Model: &AvailableModel{Name: "m"}}, time.Now())
+	c.recordCall(r, &idScan{})
+	if got, ok := c.CallByRequest("abc"); !ok || got.Model != "m" {
+		t.Fatalf("got=%+v ok=%v", got, ok)
+	}
+	if _, ok := c.CallByRequest("zzz"); ok {
+		t.Fatal("unknown id found")
+	}
+}
