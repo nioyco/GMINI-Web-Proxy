@@ -18,7 +18,7 @@ import (
 // usedFields are the top-level request fields the proxy actually consumes, per
 // route kind. Any other field present is counted as "ignored".
 var usedFields = map[string]map[string]bool{
-	"chat":      set("model", "messages", "tools", "tool_choice", "stream"),
+	"chat":      set("model", "messages", "tools", "tool_choice", "stream", "reasoning_effort"),
 	"responses": set("model", "instructions", "input", "tools", "tool_choice", "stream"),
 	"anthropic": set("model", "system", "messages", "tools", "tool_choice", "stream"),
 	"google":    set("contents", "systemInstruction", "tools", "toolConfig"),

@@ -37,6 +37,8 @@ type ChatRequest struct {
 	Tools      []Tool          `json:"tools"`
 	ToolChoice json.RawMessage `json:"tool_choice"`
 	Stream     bool            `json:"stream"`
+	// ReasoningEffort (low | medium | high) selects the web thinking level.
+	ReasoningEffort string `json:"reasoning_effort"`
 }
 
 // Message is a single chat message. Content is polymorphic (string or an array

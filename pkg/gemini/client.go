@@ -30,6 +30,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -188,6 +189,11 @@ type GenParams struct {
 	Prompt string
 	Images []InputImage    // images to attach (uploaded just before generation)
 	Model  *AvailableModel // selected model (drives the selection headers)
+	// Level and Mode are the web "thinking level" (inner[80]: 1 low, 4 medium,
+	// 2 high) and "mode" (inner[79], e.g. 3 = Pro) codes. 0 = not sent (default:
+	// the body is byte-identical to the historical one). EXPERIMENTAL.
+	Level int
+	Mode  int
 }
 
 // InputImage is an image to attach to a generation request. Exactly one of Data
@@ -215,6 +221,15 @@ func (c *Client) buildBody(p GenParams, images []uploadedImage) (body, reqUUID s
 		inner[bc.Index] = bc.Value
 	}
 	inner[59] = reqUUID
+	if p.Level > 0 || p.Mode > 0 {
+		inner = append(inner, make([]any, 81-len(inner))...)
+		if p.Mode > 0 {
+			inner[79] = p.Mode
+		}
+		if p.Level > 0 {
+			inner[80] = p.Level
+		}
+	}
 
 	innerJSON, err := util.MarshalNoEscape(inner)
 	if err != nil {
@@ -635,6 +650,9 @@ func statusKind(err error) string {
 // retryable reports whether a failed attempt may be retried as is: transport
 // errors, read errors, 5xx and empty 200 answers. Never a 4xx, a block or a
 // session error.
+// Retryable reports whether a failed generation may be attempted again.
+func Retryable(err error) bool { return retryable(err) }
+
 func retryable(err error) bool {
 	var se *UpstreamStatusError
 	if errors.As(err, &se) {
@@ -776,22 +794,35 @@ func (c *Client) clientCancelled(ctx context.Context, met *CallMetrics, start ti
 	return ctx.Err()
 }
 
+// StreamHandlers receives the incremental output of a streamed generation. Either
+// handler may be nil.
+type StreamHandlers struct {
+	Text    func(delta string) // answer text
+	Thought func(delta string) // model "thinking" text, when the backend streams it
+}
+
 // GenerateStream sends a prompt and invokes emit for each incremental text delta.
 // Gemini sends cumulative text per chunk, so deltas are computed against prevText.
 // A session error answered before any byte triggers at most one session reload
 // followed by one new attempt; nothing is retried once streaming has begun.
 func (c *Client) GenerateStream(ctx context.Context, p GenParams, emit func(delta string)) error {
+	return c.GenerateStreamEvents(ctx, p, StreamHandlers{Text: emit})
+}
+
+// GenerateStreamEvents is GenerateStream with separate handlers for the answer
+// text and the thinking text.
+func (c *Client) GenerateStreamEvents(ctx context.Context, p GenParams, h StreamHandlers) error {
 	images := c.uploadImages(ctx, p.Images)
-	err := c.streamOnce(ctx, p, images, emit, 0)
+	err := c.streamOnce(ctx, p, images, h, 0)
 	if errors.Is(err, ErrSessionAuth) && c.reloadSession(ctx) {
-		err = c.streamOnce(ctx, p, images, emit, 1)
+		err = c.streamOnce(ctx, p, images, h, 1)
 	}
 	return err
 }
 
 // streamOnce performs one streaming generation attempt (n: 0 first, 1 after a
 // session reload).
-func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedImage, emit func(delta string), n int) error {
+func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedImage, h StreamHandlers, n int) error {
 	body, reqUUID, err := c.buildBody(p, images)
 	if err != nil {
 		return err
@@ -809,7 +840,11 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 	met.attempt(n)
 	t0 := time.Now()
 	respBytes := 0
-	defer func() { met.upstream(t0, respBytes) }()
+	shape := newFrameShape()
+	defer func() {
+		met.upstream(t0, respBytes)
+		c.logFrameShape(shape)
+	}()
 	if ctx.Err() != nil {
 		return c.clientCancelled(ctx, met, t0)
 	}
@@ -828,24 +863,39 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 	// ReadString grows its buffer as needed, unlike bufio.Scanner which caps at 64KB;
 	// batchexecute lines routinely exceed that.
 	reader := bufio.NewReader(resp.Body)
-	prevText := ""
-	emitted := false
+	prevText, prevThought := "", ""
+	emitted, thoughtEmitted := false, false
 	for {
 		line, readErr := reader.ReadString('\n')
 		if line != "" {
 			respBytes += len(line)
 			met.firstByte(t0)
-			if text, ok := latestText(line); ok && len(text) > len(prevText) {
-				// Whitespace at a chunk boundary is content: only artifacts are removed,
-				// and only the very first emitted text is left-trimmed.
-				delta := cleanGeminiDelta(runeDelta(prevText, text))
-				prevText = text
-				if !emitted {
+			fr, ok := parseFrame(line)
+			if ok {
+				shape.add(fr)
+			}
+			if ok && h.Thought != nil && len(fr.thought) > len(prevThought) {
+				delta := runeDelta(prevThought, fr.thought)
+				prevThought = fr.thought
+				if !thoughtEmitted {
 					delta = strings.TrimLeft(delta, " \t\r\n")
 				}
 				if delta != "" {
+					thoughtEmitted = true
+					h.Thought(delta)
+				}
+			}
+			if ok && fr.text != "" && len(fr.text) > len(prevText) {
+				// Whitespace at a chunk boundary is content: only artifacts are removed,
+				// and only the very first emitted text is left-trimmed.
+				delta := cleanGeminiDelta(runeDelta(prevText, fr.text))
+				prevText = fr.text
+				if !emitted {
+					delta = strings.TrimLeft(delta, " \t\r\n")
+				}
+				if delta != "" && h.Text != nil {
 					emitted = true
-					emit(delta)
+					h.Text(delta)
 				}
 			}
 		}
@@ -911,10 +961,10 @@ func latestText(line string) (string, bool) {
 	return best, best != ""
 }
 
-// parseWrbLine extracts text strings from a batchexecute "wrb.fr" response line.
-// The line is JSON like [["wrb.fr", _, "<inner-json>", ...], ...]; the inner JSON
-// nests the model text at inner2[4][*][1][*].
-func parseWrbLine(line string) []string {
+// wrbCandidates decodes a batchexecute "wrb.fr" response line and returns its
+// candidate list. The line is JSON like [["wrb.fr", _, "<inner-json>", ...], ...];
+// the inner JSON carries the candidates at inner2[4].
+func wrbCandidates(line string) []any {
 	if !strings.Contains(line, `"wrb.fr"`) || len(line) < 200 {
 		return nil
 	}
@@ -938,12 +988,15 @@ func parseWrbLine(line string) []string {
 	if !ok || len(inner2Slice) <= 4 {
 		return nil
 	}
-	parts, ok := inner2Slice[4].([]any)
-	if !ok {
-		return nil
-	}
+	parts, _ := inner2Slice[4].([]any)
+	return parts
+}
+
+// parseWrbLine extracts the text strings of a "wrb.fr" response line: the model
+// text is nested at inner2[4][*][1][*].
+func parseWrbLine(line string) []string {
 	var out []string
-	for _, part := range parts {
+	for _, part := range wrbCandidates(line) {
 		ps, ok := part.([]any)
 		if !ok || len(ps) <= 1 {
 			continue
@@ -959,6 +1012,121 @@ func parseWrbLine(line string) []string {
 		}
 	}
 	return out
+}
+
+// thoughtIndex is where the first candidate is expected to carry the model's
+// thinking text (candidate[37][0][0]). HYPOTHESIS, not yet observed on this
+// account: the frame-shape diagnostic (logFrameShape) reports, per candidate
+// index, how many string bytes were seen, so the real location can be confirmed
+// from one logged request without recording any content.
+const thoughtIndex = 37
+
+// frame is the useful content of one streamed line.
+type frame struct {
+	text    string
+	thought string
+	sizes   map[int]int // first candidate: index → string bytes in that subtree
+}
+
+// parseFrame extracts the answer text, the thinking text and the size profile of
+// the first candidate of a streamed line.
+func parseFrame(line string) (frame, bool) {
+	cands := wrbCandidates(line)
+	if len(cands) == 0 {
+		return frame{}, false
+	}
+	var fr frame
+	for _, part := range cands {
+		ps, ok := part.([]any)
+		if !ok {
+			continue
+		}
+		if texts, ok := indexAny(ps, 1).([]any); ok {
+			for _, t := range texts {
+				if s, ok := t.(string); ok && len(s) > len(fr.text) {
+					fr.text = s
+				}
+			}
+		}
+		if fr.sizes == nil {
+			fr.sizes = map[int]int{}
+			for i, v := range ps {
+				if n := stringBytes(v, 0); n > 0 {
+					fr.sizes[i] = n
+				}
+			}
+			if l1, ok := indexAny(ps, thoughtIndex).([]any); ok {
+				if l2, ok := indexAny(l1, 0).([]any); ok {
+					fr.thought, _ = indexAny(l2, 0).(string)
+				}
+			}
+		}
+	}
+	return fr, true
+}
+
+// stringBytes sums the lengths of the strings found in v (bounded depth).
+func stringBytes(v any, depth int) int {
+	switch x := v.(type) {
+	case string:
+		return len(x)
+	case []any:
+		if depth > 8 {
+			return 0
+		}
+		n := 0
+		for _, e := range x {
+			n += stringBytes(e, depth+1)
+		}
+		return n
+	}
+	return 0
+}
+
+// frameShape accumulates a content-free profile of a streamed response: number of
+// frames and, per index of the first candidate, the largest string volume seen.
+type frameShape struct {
+	frames  int
+	text    int
+	thought int
+	max     map[int]int
+}
+
+func newFrameShape() *frameShape { return &frameShape{max: map[int]int{}} }
+
+func (s *frameShape) add(fr frame) {
+	s.frames++
+	if len(fr.text) > s.text {
+		s.text = len(fr.text)
+	}
+	if len(fr.thought) > s.thought {
+		s.thought = len(fr.thought)
+	}
+	for i, n := range fr.sizes {
+		if n > s.max[i] {
+			s.max[i] = n
+		}
+	}
+}
+
+// logFrameShape emits one "upstream_frame_shape" line (sizes only, never content)
+// when parameter logging is on.
+func (c *Client) logFrameShape(s *frameShape) {
+	if !c.cfg.LogParams || s.frames == 0 {
+		return
+	}
+	idx := make([]int, 0, len(s.max))
+	for i := range s.max {
+		idx = append(idx, i)
+	}
+	sort.Ints(idx)
+	parts := make([]string, 0, len(idx))
+	for _, i := range idx {
+		parts = append(parts, fmt.Sprintf("%d=%d", i, s.max[i]))
+	}
+	c.log.Info("upstream_frame_shape", "frames", s.frames, "text_bytes", s.text,
+		"thought_bytes", s.thought, "thought_index", thoughtIndex,
+		"candidate_string_bytes", strings.Join(parts, ","))
 }
 
 // indexSlice returns arr[i] as a []any if possible.

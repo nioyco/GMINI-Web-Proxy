@@ -40,6 +40,16 @@ func ChatChunk(id string, created int64, model, content string) any {
 	}
 }
 
+// ChatChunkReasoning builds a chat.completion.chunk carrying a piece of the model's
+// thinking text (reasoning_content), shown by clients as "thoughts".
+func ChatChunkReasoning(id string, created int64, model, thought string) any {
+	t := thought
+	return chatChunk{
+		ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
+		Choices: []chunkChoice{{Index: 0, Delta: chunkDelta{Reasoning: &t}, FinishReason: nil}},
+	}
+}
+
 // ChatChunkStop builds the terminating chat.completion.chunk (empty delta with a
 // "stop" finish reason).
 func ChatChunkStop(id string, created int64, model string) any {
@@ -200,6 +210,7 @@ type chunkChoice struct {
 type chunkDelta struct {
 	Role      string     `json:"role,omitempty"`
 	Content   *string    `json:"content,omitempty"`
+	Reasoning *string    `json:"reasoning_content,omitempty"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 

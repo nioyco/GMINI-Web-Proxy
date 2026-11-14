@@ -37,7 +37,7 @@ func TestDescribeRequestContentFree(t *testing.T) {
 	if rp.Messages != 2 || rp.Tools != 1 || rp.Images != 2 {
 		t.Errorf("counts: %+v", rp)
 	}
-	if strings.Join(rp.Ignored, ",") != "max_completion_tokens,metadata,n,reasoning_effort,temperature,thinking,top_p,user" {
+	if strings.Join(rp.Ignored, ",") != "max_completion_tokens,metadata,n,temperature,thinking,top_p,user" {
 		t.Errorf("ignored = %v", rp.Ignored)
 	}
 	for _, f := range []string{"messages", "tools", "tool_choice", "model", "stream"} {
@@ -111,7 +111,7 @@ func TestRequestParamsLoggedAndStatusExposed(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &st); err != nil {
 		t.Fatal(err)
 	}
-	if st.Ign.Counts["temperature"] != 1 || st.Ign.Counts["reasoning_effort"] != 1 || st.Ign.Counts["messages"] != 0 {
+	if st.Ign.Counts["temperature"] != 1 || st.Ign.Counts["reasoning_effort"] != 0 || st.Ign.Counts["messages"] != 0 {
 		t.Errorf("ignored counts = %v", st.Ign.Counts)
 	}
 	if st.Up["inner_17"] != "[[0]]" {

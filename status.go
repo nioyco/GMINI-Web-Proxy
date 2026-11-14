@@ -30,6 +30,10 @@ type statusResponse struct {
 	UpstreamParams     gemini.UpstreamParams `json:"upstream_params"`
 	ToolPromptRules    bool                  `json:"tool_prompt_noecho_rules"`   // GEMINI_TOOL_PROMPT_NOECHO_RULES
 	MarkerNeutralized  bool                  `json:"neutralize_history_markers"` // GEMINI_NEUTRALIZE_HISTORY_MARKERS
+	StreamProgress     bool                  `json:"stream_tools_progress"`      // GEMINI_STREAM_TOOLS_PROGRESS
+	StreamThoughts     bool                  `json:"stream_thoughts"`            // GEMINI_STREAM_THOUGHTS
+	ThinkingLevel      string                `json:"thinking_level_default"`     // GEMINI_THINKING_LEVEL ("" = not sent)
+	MaxPromptBytes     int                   `json:"max_prompt_bytes"`           // GEMINI_MAX_PROMPT_BYTES (0 = no limit)
 	IgnoredFields      ignoredFields         `json:"ignored_request_fields"`
 	SessionState       sessionState          `json:"session_state"`
 }
@@ -208,6 +212,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	resp.UpstreamParams = s.client.UpstreamParams()
 	resp.ToolPromptRules = apiconv.ToolPromptRules()
 	resp.MarkerNeutralized = apiconv.MarkerNeutralization()
+	resp.StreamProgress, resp.StreamThoughts = s.cfg.StreamToolsProgress, s.cfg.StreamThoughts
+	resp.ThinkingLevel, resp.MaxPromptBytes = s.cfg.DefaultThinkingLevel, s.cfg.MaxPromptBytes
 	resp.IgnoredFields = ignoredFields{
 		Note:   "top-level fields received from clients that the proxy parses or forwards nowhere (e.g. temperature, reasoning_effort); counted since start",
 		Counts: s.ignored.snapshot(),

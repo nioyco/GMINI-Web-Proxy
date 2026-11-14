@@ -48,6 +48,22 @@ type Config struct {
 	// DisableMarkerNeutralization stops escaping history markers ([User]:, ...) found
 	// in input contents (GEMINI_NEUTRALIZE_HISTORY_MARKERS=0|false|off; default: on).
 	DisableMarkerNeutralization bool
+	// StreamToolsProgress forwards text and thoughts as they arrive on the
+	// stream+tools chat path instead of one final chunk (GEMINI_STREAM_TOOLS_PROGRESS,
+	// default on; 0 restores the buffered behaviour).
+	StreamToolsProgress bool
+	// StreamThoughts forwards the model's thinking text as reasoning_content
+	// (GEMINI_STREAM_THOUGHTS, default on).
+	StreamThoughts bool
+	// DefaultThinkingLevel is the effort applied when a request names none
+	// (GEMINI_THINKING_LEVEL = low | medium | high; empty = send nothing). EXPERIMENTAL.
+	DefaultThinkingLevel string
+	// ThinkingModes maps a model id (hex) to the web "mode" code sent with a
+	// thinking level (GEMINI_THINKING_MODE_CODES, "id=code,id=code"). EXPERIMENTAL.
+	ThinkingModes map[string]int
+	// MaxPromptBytes refuses (413) a prompt larger than this (GEMINI_MAX_PROMPT_BYTES,
+	// 0 = no limit).
+	MaxPromptBytes int
 	// AllowedHosts are extra Host header values accepted beside the loopback names
 	// (GEMINI_ALLOWED_HOSTS, comma-separated).
 	AllowedHosts []string
@@ -89,6 +105,11 @@ func loadConfig(envFile string) *Config {
 		DisableEchoFilter:           !getEnvBool("GEMINI_STRIP_HISTORY_ECHO", true),
 		DisableToolPromptRules:      !getEnvBool("GEMINI_TOOL_PROMPT_NOECHO_RULES", true),
 		DisableMarkerNeutralization: !getEnvBool("GEMINI_NEUTRALIZE_HISTORY_MARKERS", true),
+		StreamToolsProgress:         getEnvBool("GEMINI_STREAM_TOOLS_PROGRESS", true),
+		StreamThoughts:              getEnvBool("GEMINI_STREAM_THOUGHTS", true),
+		DefaultThinkingLevel:        strings.ToLower(strings.TrimSpace(getEnv("GEMINI_THINKING_LEVEL", ""))),
+		ThinkingModes:               parseModeCodes(getEnv("GEMINI_THINKING_MODE_CODES", defaultThinkingModeCodes)),
+		MaxPromptBytes:              getEnvInt("GEMINI_MAX_PROMPT_BYTES", 0),
 		CORSOrigins:                 splitKeys(getEnv("GEMINI_CORS_ORIGINS", "")),
 		AllowedHosts:                splitKeys(getEnv("GEMINI_ALLOWED_HOSTS", "")),
 		ModelsRefreshHours:          nonNegative(getEnvInt("GEMINI_MODELS_REFRESH_HOURS", 24), 24),
@@ -123,6 +144,24 @@ func loadConfig(envFile string) *Config {
 		cfg.Gemini.GeminiBL = bl
 	}
 	return cfg
+}
+
+// defaultThinkingModeCodes are the web "mode" codes observed in the real catalog
+// (model id → mode): Pro = 3, Flash-Lite = 6, Hydrogen = 1. They are only sent
+// together with a thinking level, and only for these ids; override or empty the
+// variable if the catalog changes.
+const defaultThinkingModeCodes = "e6fa609c3fa255c0=3,8c46e95b1a07cecc=6,56fdd199312815e2=1"
+
+// parseModeCodes parses "id=code,id=code" (invalid entries are skipped).
+func parseModeCodes(s string) map[string]int {
+	out := map[string]int{}
+	for _, kv := range splitKeys(s) {
+		k, v, ok := strings.Cut(kv, "=")
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); ok && err == nil && n > 0 && strings.TrimSpace(k) != "" {
+			out[strings.TrimSpace(k)] = n
+		}
+	}
+	return out
 }
 
 // normalizeListen turns a listen value into a "host:port" bind address. A bare

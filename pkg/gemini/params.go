@@ -100,7 +100,8 @@ func (c *Client) logUpstreamParams(p GenParams) {
 		b, _ := json.Marshal(bc.Value)
 		consts[strconv.Itoa(bc.Index)] = string(b)
 	}
-	attrs := []any{"inner_17", consts["17"], "body_constants", consts, "header_names", headerNames, "images", len(p.Images)}
+	attrs := []any{"inner_17", consts["17"], "body_constants", consts, "header_names", headerNames, "images", len(p.Images),
+		"thinking_level", p.Level, "mode", p.Mode}
 	if p.Model != nil {
 		attrs = append(attrs, "model", p.Model.Name, "model_id", p.Model.ModelID,
 			"capacity", p.Model.Capacity, "capacity_field", p.Model.CapacityField,

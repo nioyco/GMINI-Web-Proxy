@@ -32,6 +32,9 @@ type Server struct {
 	// generate is the blocking generation call used by the stream+tools keepalive
 	// path. It defaults to client.Generate and exists as a seam for tests.
 	generate func(ctx context.Context, p gemini.GenParams) (string, error)
+	// streamEvents is the streaming generation used by the progressive stream+tools
+	// chat path (P9); nil keeps the buffered path. A seam for tests.
+	streamEvents func(ctx context.Context, p gemini.GenParams, h gemini.StreamHandlers) error
 	// keepaliveOverride, when > 0, replaces the cfg-derived keepalive interval
 	// (sub-second values for tests). Never set in production.
 	keepaliveOverride time.Duration
@@ -77,7 +80,11 @@ func (s *Server) keepaliveInterval() time.Duration {
 func newServer(cfg *Config, client *gemini.Client, logger *slog.Logger) *Server {
 	apiconv.SetToolPromptRules(!cfg.DisableToolPromptRules)
 	apiconv.SetMarkerNeutralization(!cfg.DisableMarkerNeutralization)
-	return &Server{cfg: cfg, client: client, log: logger, generate: client.Generate, started: time.Now()}
+	srv := &Server{cfg: cfg, client: client, log: logger, generate: client.Generate, started: time.Now()}
+	if cfg.StreamToolsProgress {
+		srv.streamEvents = client.GenerateStreamEvents
+	}
+	return srv
 }
 
 // handler builds the routed, middleware-wrapped HTTP handler. Health and model
@@ -203,7 +210,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	m, err := s.client.ResolveModel(req.Model)
+	modelName, effort := apiconv.SplitModelEffort(req.Model)
+	m, err := s.client.ResolveModel(modelName)
 	if err != nil {
 		sendError(w, http.StatusBadRequest, err.Error())
 		return
@@ -211,6 +219,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	prompt, images, toolsActive := req.Prompt()
 	s.noteRequestParams(r.Context(), "chat", body, len(images))
+	if max := s.cfg.MaxPromptBytes; max > 0 && len(prompt) > max {
+		s.rlog(r.Context()).Warn("prompt_too_large", "prompt_bytes", len(prompt), "max", max)
+		sendError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf(
+			"prompt too large for the Gemini web endpoint: %d bytes (limit %d, GEMINI_MAX_PROMPT_BYTES); reduce the context", len(prompt), max))
+		return
+	}
 	if len(images) > 0 && !s.client.ImagesSupported() {
 		sendError(w, http.StatusBadRequest, apiconv.ImagesNeedAuthMsg)
 		return
@@ -228,10 +242,18 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	cid := apiconv.ID("chatcmpl-", 12)
 	p := m.Params(prompt)
 	p.Images = images
+	s.applyEffort(&p, m, effort, req.ReasoningEffort)
 
 	// True streaming path (no active tools): forward deltas as they arrive.
 	if req.Stream && !toolsActive {
 		s.streamChat(r.Context(), w, cid, m.Name, p)
+		return
+	}
+
+	// Stream + tools, progressive (P9): text and thoughts go out as they arrive,
+	// tool calls are extracted at the end.
+	if interval := s.keepaliveInterval(); req.Stream && toolsActive && interval > 0 && s.streamEvents != nil {
+		s.streamChatToolsProgress(r.Context(), w, cid, m.Name, p, interval, req.DeclaredTools())
 		return
 	}
 
@@ -344,6 +366,189 @@ func (s *Server) streamChatTools(ctx context.Context, w http.ResponseWriter, cid
 	}
 	text, toolCalls := s.finishText(ctx, res.text, true, declared)
 	s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
+}
+
+// applyEffort sets the experimental thinking level (and the model's mode code)
+// on p. The effort comes from the "model@effort" suffix, else the request's
+// reasoning_effort, else GEMINI_THINKING_LEVEL. Nothing is sent when none is set.
+func (s *Server) applyEffort(p *gemini.GenParams, m *gemini.AvailableModel, suffix, requested string) {
+	effort := suffix
+	if effort == "" {
+		effort = requested
+	}
+	if apiconv.EffortLevel(effort) == 0 {
+		effort = s.cfg.DefaultThinkingLevel
+	}
+	level := apiconv.EffortLevel(effort)
+	if level == 0 || m == nil || m.ModelID == "" {
+		return
+	}
+	p.Level = level
+	p.Mode = s.cfg.ThinkingModes[m.ModelID]
+}
+
+// streamChatToolsProgress serves a stream=true chat request with active tools
+// progressively: thinking text is forwarded as reasoning_content, answer text is
+// forwarded until a block that may be a tool call begins (see apiconv.ProgressGate),
+// keepalive comments fill the silences, and the tool calls plus any held-back text
+// follow in the final chunk. If the stream fails or stays empty before anything was
+// forwarded, the buffered path (with its retries) takes over on the same response.
+func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWriter, cid, model string, p gemini.GenParams, interval time.Duration, declared []apiconv.DeclaredTool) {
+	sse, ok := openSSE(w)
+	if !ok {
+		sendError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+	created := time.Now().Unix()
+	genCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type event struct{ text, thought string }
+	events := make(chan event, 256)
+	done := make(chan error, 1)
+	push := func(e event) {
+		select {
+		case events <- e:
+		case <-genCtx.Done():
+		}
+	}
+	h := gemini.StreamHandlers{Text: func(d string) { push(event{text: d}) }}
+	if s.cfg.StreamThoughts {
+		h.Thought = func(d string) { push(event{thought: d}) }
+	}
+	go func() { done <- s.streamEvents(genCtx, p, h) }()
+
+	var raw strings.Builder
+	var gate apiconv.ProgressGate
+	var echo apiconv.EchoFilter
+	filter := func(d string) string {
+		if s.cfg.DisableEchoFilter {
+			return d
+		}
+		return echo.Push(d)
+	}
+	start, lastWrite, forwarded := time.Now(), time.Now(), false
+	write := func(err error) bool {
+		if err != nil {
+			s.rlog(ctx).Warn("sse write failed; aborting generation", "err", err)
+			cancel()
+			return false
+		}
+		lastWrite = time.Now()
+		return true
+	}
+	handle := func(e event) bool {
+		if e.thought != "" {
+			forwarded = true
+			return write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, e.thought)))
+		}
+		raw.WriteString(e.text)
+		if out := gate.Push(filter(e.text)); out != "" {
+			forwarded = true
+			return write(sse.data(apiconv.ChatChunk(cid, created, model, out)))
+		}
+		return true
+	}
+	keepalive := func() bool {
+		if err := sse.comment("keepalive"); err != nil {
+			s.rlog(ctx).Warn("sse keepalive write failed", "err", err)
+			cancel()
+			return false
+		}
+		addKeepalive(ctx)
+		lastWrite = time.Now()
+		return true
+	}
+	cancelled := func() {
+		if errors.Is(context.Cause(ctx), errAbortedOnShutdown) {
+			s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
+			return
+		}
+		s.rlog(ctx).Warn("stream+tools cancelled by client", "err", ctx.Err(), "elapsed", time.Since(start).Round(time.Millisecond))
+	}
+
+	if !keepalive() { // bytes right after the headers
+		return
+	}
+	tick := interval / 4
+	if tick <= 0 {
+		tick = interval
+	}
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
+	var genErr error
+loop:
+	for {
+		select {
+		case <-ctx.Done():
+			cancelled()
+			return
+		case <-ticker.C:
+			if time.Since(lastWrite) >= interval && !keepalive() {
+				return
+			}
+		case e := <-events:
+			if !handle(e) {
+				return
+			}
+		case genErr = <-done:
+			for { // the generation is over: drain what it queued
+				select {
+				case e := <-events:
+					if !handle(e) {
+						return
+					}
+					continue
+				default:
+				}
+				break
+			}
+			break loop
+		}
+	}
+	if ctx.Err() != nil {
+		cancelled()
+		return
+	}
+
+	if genErr != nil || raw.Len() == 0 {
+		if !forwarded && (genErr == nil || gemini.Retryable(genErr)) && !errors.Is(genErr, gemini.ErrSessionAuth) {
+			// Nothing reached the client yet: let the buffered path retry.
+			s.rlog(ctx).Warn("progressive stream gave nothing; falling back to the buffered path", "err", genErr)
+			res := s.awaitGenerate(ctx, sse, p, interval)
+			switch {
+			case res.out == kaGone:
+			case res.out == kaShutdown:
+				s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
+			case res.err != nil:
+				s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+res.err.Error())), sse.done())
+			default:
+				text, toolCalls := s.finishText(ctx, res.text, true, declared)
+				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
+			}
+			return
+		}
+		if genErr == nil {
+			genErr = gemini.ErrEmptyResponse
+		}
+		s.rlog(ctx).Warn("stream+tools upstream error after SSE open", "err", genErr, "forwarded", forwarded)
+		s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+genErr.Error())), sse.done())
+		return
+	}
+
+	if !s.cfg.DisableEchoFilter {
+		if out := gate.Push(echo.Flush()); out != "" {
+			if !write(sse.data(apiconv.ChatChunk(cid, created, model, out))) {
+				return
+			}
+		}
+	}
+	text, toolCalls := s.finishText(ctx, strings.TrimSpace(raw.String()), true, declared)
+	rest, ok := gate.Rest(text)
+	if !ok {
+		s.rlog(ctx).Warn("progress_text_mismatch", "sent_bytes", len(gate.Sent()), "final_bytes", len(text))
+	}
+	s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, rest, toolCalls)), sse.done())
 }
 
 // ─── Shared keepalive helper ─────────────────────────────────────────────────
