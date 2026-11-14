@@ -127,7 +127,7 @@ func TestStatusGoogleBlockBlock(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &st); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"active", "since", "last_seen", "backoff_until", "level", "total"} {
+	for _, k := range []string{"active", "since", "last_seen", "backoff_until", "level", "total", "families"} {
 		if _, ok := st.GB[k]; !ok {
 			t.Errorf("google_block missing %q: %s", k, rr.Body)
 		}

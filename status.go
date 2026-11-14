@@ -38,14 +38,33 @@ type ignoredFields struct {
 	Counts map[string]int64 `json:"counts"`
 }
 
-// googleBlock reports the anti-bot block state (no URLs, no query strings).
+// googleBlock reports the anti-bot block state (no URLs, no query strings). The
+// top-level fields are derived from the families (active if any family is).
 type googleBlock struct {
+	Active       bool                         `json:"active"`
+	Since        *string                      `json:"since"`
+	LastSeen     *string                      `json:"last_seen"`
+	BackoffUntil *string                      `json:"backoff_until"`
+	Level        int                          `json:"level"`
+	Total        int64                        `json:"total"`
+	Families     map[string]googleBlockFamily `json:"families"`
+}
+
+// googleBlockFamily is the block state of one family of Google calls (accounts,
+// app, batchexecute, generate, other). Trigger = the request that was refused;
+// target = where Google sent it. Hosts and paths only.
+type googleBlockFamily struct {
 	Active       bool    `json:"active"`
 	Since        *string `json:"since"`
 	LastSeen     *string `json:"last_seen"`
 	BackoffUntil *string `json:"backoff_until"`
 	Level        int     `json:"level"`
 	Total        int64   `json:"total"`
+	TriggerHost  string  `json:"last_trigger_host"`
+	TriggerPath  string  `json:"last_trigger_path"`
+	TargetHost   string  `json:"last_target_host"`
+	TargetPath   string  `json:"last_target_path"`
+	LastStatus   int     `json:"last_status"`
 }
 
 func rfc3339Ptr(t time.Time) *string {
@@ -160,7 +179,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	bs := s.client.GoogleBlockStatus()
 	resp.GoogleBlock = googleBlock{Active: bs.Active, Since: rfc3339Ptr(bs.Since), LastSeen: rfc3339Ptr(bs.LastSeen),
-		BackoffUntil: rfc3339Ptr(bs.BackoffUntil), Level: bs.Level, Total: bs.Total}
+		BackoffUntil: rfc3339Ptr(bs.BackoffUntil), Level: bs.Level, Total: bs.Total,
+		Families: map[string]googleBlockFamily{}}
+	for f, fs := range bs.Families {
+		resp.GoogleBlock.Families[string(f)] = googleBlockFamily{Active: fs.Active, Since: rfc3339Ptr(fs.Since),
+			LastSeen: rfc3339Ptr(fs.LastSeen), BackoffUntil: rfc3339Ptr(fs.BackoffUntil), Level: fs.Level, Total: fs.Total,
+			TriggerHost: fs.LastTriggerHost, TriggerPath: fs.LastTriggerPath, TargetHost: fs.LastTargetHost,
+			TargetPath: fs.LastTargetPath, LastStatus: fs.LastStatus}
+	}
 	resp.Counters["google_blocks"] = bs.Total
 	resp.UpstreamParams = s.client.UpstreamParams()
 	resp.ToolPromptRules = apiconv.ToolPromptRules()

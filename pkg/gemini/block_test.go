@@ -103,7 +103,7 @@ func TestBlockEscalationAndClear(t *testing.T) {
 	if strings.Count(logs.String(), "google_blocked") != 7 { // 8 calls, 1 inside the backoff
 		t.Errorf("WARN lines: %d\n%s", strings.Count(logs.String(), "google_blocked"), logs)
 	}
-	c.recordGoogleOK()
+	c.recordGoogleOK(FamilyOther)
 	if bs = c.GoogleBlockStatus(); bs.Active || bs.Level != 0 || !bs.BackoffUntil.IsZero() || bs.Total != 8 {
 		t.Fatalf("after clear: %+v", bs)
 	}
@@ -121,22 +121,22 @@ func TestAcquireBackgroundGate(t *testing.T) {
 	now := time.Now()
 	nowFn = func() time.Time { return now }
 	c, _ := blockClient(t, rtFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("x") }))
-	if !c.acquireBackground() || !c.acquireBackground() {
+	if !c.acquireBackground(FamilyOther) || !c.acquireBackground(FamilyOther) {
 		t.Fatal("must allow when not blocked")
 	}
 	c.recordBlock(&BlockedError{Host: "h", Path: "/sorry/"})
-	if c.acquireBackground() {
+	if c.acquireBackground(FamilyOther) {
 		t.Fatal("must refuse during backoff")
 	}
 	now = now.Add(61 * time.Second)
-	if !c.acquireBackground() {
+	if !c.acquireBackground(FamilyOther) {
 		t.Fatal("first probe after backoff must be granted")
 	}
-	if c.acquireBackground() {
+	if c.acquireBackground(FamilyOther) {
 		t.Fatal("only one probe per window")
 	}
-	c.recordGoogleOK()
-	if !c.acquireBackground() {
+	c.recordGoogleOK(FamilyOther)
+	if !c.acquireBackground(FamilyOther) {
 		t.Fatal("must allow after clear")
 	}
 }

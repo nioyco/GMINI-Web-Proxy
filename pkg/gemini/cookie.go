@@ -40,13 +40,13 @@ func (c *Client) CookieRefreshLoop(ctx context.Context, interval time.Duration) 
 		case <-t.C:
 			// While Google blocks us, background calls are suspended (one probe
 			// per window once the backoff elapsed).
-			if !c.acquireBackground() {
+			if !c.acquireBackground(FamilyAccounts) {
 				c.log.Debug("cookie refresh skipped: google block backoff in force")
 				continue
 			}
 			rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			c.RotateCookie(rctx)
-			if !c.blockedNow() {
+			if !c.blockedNow(FamilyBatch) {
 				c.fetchModels(rctx)
 			}
 			cancel()
@@ -93,7 +93,7 @@ func (c *Client) AuthRecoveryLoop(ctx context.Context, onRecovered func()) {
 			return
 		case <-time.After(jitterFn(authRecoverySchedule[i])):
 		}
-		if !c.acquireBackground() {
+		if !c.acquireBackground(FamilyApp) {
 			continue
 		}
 		rctx, cancel := context.WithTimeout(ctx, 30*time.Second)

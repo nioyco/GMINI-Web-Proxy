@@ -159,7 +159,7 @@ func (c *Client) maybeRefreshModels() {
 		c.modelsRefreshing = true
 	}
 	c.modelMu.Unlock()
-	if stale && !c.acquireBackground() { // blocked: no background call yet
+	if stale && !c.acquireBackground(FamilyBatch) { // blocked: no background call yet
 		c.modelMu.Lock()
 		c.modelsRefreshing = false
 		c.modelMu.Unlock()
@@ -237,8 +237,11 @@ func (c *Client) fetchModels(ctx context.Context) {
 	c.modelsRefreshing = false
 	c.modelMu.Unlock()
 	if have {
-		// A transient refresh failure must not downgrade a good dynamic list.
-		c.log.Debug("model list refresh failed; keeping current list", "err", err)
+		// A transient refresh failure must not downgrade a good dynamic list. It is
+		// logged at WARN (AUDIT-13 O-02), at most once per catalogWarnEvery.
+		if c.catalogWarnDue() {
+			c.log.Warn("model list refresh failed; keeping current list", "err", cleanErr(err))
+		}
 		return
 	}
 	if c.currentAt() == "" {
@@ -247,6 +250,21 @@ func (c *Client) fetchModels(ctx context.Context) {
 		c.log.Warn("dynamic model list unavailable; using fallback model list", "err", err)
 	}
 	c.storeModels(fallbackModels(c.cfg.DefaultModel), "fallback")
+}
+
+// catalogWarnEvery rate-limits the "model list refresh failed" WARN (a var so
+// tests can shrink it).
+var catalogWarnEvery = time.Hour
+
+// catalogWarnDue reports whether the refresh-failure WARN may be emitted now.
+func (c *Client) catalogWarnDue() bool {
+	c.modelMu.Lock()
+	defer c.modelMu.Unlock()
+	if !c.catalogWarnAt.IsZero() && time.Since(c.catalogWarnAt) < catalogWarnEvery {
+		return false
+	}
+	c.catalogWarnAt = time.Now()
+	return true
 }
 
 // dynamicModels fetches and parses the account's model catalog via the
@@ -334,7 +352,7 @@ func (c *Client) batchExecute(ctx context.Context, rpcid, payload string) (strin
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", err
+		return "", cleanErr(err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))

@@ -1,5 +1,7 @@
 package gemini
 
+import "time"
+
 // DefaultBuildLabel is the fallback Gemini web build label used when auto-resolution
 // is disabled or fails. It is date-stamped and may go stale.
 const DefaultBuildLabel = "boq_assistant-bard-web-server_20260529.02_p0"
@@ -41,6 +43,11 @@ type Config struct {
 	// AllowRemoteImages permits fetching http(s) image URLs (default false). Fetches
 	// refuse loopback/private/link-local destinations, limit redirects and size.
 	AllowRemoteImages bool
+
+	// BlockMaxBackoff is the top step of the anti-bot backoff (AUDIT-13 A9). Zero
+	// keeps the built-in schedule (60 min at the top); the proxy sets it from
+	// GEMINI_BLOCK_MAX_BACKOFF_MIN.
+	BlockMaxBackoff time.Duration
 }
 
 // applyDefaults fills any field left at its zero value with the corresponding

@@ -135,6 +135,7 @@ type Client struct {
 	modelsSource     string // "dynamic" | "fallback" | "static"
 	modelsAt         time.Time
 	modelsRefreshing bool
+	catalogWarnAt    time.Time // last "model list refresh failed" WARN (guarded by modelMu)
 }
 
 // New builds a Client with an HTTP client honouring the configured timeout and
@@ -262,7 +263,7 @@ func (c *Client) CurrentBL() string {
 		c.blRefreshing = true
 	}
 	c.blMu.Unlock()
-	if stale && !c.acquireBackground() { // blocked: no background call yet
+	if stale && !c.acquireBackground(FamilyApp) { // blocked: no background call yet
 		c.blMu.Lock()
 		c.blRefreshing = false
 		c.blMu.Unlock()
@@ -340,8 +341,8 @@ func (c *Client) fetchAppPageCached(ctx context.Context, maxAge time.Duration) (
 	if c.appBody != nil && time.Since(c.appAt) < maxAge {
 		return c.appBody, nil
 	}
-	if c.blockedNow() {
-		return nil, &BlockedError{Host: "gemini.google.com", Path: "/app"}
+	if c.blockedNow(FamilyApp) {
+		return nil, &BlockedError{Family: FamilyApp, Host: "gemini.google.com", Path: "/app"}
 	}
 	body, err := c.fetchAppPage(ctx)
 	if err != nil {
@@ -468,7 +469,7 @@ func (c *Client) ImagesSupported() bool {
 // caches it. Called after a cookie rotation so the token stays in sync with the
 // refreshed session.
 func (c *Client) refreshAtToken(ctx context.Context) {
-	if cookie, _ := c.loadCookie(); cookie == "" || c.blockedNow() {
+	if cookie, _ := c.loadCookie(); cookie == "" || c.blockedNow(FamilyApp) {
 		return
 	}
 	html, err := c.fetchAppPage(ctx)

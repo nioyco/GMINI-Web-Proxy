@@ -88,7 +88,7 @@ func TestBackgroundSuspendedDuringBlock(t *testing.T) {
 		calls.Add(1)
 		return resp200(r, ""), nil
 	}))
-	c.recordBlock(&BlockedError{Host: "h", Path: "/sorry/"})
+	c.recordBlock(&BlockedError{Family: FamilyAccounts, Host: "h", Path: "/sorry/"})
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	c.CookieRefreshLoop(ctx, 10*time.Millisecond) // many ticks, all suspended
@@ -101,11 +101,14 @@ func TestBackgroundSuspendedDuringBlock(t *testing.T) {
 }
 
 func TestAuthRecoveryAfterBlockAndAnonymousStart(t *testing.T) {
-	oldS, oldJ, oldB, oldP := authRecoverySchedule, jitterFn, blockSchedule, probeWindow
-	defer func() { authRecoverySchedule, jitterFn, blockSchedule, probeWindow = oldS, oldJ, oldB, oldP }()
+	oldS, oldJ, oldB, oldA, oldP := authRecoverySchedule, jitterFn, blockSchedule, appBlockSchedule, probeWindow
+	defer func() {
+		authRecoverySchedule, jitterFn, blockSchedule, appBlockSchedule, probeWindow = oldS, oldJ, oldB, oldA, oldP
+	}()
 	authRecoverySchedule = []time.Duration{10 * time.Millisecond}
 	jitterFn = func(d time.Duration) time.Duration { return d }
 	blockSchedule = []time.Duration{20 * time.Millisecond}
+	appBlockSchedule = []time.Duration{20 * time.Millisecond}
 	probeWindow = 5 * time.Millisecond
 
 	var mu sync.Mutex
