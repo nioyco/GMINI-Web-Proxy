@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
 	"net/http"
 	"runtime/debug"
 	"time"
@@ -9,22 +10,30 @@ import (
 // statusResponse is the read-only diagnostic payload of GET /_status. It never
 // contains secrets: no cookie, key, token or prompt content.
 type statusResponse struct {
-	Version            string           `json:"version"`
-	Commit             string           `json:"commit"`
-	Dirty              bool             `json:"dirty"`
-	GoVersion          string           `json:"go_version"`
-	UptimeSec          int64            `json:"uptime_sec"`
-	Authenticated      bool             `json:"authenticated"`
-	CookieRotationAgeS *int64           `json:"cookie_last_rotation_age_sec"` // null: no rotation yet in this process
-	ModelsSource       string           `json:"models_source"`                // dynamic | fallback | static
-	ModelsCount        int              `json:"models_count"`
-	DefaultModel       string           `json:"default_model"`
-	ActiveRequests     int              `json:"active_requests"` // includes this /_status request
-	SSEKeepaliveSec    int              `json:"sse_keepalive_sec"`
-	ShutdownGraceSec   int              `json:"shutdown_grace_sec"`
-	Counters           map[string]int64 `json:"counters"`
-	CookieRotation     rotationStatus   `json:"cookie_rotation"`
-	GoogleBlock        googleBlock      `json:"google_block"`
+	Version            string                `json:"version"`
+	Commit             string                `json:"commit"`
+	Dirty              bool                  `json:"dirty"`
+	GoVersion          string                `json:"go_version"`
+	UptimeSec          int64                 `json:"uptime_sec"`
+	Authenticated      bool                  `json:"authenticated"`
+	CookieRotationAgeS *int64                `json:"cookie_last_rotation_age_sec"` // null: no rotation yet in this process
+	ModelsSource       string                `json:"models_source"`                // dynamic | fallback | static
+	ModelsCount        int                   `json:"models_count"`
+	DefaultModel       string                `json:"default_model"`
+	ActiveRequests     int                   `json:"active_requests"` // includes this /_status request
+	SSEKeepaliveSec    int                   `json:"sse_keepalive_sec"`
+	ShutdownGraceSec   int                   `json:"shutdown_grace_sec"`
+	Counters           map[string]int64      `json:"counters"`
+	CookieRotation     rotationStatus        `json:"cookie_rotation"`
+	GoogleBlock        googleBlock           `json:"google_block"`
+	UpstreamParams     gemini.UpstreamParams `json:"upstream_params"`
+	IgnoredFields      ignoredFields         `json:"ignored_request_fields"`
+}
+
+// ignoredFields lists request fields received but not used by the proxy.
+type ignoredFields struct {
+	Note   string           `json:"note"`
+	Counts map[string]int64 `json:"counts"`
 }
 
 // googleBlock reports the anti-bot block state (no URLs, no query strings).
@@ -149,5 +158,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	resp.GoogleBlock = googleBlock{Active: bs.Active, Since: rfc3339Ptr(bs.Since), LastSeen: rfc3339Ptr(bs.LastSeen),
 		BackoffUntil: rfc3339Ptr(bs.BackoffUntil), Level: bs.Level, Total: bs.Total}
 	resp.Counters["google_blocks"] = bs.Total
+	resp.UpstreamParams = s.client.UpstreamParams()
+	resp.IgnoredFields = ignoredFields{
+		Note:   "top-level fields received from clients that the proxy parses or forwards nowhere (e.g. temperature, reasoning_effort); counted since start",
+		Counts: s.ignored.snapshot(),
+	}
 	sendJSON(w, http.StatusOK, resp)
 }

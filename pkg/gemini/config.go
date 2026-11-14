@@ -29,6 +29,7 @@ const (
 type Config struct {
 	Proxy          string // optional HTTP/HTTPS proxy URL
 	RequestTimeout int    // per-request timeout, seconds
+	LogParams      bool   // log the upstream parameters sent to Gemini (no content), set from GEMINI_LOG_REQUESTS
 	GeminiBL       string // build label (bl) sent to the backend
 	GeminiBLAuto   bool   // auto-resolve the build label from the Gemini page (defaults on when GeminiBL is unset)
 	AuthUser       string // /u/N account index for non-default Google accounts

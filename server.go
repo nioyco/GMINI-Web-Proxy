@@ -39,6 +39,7 @@ type Server struct {
 	started time.Time
 	active  activeSet
 	stats   statsCounters
+	ignored ignoredStats
 }
 
 // remoteImagesMsg is the 400 message for http(s) image URLs while they are disabled.
@@ -185,6 +186,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	prompt, images, toolsActive := req.Prompt()
+	s.noteRequestParams(r.Context(), "chat", body, len(images))
 	if len(images) > 0 && !s.client.ImagesSupported() {
 		sendError(w, http.StatusBadRequest, apiconv.ImagesNeedAuthMsg)
 		return
@@ -429,6 +431,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	prompt, images, toolsActive := req.Prompt()
+	s.noteRequestParams(r.Context(), "responses", body, len(images))
 	if len(images) > 0 && !s.client.ImagesSupported() {
 		sendError(w, http.StatusBadRequest, apiconv.ImagesNeedAuthMsg)
 		return
@@ -533,6 +536,7 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prompt, images, hasTools := req.Prompt()
+	s.noteRequestParams(r.Context(), "google", body, len(images))
 	if len(images) > 0 && !s.client.ImagesSupported() {
 		sendError(w, http.StatusBadRequest, apiconv.ImagesNeedAuthMsg)
 		return
@@ -671,6 +675,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	m := s.client.ResolveModelOrDefault(req.Model)
 	prompt, images, toolsActive := req.Prompt()
+	s.noteRequestParams(r.Context(), "anthropic", body, len(images))
 	if len(images) > 0 && !s.client.ImagesSupported() {
 		sendAnthropicError(w, http.StatusBadRequest, apiconv.ImagesNeedAuthMsg)
 		return

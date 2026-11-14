@@ -73,6 +73,7 @@ func loadConfig(envFile string) *Config {
 		CORSOrigins:       splitKeys(getEnv("GEMINI_CORS_ORIGINS", "")),
 		AllowedHosts:      splitKeys(getEnv("GEMINI_ALLOWED_HOSTS", "")),
 		Gemini: gemini.Config{
+			LogParams:      getEnvBool("GEMINI_LOG_REQUESTS", false),
 			RetryAttempts:  getEnvInt("GEMINI_RETRY_ATTEMPTS", 3),
 			RetryDelaySec:  getEnvInt("GEMINI_RETRY_DELAY_SEC", 2),
 			RequestTimeout: getEnvInt("GEMINI_REQUEST_TIMEOUT_SEC", 180),

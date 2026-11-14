@@ -203,21 +203,10 @@ func (c *Client) buildBody(p GenParams, images []uploadedImage) (body, reqUUID s
 	reqUUID = strings.ToUpper(uuid4())
 	inner := make([]any, 69)
 	inner[0] = []any{p.Prompt, 0, nil, imageRefsField(images), nil, nil, 0}
-	inner[1] = []any{"en"}
-	inner[2] = []any{"", "", "", nil, nil, nil, nil, nil, nil, ""}
-	inner[6] = []any{1}
-	inner[7] = 1
-	inner[10] = 1
-	inner[11] = 0
-	inner[17] = []any{[]any{0}} // constant (reasoning level is not exposed)
-	inner[18] = 0
-	inner[27] = 1
-	inner[30] = []any{4}
-	inner[41] = []any{1}
-	inner[53] = 0
+	for _, bc := range bodyConstants {
+		inner[bc.Index] = bc.Value
+	}
 	inner[59] = reqUUID
-	inner[61] = []any{} // must serialize as [] not null
-	inner[68] = 2
 
 	innerJSON, err := util.MarshalNoEscape(inner)
 	if err != nil {
@@ -535,6 +524,7 @@ func (c *Client) Generate(ctx context.Context, p GenParams) (string, error) {
 
 	met := metricsFrom(ctx)
 	met.request(len(p.Prompt), len(body))
+	c.logUpstreamParams(p)
 	start := time.Now()
 	if ctx.Err() != nil { // cancelled while uploading images: do not call Gemini
 		return "", c.clientCancelled(ctx, met, start)
@@ -630,6 +620,7 @@ func (c *Client) GenerateStream(ctx context.Context, p GenParams, emit func(delt
 	}
 	met := metricsFrom(ctx)
 	met.request(len(p.Prompt), len(body))
+	c.logUpstreamParams(p)
 	met.attempt(0)
 	t0 := time.Now()
 	respBytes := 0
