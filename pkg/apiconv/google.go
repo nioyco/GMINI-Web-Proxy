@@ -117,7 +117,7 @@ func googleContentsToPrompt(req *GenerateContentRequest) string {
 	sysText := ""
 	if req.SystemInstruction != nil {
 		if t := joinPartsText(req.SystemInstruction.Parts); t != "" {
-			sysText = "[System instruction]: " + t
+			sysText = "[System instruction]: " + neutralizeMarkers(t)
 		}
 	}
 
@@ -135,20 +135,19 @@ func googleContentsToPrompt(req *GenerateContentRequest) string {
 		for _, p := range content.Parts {
 			switch {
 			case p.Text != "":
-				msgParts = append(msgParts, p.Text)
+				msgParts = append(msgParts, neutralizeMarkers(p.Text))
 			case p.FunctionCall != nil:
 				args := string(p.FunctionCall.Args)
 				if args == "" {
 					args = "{}"
 				}
-				msgParts = append(msgParts, fmt.Sprintf("```function_call\n{\"name\": %q, \"args\": %s}\n```",
-					p.FunctionCall.Name, args))
+				msgParts = append(msgParts, "```function_call\n{\"name\": "+jsonQuote(p.FunctionCall.Name)+", \"args\": "+args+"}\n```")
 			case p.FunctionResponse != nil:
 				resp := string(p.FunctionResponse.Response)
 				if resp == "" {
 					resp = "{}"
 				}
-				msgParts = append(msgParts, fmt.Sprintf("[Tool result for %s]: %s", p.FunctionResponse.Name, resp))
+				msgParts = append(msgParts, "[Tool result for "+safeLabel(p.FunctionResponse.Name)+"]: "+resp)
 			}
 		}
 		text := strings.Join(msgParts, "\n")
@@ -278,19 +277,37 @@ func ParseGoogleFunctionCalls(text string) (string, []GoogleFunctionCall) {
 func ParseGoogleFunctionCallsWith(text string, declared []DeclaredTool) (string, []GoogleFunctionCall, ParseReport) {
 	var calls []GoogleFunctionCall
 	var rep ParseReport
+	names := declaredNameSet(declared)
 	clean := text
 	for _, re := range googleFCParsers {
-		for _, m := range re.FindAllStringSubmatch(clean, -1) {
-			for _, tc := range decodeIntentBlock(m[1], "function_call", declared, &rep) {
+		var sb strings.Builder
+		last := 0
+		for _, m := range re.FindAllStringSubmatchIndex(clean, -1) {
+			inferredBefore := len(rep.Inferred)
+			block := decodeIntentBlock(clean[m[2]:m[3]], "function_call", declared, &rep)
+			// Declared functions only: a block naming anything else stays text.
+			if bad := rejectUndeclared(block, names); len(bad) > 0 {
+				noteUndeclared(&rep, "function_call", len(declared), bad)
+				rep.Inferred = rep.Inferred[:inferredBefore]
+				continue
+			}
+			for _, tc := range block {
 				calls = append(calls, GoogleFunctionCall{Name: tc.Function.Name, Args: json.RawMessage(tc.Function.Arguments)})
 			}
+			sb.WriteString(clean[last:m[0]])
+			last = m[1]
 		}
-		clean = strings.TrimSpace(re.ReplaceAllString(clean, ""))
+		sb.WriteString(clean[last:])
+		clean = strings.TrimSpace(sb.String())
 	}
 	if len(calls) == 0 && googleJSONObject.MatchString(clean) {
 		if call, ok := decodeGoogleCall(clean); ok {
-			calls = append(calls, call)
-			clean = ""
+			if names != nil && !names[call.Name] {
+				noteUndeclared(&rep, "bare_json", len(declared), []string{call.Name})
+			} else {
+				calls = append(calls, call)
+				clean = ""
+			}
 		}
 	}
 	return clean, calls, rep

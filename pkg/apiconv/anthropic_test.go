@@ -24,7 +24,7 @@ func TestAnthropicToMessages(t *testing.T) {
 		"hello",
 		"[Assistant]: hi",
 		"get_x",
-		"[Tool result for toolu_1]: 42",
+		"[Tool result for get_x]: 42",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing %q\nfull:\n%s", want, prompt)

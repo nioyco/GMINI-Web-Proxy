@@ -131,7 +131,7 @@ func TestToolTurnRenderedInHistory(t *testing.T) {
 	}
 	p, _, _ := req.Prompt()
 	call := strings.Index(p, "```tool_call\n{\"name\": \"run\", \"arguments\": {\"cmd\":\"ls\"}}")
-	res := strings.Index(p, "[Tool result for call_1]: a.txt")
+	res := strings.Index(p, "[Tool result for run]: a.txt")
 	if call < 0 || res < 0 || call > res {
 		t.Errorf("tool turn not rendered in order (call=%d result=%d):\n%s", call, res, p)
 	}

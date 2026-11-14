@@ -8,22 +8,11 @@ package apiconv
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync/atomic"
 
 	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
 )
-
-// fenceRe matches a fenced code block emitted by the model. The model is asked to
-// wrap tool calls in ```tool_call ... ```, but in practice it varies the fence
-// language (tool_code, json, or none), omits the closing fence, or puts the
-// closing fence on the same line as the body. This pattern is deliberately
-// lenient: group 1 is the (optional) language tag, group 2 is the block body, and
-// the closing fence is optional (falls back to end-of-string for an unterminated
-// block). Whether a matched block is actually a tool call is decided by parsing
-// its body, not by the tag, so non-tool code blocks are left untouched.
-var fenceRe = regexp.MustCompile("(?s)```[ \\t]*([\\w-]*)[ \\t]*\\r?\\n(.*?)(?:```|$)")
 
 // toolFenceTags are language tags that signal tool-call intent. A block carrying
 // one of these is treated as a tool call whenever its body names a tool, even if
@@ -309,12 +298,15 @@ func messagesToPrompt(messages []Message, tools []Tool, tc toolChoiceMode) strin
 		}
 	}
 
+	ids := toolNameIndex{}
 	for _, msg := range messages {
-		content := msg.contentText()
+		// Contents supplied by the client cannot forge a history marker (T-04).
+		content := neutralizeMarkers(msg.contentText())
 		switch msg.Role {
 		case "system":
 			parts = append(parts, "[System instruction]: "+content)
 		case "assistant":
+			ids.addCalls(msg.ToolCalls)
 			if len(msg.ToolCalls) > 0 {
 				var tcStrs []string
 				for _, tc := range msg.ToolCalls {
@@ -322,22 +314,17 @@ func messagesToPrompt(messages []Message, tools []Tool, tc toolChoiceMode) strin
 					if args == "" {
 						args = "{}"
 					}
-					tcStrs = append(tcStrs, fmt.Sprintf(
-						"```tool_call\n{\"name\": \"%s\", \"arguments\": %s}\n```",
-						tc.Function.Name, args))
+					tcStrs = append(tcStrs, "```tool_call\n{\"name\": "+jsonQuote(tc.Function.Name)+", \"arguments\": "+args+"}\n```")
 				}
 				parts = append(parts, "[Assistant]: "+content+"\n"+strings.Join(tcStrs, "\n"))
 			} else {
 				parts = append(parts, "[Assistant]: "+content)
 			}
 		case "tool":
-			// OpenAI tool-result messages carry tool_call_id (and sometimes name);
-			// fall back to the id so the result is still labelled when name is absent.
-			label := msg.Name
-			if label == "" {
-				label = msg.ToolCallID
-			}
-			parts = append(parts, "[Tool result for "+label+"]: "+content)
+			// OpenAI tool-result messages carry tool_call_id (and sometimes name):
+			// label the result with the function name, found through the id in the
+			// earlier assistant tool_calls; fall back to the id itself (T-03).
+			parts = append(parts, "[Tool result for "+safeLabel(ids.toolResultLabel(msg))+"]: "+content)
 		default:
 			if content != "" {
 				parts = append(parts, content)
@@ -368,12 +355,13 @@ func ParseToolCallsWith(text string, declared []DeclaredTool) (string, []ToolCal
 	var rep ParseReport
 	var clean strings.Builder
 	last := 0
+	names := declaredNameSet(declared)
 
-	for _, loc := range fenceRe.FindAllStringSubmatchIndex(text, -1) {
-		// loc layout: [matchStart, matchEnd, tagStart, tagEnd, bodyStart, bodyEnd].
-		tag := strings.ToLower(text[loc[2]:loc[3]])
-		body := strings.TrimSpace(text[loc[4]:loc[5]])
+	for _, fb := range findFences(text) {
+		tag := strings.ToLower(fb.tag)
+		body := strings.TrimSpace(text[fb.bodyStart:fb.bodyEnd])
 		var blockCalls []ToolCall
+		inferredBefore := len(rep.Inferred)
 		if toolFenceTags[tag] {
 			blockCalls = decodeIntentBlock(body, tag, declared, &rep)
 		} else {
@@ -382,8 +370,15 @@ func ParseToolCallsWith(text string, declared []DeclaredTool) (string, []ToolCal
 		if len(blockCalls) == 0 {
 			continue // not a tool call: leave the block where it is
 		}
-		clean.WriteString(text[last:loc[0]])
-		last = loc[1]
+		// A request that declares tools only accepts those names; anything else
+		// (an example block, an invented tool) stays text and is reported.
+		if bad := rejectUndeclared(blockCalls, names); len(bad) > 0 {
+			noteUndeclared(&rep, tag, len(declared), bad)
+			rep.Inferred = rep.Inferred[:inferredBefore]
+			continue
+		}
+		clean.WriteString(text[last:fb.start])
+		last = fb.end
 		calls = append(calls, blockCalls...)
 	}
 	clean.WriteString(text[last:])
@@ -392,6 +387,10 @@ func ParseToolCallsWith(text string, declared []DeclaredTool) (string, []ToolCal
 	if len(calls) == 0 {
 		// Bare-JSON fallback: the entire reply is a tool call with no code fence.
 		if bare := toolCallsFromJSON([]byte(result), false); len(bare) > 0 {
+			if bad := rejectUndeclared(bare, names); len(bad) > 0 {
+				noteUndeclared(&rep, "bare_json", len(declared), bad)
+				return result, calls, rep
+			}
 			return "", bare, rep
 		}
 	}
@@ -559,12 +558,22 @@ func responsesItemToMessage(item map[string]any) Message {
 		callID, _ := item["call_id"].(string)
 		name, _ := item["name"].(string)
 		// Responses function_call_output usually omits the function name and only
-		// carries call_id; keep the id so the tool result stays correlated.
-		if name == "" {
-			name = callID
-		}
+		// carries call_id: messagesToPrompt resolves the name from the earlier
+		// function_call items, falling back to the id.
 		output := stringifyContent(item["output"])
 		return Message{Role: "tool", Name: name, ToolCallID: callID, Content: jsonString(output)}
+
+	case typ == "function_call":
+		// A top-level function_call item is the assistant's earlier call: keep it
+		// in the history so a later function_call_output resolves its function name.
+		name, _ := item["name"].(string)
+		args, _ := item["arguments"].(string)
+		if args == "" {
+			args = "{}"
+		}
+		callID, _ := item["call_id"].(string)
+		return Message{Role: "assistant", Content: jsonString(""), ToolCalls: []ToolCall{{
+			ID: callID, Type: "function", Function: ToolCallFunction{Name: name, Arguments: args}}}}
 
 	case role == "assistant":
 		textAcc, toolCalls := extractAssistantContent(item["content"])
