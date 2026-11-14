@@ -1,11 +1,15 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
 	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
 )
 
@@ -248,5 +252,39 @@ func TestStripHistoryEchoEnvLoaded(t *testing.T) {
 	t.Setenv("GEMINI_STRIP_HISTORY_ECHO", "1")
 	if cfg := loadConfig(noEnv); cfg.DisableEchoFilter {
 		t.Error("1 must keep the filter active")
+	}
+}
+
+func TestToolPromptRulesEnvLoadedAndExposed(t *testing.T) {
+	noEnv := filepath.Join(t.TempDir(), "none.env")
+	os.Unsetenv("GEMINI_TOOL_PROMPT_NOECHO_RULES")
+	if cfg := loadConfig(noEnv); cfg.DisableToolPromptRules {
+		t.Error("default must keep the rules on")
+	}
+	for _, v := range []string{"0", "false", "off"} {
+		t.Setenv("GEMINI_TOOL_PROMPT_NOECHO_RULES", v)
+		if cfg := loadConfig(noEnv); !cfg.DisableToolPromptRules {
+			t.Errorf("%q must turn the rules off", v)
+		}
+	}
+}
+
+func TestStatusShowsToolPromptRulesState(t *testing.T) {
+	defer apiconv.SetToolPromptRules(true)
+	for _, off := range []bool{false, true} {
+		cfg := testConfig()
+		cfg.DisableToolPromptRules = off
+		s := newTestServer(t, cfg)
+		rr := httptest.NewRecorder()
+		s.handler().ServeHTTP(rr, newReq(http.MethodGet, "/_status", nil))
+		var st struct {
+			R *bool `json:"tool_prompt_noecho_rules"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &st); err != nil || st.R == nil || *st.R == off {
+			t.Errorf("off=%v: status field = %v (%v)", off, st.R, err)
+		}
+		if apiconv.ToolPromptRules() == off {
+			t.Errorf("off=%v: package switch = %v", off, apiconv.ToolPromptRules())
+		}
 	}
 }

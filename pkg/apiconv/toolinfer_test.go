@@ -187,3 +187,50 @@ func TestToolPromptsRequireName(t *testing.T) {
 		}
 	}
 }
+
+// With the rules off, the tool prompt is byte-identical to the original one
+// (commit a9eec34), on the OpenAI-style and the Google route.
+func TestToolPromptRulesOffRestoresOriginalPrompt(t *testing.T) {
+	defer SetToolPromptRules(true)
+	tools := []Tool{{Type: "function", Function: &ToolFunction{Name: "run", Description: "d", Parameters: json.RawMessage(`{"type":"object"}`)}}}
+	defs, _ := json.MarshalIndent(normalizeTools(tools), "", "  ")
+	wantOpenAI := "# Tool Use\n\n" +
+		"You can call the following tools to help accomplish tasks. " +
+		"These tools connect to the user's local environment and will execute when called.\n\n" +
+		"Call format (use this exact format):\n" +
+		"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n" +
+		"When calling tools, output ONLY the tool_call block(s), nothing else.\n\n" +
+		"Available tools:\n" + string(defs)
+	gDefs, _ := json.MarshalIndent([]googleToolDef{{Name: "f", Description: "d"}}, "", "  ")
+	wantGoogle := "# Tool Use\n\n" +
+		"You can call the following tools to help accomplish tasks. " +
+		"These tools connect to the user's local environment and will execute when called.\n\n" +
+		"Call format (use this exact format):\n" +
+		"```function_call\n" +
+		"{\"name\": \"<tool_name>\", \"args\": {<arguments>}}\n" +
+		"```\n\n" +
+		"When calling tools:\n" +
+		"- Output ONLY the function_call block(s), nothing else\n" +
+		"- You may call multiple tools with multiple blocks\n" +
+		"- After receiving a [Tool result for ...], use that data to answer the user\n\n" +
+		"Available tools:\n" + string(gDefs)
+
+	SetToolPromptRules(false)
+	if got := messagesToPrompt([]Message{{Role: "user", Content: jsonString("x")}}, tools, toolChoiceMode{}); got != wantOpenAI+"\n\nx" {
+		t.Errorf("openai prompt differs from the original:\n%q\nwant\n%q", got, wantOpenAI+"\n\nx")
+	}
+	if got := buildGoogleToolPrompt([]googleToolDef{{Name: "f", Description: "d"}}); got != wantGoogle {
+		t.Errorf("google prompt differs from the original:\n%q\nwant\n%q", got, wantGoogle)
+	}
+	// anthropic route shares messagesToPrompt
+	ar := AnthropicRequest{Messages: []AnthropicMessage{{Role: "user", Content: jsonString("x")}}, Tools: []AnthropicTool{{Name: "run", Description: "d", InputSchema: json.RawMessage(`{"type":"object"}`)}}}
+	if p, _, _ := ar.Prompt(); strings.Contains(p, "REQUIRED") || strings.Contains(p, "NEVER") {
+		t.Errorf("anthropic prompt still has the rules: %s", p)
+	}
+
+	SetToolPromptRules(true)
+	on := messagesToPrompt([]Message{{Role: "user", Content: jsonString("x")}}, tools, toolChoiceMode{})
+	if !strings.Contains(on, "REQUIRED") || !strings.Contains(on, "NEVER write them") || on == wantOpenAI+"\n\nx" {
+		t.Errorf("default must keep the rules: %s", on)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync/atomic"
 
 	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
 )
@@ -245,6 +246,36 @@ func toolChoiceInstruction(tc toolChoiceMode) string {
 	return ""
 }
 
+// toolPromptRules switches the extra rules (toolNameRule, noEchoRules) in the tool
+// instructions of every route. Default on; GEMINI_TOOL_PROMPT_NOECHO_RULES=0 turns
+// it off, which restores the original tool prompt byte for byte (A/B testing).
+var toolPromptRules atomic.Bool
+
+func init() { toolPromptRules.Store(true) }
+
+// SetToolPromptRules enables or disables the extra tool-prompt rules.
+func SetToolPromptRules(on bool) { toolPromptRules.Store(on) }
+
+// ToolPromptRules reports whether the extra tool-prompt rules are enabled.
+func ToolPromptRules() bool { return toolPromptRules.Load() }
+
+// openAIToolRules is the text between the "output ONLY the tool_call block(s)"
+// sentence and "Available tools:" (one newline when the rules are off).
+func openAIToolRules() string {
+	if !ToolPromptRules() {
+		return "\n"
+	}
+	return toolNameRule + "\n" + noEchoRules + "\n\n"
+}
+
+// googleToolRules is the same for the Google function_call prompt.
+func googleToolRules() string {
+	if !ToolPromptRules() {
+		return "\n"
+	}
+	return "- " + toolNameRule + "\n" + noEchoRules + "\n\n"
+}
+
 // toolNameRule makes the "name" field explicit: the model once answered with the
 // arguments object alone.
 const toolNameRule = "The \"name\" field is REQUIRED in every tool call and must be exactly one of the available tool names; " +
@@ -272,8 +303,7 @@ func messagesToPrompt(messages []Message, tools []Tool, tc toolChoiceMode) strin
 				"Call format (use this exact format):\n"+
 				"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n"+
 				"When calling tools, output ONLY the tool_call block(s), nothing else.\n"+
-				toolNameRule+"\n"+
-				noEchoRules+"\n\n"+
+				openAIToolRules()+
 				"Available tools:\n"+string(defsJSON)+
 				toolChoiceInstruction(tc))
 		}

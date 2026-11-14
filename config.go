@@ -41,6 +41,9 @@ type Config struct {
 	// DisableEchoFilter turns the history-echo output filter off
 	// (GEMINI_STRIP_HISTORY_ECHO=0|false|off; emergency switch, default: filter on).
 	DisableEchoFilter bool
+	// DisableToolPromptRules removes the extra tool-prompt rules added in P6/P10
+	// (GEMINI_TOOL_PROMPT_NOECHO_RULES=0|false|off), restoring the original prompt.
+	DisableToolPromptRules bool
 	// AllowedHosts are extra Host header values accepted beside the loopback names
 	// (GEMINI_ALLOWED_HOSTS, comma-separated).
 	AllowedHosts []string
@@ -66,12 +69,13 @@ func loadConfig(envFile string) *Config {
 		CookieRefresh: getEnvInt("GEMINI_COOKIE_REFRESH_MIN", 9),
 		APIKeys:       splitKeys(getEnv("GEMINI_API_KEYS", "")),
 
-		SSEKeepaliveSec:   getEnvInt("GEMINI_SSE_KEEPALIVE_SEC", 15),
-		ShutdownGraceSec:  shutdownGrace(getEnvInt("GEMINI_SHUTDOWN_GRACE_SEC", defaultShutdownGraceSec)),
-		AllowNoAuth:       getEnvBool("GEMINI_ALLOW_NO_AUTH", false),
-		DisableEchoFilter: !getEnvBool("GEMINI_STRIP_HISTORY_ECHO", true),
-		CORSOrigins:       splitKeys(getEnv("GEMINI_CORS_ORIGINS", "")),
-		AllowedHosts:      splitKeys(getEnv("GEMINI_ALLOWED_HOSTS", "")),
+		SSEKeepaliveSec:        getEnvInt("GEMINI_SSE_KEEPALIVE_SEC", 15),
+		ShutdownGraceSec:       shutdownGrace(getEnvInt("GEMINI_SHUTDOWN_GRACE_SEC", defaultShutdownGraceSec)),
+		AllowNoAuth:            getEnvBool("GEMINI_ALLOW_NO_AUTH", false),
+		DisableEchoFilter:      !getEnvBool("GEMINI_STRIP_HISTORY_ECHO", true),
+		DisableToolPromptRules: !getEnvBool("GEMINI_TOOL_PROMPT_NOECHO_RULES", true),
+		CORSOrigins:            splitKeys(getEnv("GEMINI_CORS_ORIGINS", "")),
+		AllowedHosts:           splitKeys(getEnv("GEMINI_ALLOWED_HOSTS", "")),
 		Gemini: gemini.Config{
 			LogParams:      getEnvBool("GEMINI_LOG_REQUESTS", false),
 			RetryAttempts:  getEnvInt("GEMINI_RETRY_ATTEMPTS", 3),
