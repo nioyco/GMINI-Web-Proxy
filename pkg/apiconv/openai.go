@@ -298,12 +298,15 @@ func messagesToPrompt(messages []Message, tools []Tool, tc toolChoiceMode) strin
 		}
 	}
 
+	ids := toolNameIndex{}
 	for _, msg := range messages {
-		content := msg.contentText()
+		// Contents supplied by the client cannot forge a history marker (T-04).
+		content := neutralizeMarkers(msg.contentText())
 		switch msg.Role {
 		case "system":
 			parts = append(parts, "[System instruction]: "+content)
 		case "assistant":
+			ids.addCalls(msg.ToolCalls)
 			if len(msg.ToolCalls) > 0 {
 				var tcStrs []string
 				for _, tc := range msg.ToolCalls {
@@ -311,22 +314,17 @@ func messagesToPrompt(messages []Message, tools []Tool, tc toolChoiceMode) strin
 					if args == "" {
 						args = "{}"
 					}
-					tcStrs = append(tcStrs, fmt.Sprintf(
-						"```tool_call\n{\"name\": \"%s\", \"arguments\": %s}\n```",
-						tc.Function.Name, args))
+					tcStrs = append(tcStrs, "```tool_call\n{\"name\": "+jsonQuote(tc.Function.Name)+", \"arguments\": "+args+"}\n```")
 				}
 				parts = append(parts, "[Assistant]: "+content+"\n"+strings.Join(tcStrs, "\n"))
 			} else {
 				parts = append(parts, "[Assistant]: "+content)
 			}
 		case "tool":
-			// OpenAI tool-result messages carry tool_call_id (and sometimes name);
-			// fall back to the id so the result is still labelled when name is absent.
-			label := msg.Name
-			if label == "" {
-				label = msg.ToolCallID
-			}
-			parts = append(parts, "[Tool result for "+label+"]: "+content)
+			// OpenAI tool-result messages carry tool_call_id (and sometimes name):
+			// label the result with the function name, found through the id in the
+			// earlier assistant tool_calls; fall back to the id itself (T-03).
+			parts = append(parts, "[Tool result for "+safeLabel(ids.toolResultLabel(msg))+"]: "+content)
 		default:
 			if content != "" {
 				parts = append(parts, content)
@@ -560,12 +558,22 @@ func responsesItemToMessage(item map[string]any) Message {
 		callID, _ := item["call_id"].(string)
 		name, _ := item["name"].(string)
 		// Responses function_call_output usually omits the function name and only
-		// carries call_id; keep the id so the tool result stays correlated.
-		if name == "" {
-			name = callID
-		}
+		// carries call_id: messagesToPrompt resolves the name from the earlier
+		// function_call items, falling back to the id.
 		output := stringifyContent(item["output"])
 		return Message{Role: "tool", Name: name, ToolCallID: callID, Content: jsonString(output)}
+
+	case typ == "function_call":
+		// A top-level function_call item is the assistant's earlier call: keep it
+		// in the history so a later function_call_output resolves its function name.
+		name, _ := item["name"].(string)
+		args, _ := item["arguments"].(string)
+		if args == "" {
+			args = "{}"
+		}
+		callID, _ := item["call_id"].(string)
+		return Message{Role: "assistant", Content: jsonString(""), ToolCalls: []ToolCall{{
+			ID: callID, Type: "function", Function: ToolCallFunction{Name: name, Arguments: args}}}}
 
 	case role == "assistant":
 		textAcc, toolCalls := extractAssistantContent(item["content"])

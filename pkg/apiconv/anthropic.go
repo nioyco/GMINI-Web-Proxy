@@ -101,7 +101,7 @@ func anthropicMessageToMessages(m AnthropicMessage) []Message {
 		case "tool_result":
 			tid, _ := b["tool_use_id"].(string)
 			out = append(out, Message{
-				Role: "tool", Name: tid,
+				Role: "tool", ToolCallID: tid,
 				Content: jsonString(stringifyContent(b["content"])),
 			})
 		}

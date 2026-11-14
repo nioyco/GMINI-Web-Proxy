@@ -117,7 +117,7 @@ func googleContentsToPrompt(req *GenerateContentRequest) string {
 	sysText := ""
 	if req.SystemInstruction != nil {
 		if t := joinPartsText(req.SystemInstruction.Parts); t != "" {
-			sysText = "[System instruction]: " + t
+			sysText = "[System instruction]: " + neutralizeMarkers(t)
 		}
 	}
 
@@ -135,20 +135,19 @@ func googleContentsToPrompt(req *GenerateContentRequest) string {
 		for _, p := range content.Parts {
 			switch {
 			case p.Text != "":
-				msgParts = append(msgParts, p.Text)
+				msgParts = append(msgParts, neutralizeMarkers(p.Text))
 			case p.FunctionCall != nil:
 				args := string(p.FunctionCall.Args)
 				if args == "" {
 					args = "{}"
 				}
-				msgParts = append(msgParts, fmt.Sprintf("```function_call\n{\"name\": %q, \"args\": %s}\n```",
-					p.FunctionCall.Name, args))
+				msgParts = append(msgParts, "```function_call\n{\"name\": "+jsonQuote(p.FunctionCall.Name)+", \"args\": "+args+"}\n```")
 			case p.FunctionResponse != nil:
 				resp := string(p.FunctionResponse.Response)
 				if resp == "" {
 					resp = "{}"
 				}
-				msgParts = append(msgParts, fmt.Sprintf("[Tool result for %s]: %s", p.FunctionResponse.Name, resp))
+				msgParts = append(msgParts, "[Tool result for "+safeLabel(p.FunctionResponse.Name)+"]: "+resp)
 			}
 		}
 		text := strings.Join(msgParts, "\n")
