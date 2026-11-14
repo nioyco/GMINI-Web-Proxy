@@ -739,6 +739,7 @@ func (c *Client) generateAttempts(ctx context.Context, p GenParams, images []upl
 					// A 200 without text is treated as a (retryable) failure rather than a
 					// silent empty answer; only this case carries the size-limit hint.
 					if text := extractResponseText(string(raw)); text != "" {
+						c.writeTrace(met, p, traceResult{Text: text, Start: t0})
 						return text, nil
 					}
 					err = ErrEmptyResponse
@@ -841,9 +842,13 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 	t0 := time.Now()
 	respBytes := 0
 	shape := newFrameShape()
+	prevText, prevThought := "", ""
+	var runErr error
 	defer func() {
 		met.upstream(t0, respBytes)
 		c.logFrameShape(shape)
+		c.writeTrace(met, p, traceResult{Stream: true, Text: prevText, Thought: prevThought, Err: runErr,
+			Start: t0, Frames: shape.frames, FirstTextMS: shape.firstTextMS, LastFrameMS: shape.lastFrameMS})
 	}()
 	if ctx.Err() != nil {
 		return c.clientCancelled(ctx, met, t0)
@@ -863,7 +868,6 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 	// ReadString grows its buffer as needed, unlike bufio.Scanner which caps at 64KB;
 	// batchexecute lines routinely exceed that.
 	reader := bufio.NewReader(resp.Body)
-	prevText, prevThought := "", ""
 	emitted, thoughtEmitted := false, false
 	for {
 		line, readErr := reader.ReadString('\n')
@@ -874,13 +878,13 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 			if ok {
 				shape.add(fr, time.Since(t0))
 			}
-			if ok && h.Thought != nil && len(fr.thought) > len(prevThought) {
+			if ok && len(fr.thought) > len(prevThought) {
 				delta := runeDelta(prevThought, fr.thought)
 				prevThought = fr.thought
 				if !thoughtEmitted {
 					delta = strings.TrimLeft(delta, " \t\r\n")
 				}
-				if delta != "" {
+				if delta != "" && h.Thought != nil {
 					thoughtEmitted = true
 					h.Thought(delta)
 				}
@@ -904,8 +908,10 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 				return nil
 			}
 			if ctx.Err() != nil {
-				return c.clientCancelled(ctx, met, t0)
+				runErr = c.clientCancelled(ctx, met, t0)
+				return runErr
 			}
+			runErr = readErr
 			return readErr
 		}
 	}

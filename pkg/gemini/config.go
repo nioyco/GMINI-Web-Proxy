@@ -43,6 +43,12 @@ type Config struct {
 	// AllowRemoteImages permits fetching http(s) image URLs (default false). Fetches
 	// refuse loopback/private/link-local destinations, limit redirects and size.
 	AllowRemoteImages bool
+	// TraceDir, when set, makes the client write one JSON file per generation with
+	// the FULL prompt and reply (GEMINI_TRACE_DIR). Off by default: the files hold
+	// conversation content. Never contains cookies, tokens or keys. 0700 dir, 0600 files.
+	TraceDir string
+	// TraceMaxFiles caps the number of trace files kept (oldest removed first).
+	TraceMaxFiles int
 
 	// BlockMaxBackoff is the top step of the anti-bot backoff (AUDIT-13 A9). Zero
 	// keeps the built-in schedule (60 min at the top); the proxy sets it from

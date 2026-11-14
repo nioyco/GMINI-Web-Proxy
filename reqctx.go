@@ -205,6 +205,7 @@ func (s *Server) withTracking(next http.Handler) http.Handler {
 		ctx, cancel := context.WithCancelCause(r.Context())
 		ri := &reqInfo{id: id, method: r.Method, route: r.URL.Path, start: time.Now(), cancel: cancel}
 		ctx = context.WithValue(ctx, ctxKey{}, ri)
+		ri.met.ID = id
 		ctx = gemini.WithMetrics(ctx, &ri.met)
 		s.active.add(ri)
 		s.stats.requests.Add(1)

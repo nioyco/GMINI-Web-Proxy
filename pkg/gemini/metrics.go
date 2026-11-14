@@ -10,6 +10,7 @@ import (
 // content. A request handler attaches one to the context (WithMetrics) and the
 // Client fills it while generating. All fields are safe for concurrent use.
 type CallMetrics struct {
+	ID          string       // request id of the proxy (set by the caller before use; read-only afterwards)
 	ReqBytes    atomic.Int64 // upstream request body size (bytes)
 	PromptBytes atomic.Int64 // prompt size inside it (bytes)
 	Attempts    atomic.Int64 // upstream attempts made

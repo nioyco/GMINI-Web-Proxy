@@ -474,6 +474,20 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 	if tick <= 0 {
 		tick = interval
 	}
+	// While a (possibly long) tool call is being written nothing can be forwarded:
+	// a short progress note goes out as reasoning_content instead, so the client
+	// shows activity and its inactivity timer is reset by real data.
+	hintEvery, lastHeld := interval/3, 0
+	hint := func() bool {
+		held := gate.Held()
+		if !s.cfg.StreamThoughts || held < 512 || held == lastHeld || time.Since(lastWrite) < hintEvery {
+			return true
+		}
+		lastHeld = held
+		note := fmt.Sprintf("Préparation d'un appel d'outil… %d Ko reçus (%s)\n", (held+512)/1024, time.Since(start).Round(time.Second))
+		forwarded = true
+		return write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note)))
+	}
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
 	var genErr error
@@ -484,6 +498,9 @@ loop:
 			cancelled()
 			return
 		case <-ticker.C:
+			if !hint() {
+				return
+			}
 			if time.Since(lastWrite) >= interval && !keepalive() {
 				return
 			}

@@ -127,6 +127,8 @@ func loadConfig(envFile string) *Config {
 			Proxy:          getEnv("GEMINI_PROXY", ""),
 
 			AllowRemoteImages: getEnvBool("GEMINI_ALLOW_REMOTE_IMAGES", false),
+			TraceDir:          strings.TrimSpace(getEnv("GEMINI_TRACE_DIR", "")),
+			TraceMaxFiles:     getEnvInt("GEMINI_TRACE_MAX_FILES", 0),
 		},
 	}
 

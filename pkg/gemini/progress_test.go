@@ -6,8 +6,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // wrbLine builds a streamed "wrb.fr" line whose first candidate carries text and,
@@ -94,5 +96,54 @@ func TestBuildBodyThinkingLevel(t *testing.T) {
 	body, _, _ = c.buildBody(GenParams{Prompt: "p", Level: 1}, nil)
 	if in = innerOf(t, body); in[79] != nil || in[80] != float64(1) {
 		t.Fatalf("level only: [79]=%v [80]=%v", in[79], in[80])
+	}
+}
+
+// Tracing is off by default; when a directory is set, one private file per
+// generation holds the prompt and the reply, never the cookie or the token.
+func TestContentTrace(t *testing.T) {
+	dir := t.TempDir() + "/traces"
+	run := func(traceDir string) {
+		c, _ := New(Config{GeminiBL: "bl", RetryAttempts: 1, Cookie: "SAPISID=SECRETSAPI; __Secure-1PSID=SECRETPSID", TraceDir: traceDir, TraceMaxFiles: 2}, nil)
+		c.setAt("SECRET_AT_TOKEN")
+		body := wrbLine("Il est 8h.", "Analyse")
+		c.SetTransport(rtFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		}))
+		ctx := WithMetrics(context.Background(), &CallMetrics{ID: "req1"})
+		for i := 0; i < 3; i++ {
+			if err := c.GenerateStreamEvents(ctx, GenParams{Prompt: "PROMPT_MARKER"}, StreamHandlers{}); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(3 * time.Millisecond)
+		}
+	}
+	run("")
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatal("no trace directory may be created when tracing is off")
+	}
+	run(dir)
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("want 2 files kept (max), got %d err=%v", len(entries), err)
+	}
+	if st, _ := os.Stat(dir); st.Mode().Perm() != 0o700 {
+		t.Errorf("dir mode = %v, want 0700", st.Mode().Perm())
+	}
+	for _, e := range entries {
+		info, _ := e.Info()
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("file mode = %v, want 0600", info.Mode().Perm())
+		}
+		data, _ := os.ReadFile(dir + "/" + e.Name())
+		s := string(data)
+		if !strings.Contains(s, "PROMPT_MARKER") || !strings.Contains(s, "Il est 8h.") || !strings.Contains(s, "Analyse") {
+			t.Errorf("trace must hold prompt, reply and thought: %s", s)
+		}
+		for _, secret := range []string{"SECRETSAPI", "SECRETPSID", "SECRET_AT_TOKEN"} {
+			if strings.Contains(s, secret) {
+				t.Errorf("trace leaks %s", secret)
+			}
+		}
 	}
 }

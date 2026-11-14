@@ -80,6 +80,10 @@ func (g *ProgressGate) Push(delta string) string {
 	return out
 }
 
+// Held returns how many bytes are currently held back (a possible tool call being
+// written, or a fence whose tag is not known yet).
+func (g *ProgressGate) Held() int { return len(g.acc) - g.sent }
+
 // Sent returns the text released so far.
 func (g *ProgressGate) Sent() string { return g.acc[:g.sent] }
 

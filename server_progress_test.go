@@ -211,3 +211,36 @@ func TestPromptTooLarge(t *testing.T) {
 		t.Errorf("status = %d, want 413", resp.StatusCode)
 	}
 }
+
+// While a long tool call is being written, progress notes go out as
+// reasoning_content and nothing of the call leaks into the text.
+func TestProgressHintsDuringLongToolCall(t *testing.T) {
+	f := progressServer(t, func(_ context.Context, _ gemini.GenParams, h gemini.StreamHandlers) error {
+		h.Text("```tool_call\n{\"name\": \"run\", \"arguments\": {\"cmd\": \"")
+		for i := 0; i < 6; i++ {
+			h.Text(strings.Repeat("x", 400))
+			time.Sleep(40 * time.Millisecond)
+		}
+		h.Text("\"}}\n```")
+		return nil
+	})
+	c := readSSE(t, context.Background(), f.url, body(""))
+	assertProgressStream(t, c)
+	vs := views(t, c)
+	hints := 0
+	for _, v := range vs[:len(vs)-1] {
+		d := v.Choices[0].Delta
+		if d.Content != nil {
+			t.Errorf("no text may be forwarded during a tool call: %q", *d.Content)
+		}
+		if d.Reasoning != nil && strings.Contains(*d.Reasoning, "appel d'outil") {
+			hints++
+		}
+	}
+	if hints == 0 {
+		t.Errorf("want at least one progress note; frames: %v", c.dataFrames)
+	}
+	if last := vs[len(vs)-1].Choices[0]; len(last.Delta.ToolCalls) != 1 || len(last.Delta.ToolCalls[0].Function.Arguments) < 2400 {
+		t.Errorf("final frame must carry the whole tool call")
+	}
+}
