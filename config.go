@@ -47,7 +47,10 @@ type Config struct {
 	// AllowedHosts are extra Host header values accepted beside the loopback names
 	// (GEMINI_ALLOWED_HOSTS, comma-separated).
 	AllowedHosts []string
-	Gemini       gemini.Config
+	// ModelsRefreshHours spaces the periodic catalog refresh (listModels)
+	// (GEMINI_MODELS_REFRESH_HOURS, default 24; 0 = startup and explicit requests only).
+	ModelsRefreshHours int
+	Gemini             gemini.Config
 }
 
 // loadConfig seeds env from a .env file, then reads all settings. The .env path
@@ -76,6 +79,7 @@ func loadConfig(envFile string) *Config {
 		DisableToolPromptRules: !getEnvBool("GEMINI_TOOL_PROMPT_NOECHO_RULES", true),
 		CORSOrigins:            splitKeys(getEnv("GEMINI_CORS_ORIGINS", "")),
 		AllowedHosts:           splitKeys(getEnv("GEMINI_ALLOWED_HOSTS", "")),
+		ModelsRefreshHours:     nonNegative(getEnvInt("GEMINI_MODELS_REFRESH_HOURS", 24), 24),
 		Gemini: gemini.Config{
 			LogParams:      getEnvBool("GEMINI_LOG_REQUESTS", false),
 			RetryAttempts:  getEnvInt("GEMINI_RETRY_ATTEMPTS", 3),
@@ -133,6 +137,14 @@ const defaultShutdownGraceSec = 30
 func shutdownGrace(n int) int {
 	if n < 0 {
 		return defaultShutdownGraceSec
+	}
+	return n
+}
+
+// nonNegative maps a negative setting back to def.
+func nonNegative(n, def int) int {
+	if n < 0 {
+		return def
 	}
 	return n
 }

@@ -18,9 +18,18 @@ import (
 // model catalog (and tier/capability flags).
 const listModelsRPC = "otAQ7b"
 
-// modelsTTL is how long a fetched dynamic model list is reused before a
-// background refresh is triggered.
-const modelsTTL = 30 * time.Minute
+// DefaultModelsRefreshInterval is the default spacing of the periodic catalog
+// refresh (listModels). The catalog is fetched at startup (unless a recent copy
+// was restored), then at most once per interval or on explicit request
+// (AUDIT-13 A2). It used to be refreshed at every cookie-rotation tick.
+const DefaultModelsRefreshInterval = 24 * time.Hour
+
+// catalogRetryAfter spaces catalog attempts after a failed or skipped one, and
+// catalogManualMinInterval spaces explicit refresh requests (vars for tests).
+var (
+	catalogRetryAfter        = time.Hour
+	catalogManualMinInterval = 5 * time.Minute
+)
 
 // genericModelHeader is the x-goog-ext-525001261-jspb value used on the model
 // listing RPC (no specific model id, just the [4] suffix the web client sends).
@@ -111,10 +120,10 @@ func (c *Client) defaultModel() *AvailableModel {
 	return nil
 }
 
-// ListModels returns the registered models in listing order, triggering a
-// background refresh when the cached list has gone stale.
+// ListModels returns the registered models in listing order. It is a pure
+// accessor: it never triggers a Google call (AUDIT-13 A4), so /v1/models and the
+// diagnostic routes stay strictly local.
 func (c *Client) ListModels() []*AvailableModel {
-	c.maybeRefreshModels()
 	c.modelMu.Lock()
 	defer c.modelMu.Unlock()
 	out := make([]*AvailableModel, 0, len(c.modelOrder))
@@ -126,9 +135,9 @@ func (c *Client) ListModels() []*AvailableModel {
 	return out
 }
 
-// ModelNames returns the registered model names in listing order.
+// ModelNames returns the registered model names in listing order (pure accessor,
+// no Google call).
 func (c *Client) ModelNames() []string {
-	c.maybeRefreshModels()
 	c.modelMu.Lock()
 	defer c.modelMu.Unlock()
 	return append([]string(nil), c.modelOrder...)
@@ -150,28 +159,83 @@ func (c *Client) SetModels(models []*AvailableModel) {
 	c.storeModels(models, "static")
 }
 
-// maybeRefreshModels kicks off a background dynamic refresh when the cached list
-// is older than modelsTTL (mirrors CurrentBL).
-func (c *Client) maybeRefreshModels() {
+// CatalogRefreshLoop refreshes the model catalog at most once per interval
+// (counted from the last successful fetch, restored state included), and retries
+// a failed or skipped attempt after catalogRetryAfter. It makes no call without
+// an authenticated session or while a gemini.google.com block is in force. It is
+// independent of the cookie rotation, so a rotation tick makes a single call.
+func (c *Client) CatalogRefreshLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(c.catalogDueIn(interval)):
+		}
+		if !c.Authenticated() || !c.acquireBackground(FamilyBatch) {
+			c.markCatalogTried()
+			continue
+		}
+		rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		c.fetchModels(rctx)
+		cancel()
+	}
+}
+
+// catalogDueIn returns how long until the next periodic catalog refresh is due.
+func (c *Client) catalogDueIn(interval time.Duration) time.Duration {
 	c.modelMu.Lock()
-	stale := !c.modelsRefreshing && (c.modelsAt.IsZero() || time.Since(c.modelsAt) > modelsTTL)
-	if stale {
-		c.modelsRefreshing = true
+	defer c.modelMu.Unlock()
+	now := time.Now()
+	due := now
+	if !c.catalogAt.IsZero() {
+		due = c.catalogAt.Add(interval)
 	}
+	if !c.catalogTriedAt.IsZero() {
+		if retry := c.catalogTriedAt.Add(catalogRetryAfter); retry.After(due) {
+			due = retry
+		}
+	}
+	if d := due.Sub(now); d > 0 {
+		return d
+	}
+	return 0
+}
+
+func (c *Client) markCatalogTried() {
+	c.modelMu.Lock()
+	c.catalogTriedAt = time.Now()
 	c.modelMu.Unlock()
-	if stale && !c.acquireBackground(FamilyBatch) { // blocked: no background call yet
-		c.modelMu.Lock()
-		c.modelsRefreshing = false
-		c.modelMu.Unlock()
-		stale = false
+}
+
+// ErrCatalogRefreshRefused is returned by RefreshModels when the refresh was not
+// attempted (no session, block in force, or a request made too recently).
+var ErrCatalogRefreshRefused = errors.New("catalog refresh not attempted")
+
+// RefreshModels refreshes the model catalog on explicit request (one listModels
+// call). It refuses — without any Google call — when the session is not
+// authenticated, when a gemini.google.com block is in force, or when the last
+// attempt is younger than catalogManualMinInterval.
+func (c *Client) RefreshModels(ctx context.Context) error {
+	if !c.Authenticated() {
+		return fmt.Errorf("%w: session is not authenticated", ErrCatalogRefreshRefused)
 	}
-	if stale {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			defer cancel()
-			c.fetchModels(ctx)
-		}()
+	c.modelMu.Lock()
+	recent := !c.catalogTriedAt.IsZero() && time.Since(c.catalogTriedAt) < catalogManualMinInterval
+	c.modelMu.Unlock()
+	if recent {
+		return fmt.Errorf("%w: last attempt less than %s ago", ErrCatalogRefreshRefused, catalogManualMinInterval)
 	}
+	if !c.acquireBackground(FamilyBatch) {
+		return fmt.Errorf("%w: google block backoff in force", ErrCatalogRefreshRefused)
+	}
+	if err := c.fetchModels(ctx); err != nil {
+		return err
+	}
+	c.log.Info("gemini model list refreshed on request", "count", len(c.ModelNames()))
+	return nil
 }
 
 // storeModels atomically replaces the registry with the given models, preserving
@@ -190,8 +254,6 @@ func (c *Client) storeModels(models []*AvailableModel, source string) {
 	c.models = reg
 	c.modelOrder = order
 	c.modelsSource = source
-	c.modelsAt = time.Now()
-	c.modelsRefreshing = false
 	c.modelMu.Unlock()
 }
 
@@ -224,17 +286,20 @@ func (c *Client) ResolveModels(ctx context.Context) {
 // failure it keeps an existing good list rather than downgrading; only when the
 // registry is still empty (startup) does it install the fallback set. Routine
 // refreshes log at Debug; the one-time startup summary is logged by ResolveModels.
-func (c *Client) fetchModels(ctx context.Context) {
+func (c *Client) fetchModels(ctx context.Context) error {
+	c.markCatalogTried()
 	models, err := c.dynamicModels(ctx)
 	if err == nil {
 		c.storeModels(models, "dynamic")
+		c.modelMu.Lock()
+		c.catalogAt = time.Now()
+		c.modelMu.Unlock()
 		c.log.Debug("refreshed gemini model list", "count", len(models), "source", "dynamic")
-		return
+		return nil
 	}
 
 	c.modelMu.Lock()
 	have := len(c.modelOrder) > 0
-	c.modelsRefreshing = false
 	c.modelMu.Unlock()
 	if have {
 		// A transient refresh failure must not downgrade a good dynamic list. It is
@@ -242,7 +307,7 @@ func (c *Client) fetchModels(ctx context.Context) {
 		if c.catalogWarnDue() {
 			c.log.Warn("model list refresh failed; keeping current list", "err", cleanErr(err))
 		}
-		return
+		return err
 	}
 	if c.currentAt() == "" {
 		c.log.Warn("no authenticated session for model list; using fallback model list")
@@ -250,6 +315,7 @@ func (c *Client) fetchModels(ctx context.Context) {
 		c.log.Warn("dynamic model list unavailable; using fallback model list", "err", err)
 	}
 	c.storeModels(fallbackModels(c.cfg.DefaultModel), "fallback")
+	return err
 }
 
 // catalogWarnEvery rate-limits the "model list refresh failed" WARN (a var so

@@ -85,6 +85,7 @@ func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleHealth)
 	mux.Handle("GET /_status", s.withAuth(s.handleStatus))
+	mux.Handle("POST /_models/refresh", s.withAuth(s.handleModelsRefresh))
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /v1beta/models", s.handleModelsGoogle)
 	mux.Handle("POST /v1/chat/completions", s.withAuth(s.handleChat))
@@ -142,6 +143,27 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		Version: version,
 		Models:  s.client.ModelNames(),
 	})
+}
+
+// handleModelsRefresh refreshes the model catalog on explicit request (one
+// listModels call at most; refused without any Google call when the session is
+// not authenticated, a block is in force, or the last attempt is too recent).
+func (s *Server) handleModelsRefresh(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	err := s.client.RefreshModels(ctx)
+	resp := map[string]any{"refreshed": err == nil, "models_count": len(s.client.ModelNames()),
+		"models_source": s.client.ModelsSourceLabel()}
+	status := http.StatusOK
+	switch {
+	case errors.Is(err, gemini.ErrCatalogRefreshRefused):
+		status = http.StatusConflict
+		resp["error"] = err.Error()
+	case err != nil:
+		status = http.StatusBadGateway
+		resp["error"] = err.Error()
+	}
+	sendJSON(w, status, resp)
 }
 
 // handleModels serves the model list in OpenAI format by default, or Anthropic

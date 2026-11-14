@@ -26,10 +26,11 @@ const (
 )
 
 // CookieRefreshLoop periodically rotates __Secure-1PSIDTS so the configured cookie
-// (file-backed or inline) does not go stale, and refreshes the model list after
-// each rotation (a renewed session may surface a changed account catalog). The
-// initial rotation is expected to be done synchronously at startup, so the loop
-// only ticks on the interval and stops when ctx is cancelled.
+// (file-backed or inline) does not go stale. Each tick makes exactly one Google
+// call (RotateCookies) — the catalog is refreshed by CatalogRefreshLoop and the
+// /app page is no longer reloaded after a rotation (AUDIT-13 A2, A6). The initial
+// rotation is expected to be done synchronously at startup, so the loop only
+// ticks on the interval and stops when ctx is cancelled.
 func (c *Client) CookieRefreshLoop(ctx context.Context, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -38,7 +39,7 @@ func (c *Client) CookieRefreshLoop(ctx context.Context, interval time.Duration) 
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			// While Google blocks us, background calls are suspended (one probe
+			// While accounts.google.com blocks us, rotation is suspended (one probe
 			// per window once the backoff elapsed).
 			if !c.acquireBackground(FamilyAccounts) {
 				c.log.Debug("cookie refresh skipped: google block backoff in force")
@@ -46,9 +47,6 @@ func (c *Client) CookieRefreshLoop(ctx context.Context, interval time.Duration) 
 			}
 			rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			c.RotateCookie(rctx)
-			if !c.blockedNow(FamilyBatch) {
-				c.fetchModels(rctx)
-			}
 			cancel()
 		}
 	}

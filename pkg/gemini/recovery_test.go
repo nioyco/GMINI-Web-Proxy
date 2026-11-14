@@ -93,7 +93,7 @@ func TestBackgroundSuspendedDuringBlock(t *testing.T) {
 	defer cancel()
 	c.CookieRefreshLoop(ctx, 10*time.Millisecond) // many ticks, all suspended
 	_ = c.CurrentBL()                             // stale BL refresh must not fire either
-	c.maybeRefreshModels()
+	_, _ = c.ListModels(), c.ModelNames()
 	time.Sleep(50 * time.Millisecond)
 	if calls.Load() != 0 {
 		t.Errorf("%d Google calls while blocked, want 0", calls.Load())

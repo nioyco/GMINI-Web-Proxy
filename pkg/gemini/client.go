@@ -132,10 +132,10 @@ type Client struct {
 	modelMu          sync.Mutex
 	models           map[string]*AvailableModel
 	modelOrder       []string
-	modelsSource     string // "dynamic" | "fallback" | "static"
-	modelsAt         time.Time
-	modelsRefreshing bool
-	catalogWarnAt    time.Time // last "model list refresh failed" WARN (guarded by modelMu)
+	modelsSource   string    // "dynamic" | "fallback" | "static" | "persisted"
+	catalogAt      time.Time // last successful listModels fetch (or restored state)
+	catalogTriedAt time.Time // last listModels attempt (success or not)
+	catalogWarnAt  time.Time // last "model list refresh failed" WARN (guarded by modelMu)
 }
 
 // New builds a Client with an HTTP client honouring the configured timeout and

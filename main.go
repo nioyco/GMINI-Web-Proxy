@@ -88,6 +88,9 @@ func main() {
 	if refresh {
 		go client.CookieRefreshLoop(ctx, time.Duration(cfg.CookieRefresh)*time.Minute)
 	}
+	// The catalog is refreshed at most once per GEMINI_MODELS_REFRESH_HOURS, on its
+	// own timer (never chained to a rotation tick).
+	go client.CatalogRefreshLoop(ctx, time.Duration(cfg.ModelsRefreshHours)*time.Hour)
 	// Started without a signed-in session although a cookie is configured (Google
 	// block, stale cookie): keep re-checking in the background, no restart needed.
 	if authStatus != "authenticated" && !refresh && authStatus != "anonymous" &&
