@@ -144,6 +144,9 @@ type Client struct {
 	// Session state file (AUDIT-13 A5).
 	stateMu      sync.Mutex
 	stateSavedAt time.Time
+
+	// Content-free journal of generations (served.go).
+	calls callJournal
 }
 
 // New builds a Client with an HTTP client honouring the configured timeout and
@@ -181,6 +184,7 @@ func New(cfg Config, logger *slog.Logger) (*Client, error) {
 	}
 	c.http.Transport = &googleTransport{base: transport, c: c}
 	c.imageHTTP = c.newImageHTTPClient()
+	c.loadCalls()
 	return c, nil
 }
 
@@ -739,7 +743,12 @@ func (c *Client) generateAttempts(ctx context.Context, p GenParams, images []upl
 					// A 200 without text is treated as a (retryable) failure rather than a
 					// silent empty answer; only this case carries the size-limit hint.
 					if text := extractResponseText(string(raw)); text != "" {
-						c.writeTrace(met, p, traceResult{Text: text, Start: t0})
+						c.writeTrace(met, p, traceResult{Text: text, Start: t0, Raw: []string{string(raw)}})
+						scan := &idScan{}
+						scan.add(string(raw))
+						rec := newCallRecord(met, p, t0)
+						rec.TextBytes = len(text)
+						c.recordCall(rec, scan)
 						return text, nil
 					}
 					err = ErrEmptyResponse
@@ -844,24 +853,45 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 	shape := newFrameShape()
 	prevText, prevThought := "", ""
 	var runErr error
+	scan := &idScan{}
+	var rawLines []string
+	rawBytes := 0
+	sent := false
 	defer func() {
 		met.upstream(t0, respBytes)
 		c.logFrameShape(shape)
 		c.writeTrace(met, p, traceResult{Stream: true, Text: prevText, Thought: prevThought, Err: runErr,
-			Start: t0, Frames: shape.frames, FirstTextMS: shape.firstTextMS, LastFrameMS: shape.lastFrameMS})
+			Start: t0, Frames: shape.frames, FirstTextMS: shape.firstTextMS, LastFrameMS: shape.lastFrameMS, Raw: rawLines})
+		if !sent {
+			return // nothing was asked of Gemini (cancelled before the call)
+		}
+		rec := newCallRecord(met, p, t0)
+		rec.Stream, rec.Frames = true, shape.frames
+		rec.FirstTextMS, rec.FirstThoughtMS = shape.firstTextMS, shape.firstThoughtMS
+		rec.TextBytes, rec.ThoughtBytes = len(prevText), len(prevThought)
+		if runErr != nil {
+			rec.Error = "stream_interrupted"
+		} else if prevText == "" {
+			rec.Error = "empty"
+		}
+		c.recordCall(rec, scan)
 	}()
 	if ctx.Err() != nil {
 		return c.clientCancelled(ctx, met, t0)
 	}
+	sent = true
 	resp, err := c.http.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return c.clientCancelled(ctx, met, t0)
+			runErr = c.clientCancelled(ctx, met, t0)
+			return runErr
 		}
-		return fmt.Errorf("gemini request failed: %w", cleanErr(err))
+		runErr = fmt.Errorf("gemini request failed: %w", cleanErr(err))
+		return runErr
 	}
 	if err := c.checkGenerateStatus(resp, hadAt, n); err != nil {
-		return fmt.Errorf("gemini request failed: %w", err)
+		runErr = fmt.Errorf("gemini request failed: %w", err)
+		return runErr
 	}
 	defer resp.Body.Close()
 
@@ -874,6 +904,11 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 		if line != "" {
 			respBytes += len(line)
 			met.firstByte(t0)
+			scan.add(line)
+			if c.cfg.TraceRaw && c.cfg.TraceDir != "" && rawBytes < traceRawMax {
+				rawBytes += len(line)
+				rawLines = append(rawLines, line)
+			}
 			fr, ok := parseFrame(line)
 			if ok {
 				shape.add(fr, time.Since(t0))

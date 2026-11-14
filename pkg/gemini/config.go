@@ -49,6 +49,11 @@ type Config struct {
 	TraceDir string
 	// TraceMaxFiles caps the number of trace files kept (oldest removed first).
 	TraceMaxFiles int
+	// TraceRaw also stores the raw response lines in each trace file (GEMINI_TRACE_RAW).
+	TraceRaw bool
+	// CallsFile is the content-free journal of generations (JSONL, 0600). Empty:
+	// the journal lives in memory only.
+	CallsFile string
 
 	// BlockMaxBackoff is the top step of the anti-bot backoff (AUDIT-13 A9). Zero
 	// keeps the built-in schedule (60 min at the top); the proxy sets it from

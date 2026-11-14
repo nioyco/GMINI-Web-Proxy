@@ -38,6 +38,8 @@ type Server struct {
 	// keepaliveOverride, when > 0, replaces the cfg-derived keepalive interval
 	// (sub-second values for tests). Never set in production.
 	keepaliveOverride time.Duration
+	// uiToken protects the API of the local management page (ui.go); empty: page off.
+	uiToken string
 
 	started time.Time
 	active  activeSet
@@ -82,6 +84,9 @@ func newServer(cfg *Config, client *gemini.Client, logger *slog.Logger) *Server 
 	apiconv.SetMarkerNeutralization(!cfg.DisableMarkerNeutralization)
 	apiconv.SetDropTextAfterToolCall(!cfg.KeepTextAfterToolCall)
 	srv := &Server{cfg: cfg, client: client, log: logger, generate: client.Generate, started: time.Now()}
+	if cfg.UIEnabled {
+		srv.uiToken = newUIToken()
+	}
 	if cfg.StreamToolsProgress {
 		srv.streamEvents = client.GenerateStreamEvents
 	}
@@ -102,6 +107,9 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("POST /v1/messages", s.withAuth(s.handleMessages))
 	mux.Handle("POST /v1/messages/count_tokens", s.withAuth(s.handleCountTokens))
 	mux.Handle("POST /v1beta/models/{model}", s.withAuth(s.handleGoogleGenerate))
+	mux.HandleFunc("GET /_ui", s.handleUI)
+	mux.HandleFunc("GET /_ui/api/state", s.handleUIState)
+	mux.HandleFunc("POST /_ui/api/models/refresh", s.handleUIRefresh)
 	mux.HandleFunc("/", s.handleNotFound)
 	return s.withTracking(s.withHostCheck(s.withCORS(mux)))
 }
@@ -385,7 +393,12 @@ func (s *Server) applyEffort(p *gemini.GenParams, m *gemini.AvailableModel, suff
 		return
 	}
 	p.Level = level
-	p.Mode = s.cfg.ThinkingModes[m.ModelID]
+	// The mode code comes from the catalogue when Google provides it; the
+	// configured table (GEMINI_THINKING_MODE_CODES) overrides it.
+	p.Mode = m.ModeCode
+	if v, ok := s.cfg.ThinkingModes[m.ModelID]; ok && (p.Mode == 0 || s.cfg.ThinkingModesExplicit) {
+		p.Mode = v
+	}
 }
 
 // streamChatToolsProgress serves a stream=true chat request with active tools

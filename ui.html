@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GMINI Control</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#16181d;--mute:#5d6470;--line:#dfe3e8;--ok:#1a7f4b;--okbg:#e3f4ea;--warn:#9a5b00;--warnbg:#fff1d6;--bad:#b3261e;--badbg:#fde7e5;--info:#1d4f91;--infobg:#e4eefb;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#111316;--card:#1a1d22;--ink:#e8eaee;--mute:#9aa2ae;--line:#2c313a;--ok:#6fd49b;--okbg:#17352a;--warn:#f0b65a;--warnbg:#3a2c12;--bad:#ff8f86;--badbg:#3d1c1a;--info:#8fbcff;--infobg:#17293f}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;padding:18px 24px 6px}
+h1{font-size:20px;margin:0}
+h2{font-size:15px;margin:0 0 10px}
+.sub{color:var(--mute);font-size:12px}
+main{padding:10px 24px 40px;display:grid;gap:16px;max-width:1280px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;overflow-x:auto}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.tile .k{color:var(--mute);font-size:12px}
+.tile .v{font-size:16px;font-weight:600;margin-top:2px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th{text-align:left;color:var(--mute);font-weight:500;font-size:12px;padding:6px 10px 6px 0;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:7px 10px 7px 0;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+code,.mono{font-family:var(--mono);font-size:12px}
+.b{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}
+.ok{color:var(--ok);background:var(--okbg)}.warn{color:var(--warn);background:var(--warnbg)}.bad{color:var(--bad);background:var(--badbg)}.info{color:var(--info);background:var(--infobg)}.none{color:var(--mute);background:transparent;border:1px solid var(--line)}
+button{font:inherit;padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer}
+button:hover{border-color:var(--mute)}
+.note{color:var(--mute);font-size:12px;margin-top:10px}
+.cmd{display:block;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-top:6px;font-family:var(--mono);font-size:12px;white-space:pre-wrap;word-break:break-all;user-select:all}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:space-between;margin-bottom:10px}
+#err{display:none}
+</style>
+</head>
+<body>
+<header><h1>GMINI Control</h1><span class="sub" id="ver"></span><span class="sub" id="upd"></span></header>
+<main>
+<div class="card bad" id="err"></div>
+<div class="tiles" id="tiles"></div>
+
+<section class="card">
+<div class="row"><h2>Modèles détectés chez Google et qui répond réellement</h2><button id="refresh">Actualiser le catalogue</button></div>
+<table id="models"></table>
+<p class="note">« Nom chez Google » est le nom complet (avec version) que Google renvoie lui-même pour cet identifiant ; dessous, la rubrique du menu de Gemini. « Qui répond » vient du journal des appels : Google n'indique pas toujours le modèle servi, et le remplace parfois sans prévenir (limite d'utilisation atteinte). « Repli probable » = ce modèle fournit d'habitude ses pensées et la dernière réponse n'en avait pas.</p>
+<p class="note" id="refreshmsg"></p>
+</section>
+
+<section class="card">
+<h2>Correspondance avec Antigravity</h2>
+<table id="ag"></table>
+<div id="agcmd"></div>
+</section>
+
+<section class="card">
+<h2>Derniers appels</h2>
+<table id="calls"></table>
+<p class="note">Tailles et délais uniquement : aucun contenu de conversation n'est affiché ici.</p>
+</section>
+
+<section class="card">
+<h2>Quota Google</h2>
+<p>Le quota de Gemini web (fenêtre de 5 h et limite hebdomadaire) n'est pas encore lu par le proxy : l'appel que la page « Limites d'utilisation » de Google utilise n'a pas encore été relevé. En attendant, le signal disponible est la colonne « Qui répond » ci-dessus.</p>
+</section>
+</main>
+<script>
+const TOKEN="__UI_TOKEN__";
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const dur=ms=>ms==null||ms<0?"—":ms<1000?ms+" ms":(ms/1000).toFixed(ms<10000?1:0)+" s";
+const ko=n=>n==null?"—":n<1024?n+" o":(n/1024).toFixed(1)+" Ko";
+const age=s=>s==null?"—":s<90?s+" s":s<5400?Math.round(s/60)+" min":(s/3600).toFixed(1)+" h";
+const hm=t=>t?new Date(t).toLocaleTimeString("fr-FR"):"—";
+const badge=(c,t)=>`<span class="b ${c}">${esc(t)}</span>`;
+function who(identity,suspect,seen){
+  if(identity==="other_model")return badge("bad","Autre modèle : "+(seen||"?"));
+  if(suspect==="no_thoughts")return badge("warn","Repli probable");
+  if(identity==="confirmed")return badge("ok","Confirmé par Google");
+  if(identity==="not_stated")return badge("none","Non indiqué par Google");
+  return badge("none","Aucun appel");
+}
+async function load(){
+  let d;
+  try{
+    const r=await fetch("/_ui/api/state",{headers:{"X-GMINI-UI":TOKEN},cache:"no-store"});
+    if(!r.ok)throw new Error(r.status===401?"Rechargez la page (le proxy a redémarré).":"Erreur "+r.status);
+    d=await r.json();$("err").style.display="none";
+  }catch(e){$("err").textContent="Proxy injoignable : "+e.message;$("err").style.display="block";return}
+  const s=d.status,g=s.google_block,ss=s.session_state||{};
+  $("ver").textContent=`version ${s.version} · ${String(s.commit).slice(0,7)}${s.dirty?" (modifié)":""} · ${d.listen}`;
+  $("upd").textContent="mis à jour à "+new Date().toLocaleTimeString("fr-FR");
+  const t=[
+    ["Session Google",s.authenticated?badge("ok","Connectée"):badge("bad","Non connectée")],
+    ["Blocage anti-robot",g.active?badge("bad","Actif, niveau "+g.level):badge("ok","Aucun")+` <span class="sub">${g.total} au total</span>`],
+    ["Catalogue",`${s.models_count} modèles <span class="sub">${esc(s.models_source)}, ${age(ss.catalog_age_sec)}</span>`],
+    ["Dernière rotation du cookie",age(s.cookie_rotation.last_success_age_sec)+` <span class="sub">${esc(s.cookie_rotation.last_result||"")}</span>`],
+    ["Requêtes en cours",String(Math.max(0,s.active_requests-1))],
+    ["Proxy démarré depuis",age(s.uptime_sec)],
+    ["Trace des échanges",s.content_trace_enabled?badge("info","Activée"):badge("none","Désactivée")],
+    ["Niveau de réflexion par défaut",esc(s.thinking_level_default||"non envoyé")]
+  ];
+  $("tiles").innerHTML=t.map(([k,v])=>`<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+  $("models").innerHTML="<tr><th>Nom chez Google</th><th>Nom à utiliser (proxy)</th><th>Identifiant stable</th><th>Qui répond (dernier appel)</th><th class=num>Appels</th><th class=num>Avec pensées</th><th class=num>1er texte (médiane)</th><th>Dernier appel</th></tr>"+
+    d.models.map(m=>`<tr><td><b>${esc(m.description||m.display_name||"—")}</b>${m.default?' <span class="sub">défaut</span>':""}<div class="sub">${esc([m.menu_label,m.family].filter(Boolean).join(" · "))}</div></td><td><code>${esc(m.name)}</code></td><td><code>${esc(m.model_id||"—")}</code></td><td>${who(m.last_time?m.last_identity:"",m.last_suspect,m.last_seen_models)}</td><td class=num>${m.calls}</td><td class=num>${m.calls?m.with_thoughts+" / "+m.calls:"—"}</td><td class=num>${dur(m.median_first_text_ms)}</td><td>${hm(m.last_time)}</td></tr>`).join("");
+  const a=d.antigravity;
+  if(a.file_state!=="ok"){$("ag").innerHTML=`<tr><td>Fichier des modèles d'Antigravity ${a.file_state==="off"?"non consulté (désactivé)":a.file_state==="absent"?"introuvable":"illisible"}.</td></tr>`;$("agcmd").innerHTML=""}
+  else{
+    $("ag").innerHTML="<tr><th>Affiché dans Antigravity</th><th>Modèle du proxy</th><th>État</th><th class=num>Délai maximal</th><th class=num>Relais anti-coupure</th></tr>"+
+      a.entries.map(e=>`<tr><td><b>${esc(e.display_name)}</b></td><td><code>${esc(e.model)}</code></td><td>${e.status==="ok"?badge("ok","Dans le catalogue"):badge("bad","Absent du catalogue")}</td><td class=num>${e.timeout_ms?dur(e.timeout_ms):"—"}</td><td class=num>${e.relay_keepalive_ms?dur(e.relay_keepalive_ms):badge("warn","Absent : coupure à 300 s")}</td></tr>`).join("")+
+      a.missing.map(n=>`<tr><td>${badge("warn","Aucune entrée")}</td><td><code>${esc(n)}</code></td><td colspan=3 class="sub">Modèle détecté mais pas encore proposé dans Antigravity</td></tr>`).join("");
+    $("agcmd").innerHTML=`<p class="note">Pour créer ou renommer les entrées (Antigravity fermé), lancer dans le dossier <code>SUIVI_PROJET/5_Outils_et_diagnostics</code> :</p><code class="cmd">python3 synchroniser_modeles_gmini.py --rename --apply</code><p class="note">Variantes par niveau de réflexion :</p><code class="cmd">python3 synchroniser_modeles_gmini.py --efforts low,high --apply</code>`;
+  }
+  $("calls").innerHTML="<tr><th>Heure</th><th>Modèle demandé</th><th>Qui répond</th><th class=num>Niveau</th><th class=num>Durée</th><th class=num>1er texte</th><th class=num>Prompt</th><th class=num>Réponse</th><th class=num>Pensées</th><th>Erreur</th><th>Requête</th></tr>"+
+    (d.calls.length?d.calls.map(c=>`<tr><td>${hm(c.time)}</td><td><code>${esc(c.model)}</code></td><td>${who(c.identity,c.suspect,(c.seen_model_ids||[]).join(", "))}</td><td class=num>${c.thinking_level||"—"}</td><td class=num>${dur(c.duration_ms)}</td><td class=num>${dur(c.first_text_ms)}</td><td class=num>${ko(c.prompt_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${ko(c.thought_bytes)}</td><td>${c.error?badge("bad",c.error):""}</td><td><code>${esc((c.request_id||"").slice(0,8))}</code></td></tr>`).join(""):"<tr><td colspan=11 class=sub>Aucun appel enregistré pour l'instant.</td></tr>");
+}
+$("refresh").onclick=async()=>{
+  $("refreshmsg").textContent="Demande en cours (un seul appel à Google)…";
+  try{const r=await fetch("/_ui/api/models/refresh",{method:"POST",headers:{"X-GMINI-UI":TOKEN}});const j=await r.json();
+    $("refreshmsg").textContent=j.refreshed?`Catalogue actualisé : ${j.models_count} modèles.`:"Non actualisé : "+(j.error||r.status)}
+  catch(e){$("refreshmsg").textContent="Échec : "+e.message}
+  load();
+};
+load();setInterval(()=>{if(!document.hidden)load()},5000);
+</script>
+</body>
+</html>

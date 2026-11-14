@@ -51,6 +51,11 @@ type Config struct {
 	// KeepTextAfterToolCall keeps the text a model writes after a tool call
 	// (GEMINI_DROP_TEXT_AFTER_TOOL_CALL=0; default: that text is dropped).
 	KeepTextAfterToolCall bool
+	// UIEnabled serves the local management page at /_ui (GEMINI_UI, default on;
+	// loopback clients only). AntigravityModelsFile is the Antigravity custom
+	// models file shown there (GEMINI_ANTIGRAVITY_MODELS_FILE; "off" hides it).
+	UIEnabled             bool
+	AntigravityModelsFile string
 	// StreamToolsProgress forwards text and thoughts as they arrive on the
 	// stream+tools chat path instead of one final chunk (GEMINI_STREAM_TOOLS_PROGRESS,
 	// default on; 0 restores the buffered behaviour).
@@ -63,7 +68,8 @@ type Config struct {
 	DefaultThinkingLevel string
 	// ThinkingModes maps a model id (hex) to the web "mode" code sent with a
 	// thinking level (GEMINI_THINKING_MODE_CODES, "id=code,id=code"). EXPERIMENTAL.
-	ThinkingModes map[string]int
+	ThinkingModes         map[string]int
+	ThinkingModesExplicit bool
 	// MaxPromptBytes refuses (413) a prompt larger than this (GEMINI_MAX_PROMPT_BYTES,
 	// 0 = no limit).
 	MaxPromptBytes int
@@ -109,10 +115,13 @@ func loadConfig(envFile string) *Config {
 		DisableToolPromptRules:      !getEnvBool("GEMINI_TOOL_PROMPT_NOECHO_RULES", true),
 		DisableMarkerNeutralization: !getEnvBool("GEMINI_NEUTRALIZE_HISTORY_MARKERS", true),
 		KeepTextAfterToolCall:       !getEnvBool("GEMINI_DROP_TEXT_AFTER_TOOL_CALL", true),
+		UIEnabled:                   getEnvBool("GEMINI_UI", true),
+		AntigravityModelsFile:       getEnv("GEMINI_ANTIGRAVITY_MODELS_FILE", ""),
 		StreamToolsProgress:         getEnvBool("GEMINI_STREAM_TOOLS_PROGRESS", true),
 		StreamThoughts:              getEnvBool("GEMINI_STREAM_THOUGHTS", true),
 		DefaultThinkingLevel:        strings.ToLower(strings.TrimSpace(getEnv("GEMINI_THINKING_LEVEL", ""))),
 		ThinkingModes:               parseModeCodes(getEnv("GEMINI_THINKING_MODE_CODES", defaultThinkingModeCodes)),
+		ThinkingModesExplicit:       strings.TrimSpace(getEnv("GEMINI_THINKING_MODE_CODES", "")) != "",
 		MaxPromptBytes:              getEnvInt("GEMINI_MAX_PROMPT_BYTES", 0),
 		CORSOrigins:                 splitKeys(getEnv("GEMINI_CORS_ORIGINS", "")),
 		AllowedHosts:                splitKeys(getEnv("GEMINI_ALLOWED_HOSTS", "")),
@@ -133,12 +142,14 @@ func loadConfig(envFile string) *Config {
 			AllowRemoteImages: getEnvBool("GEMINI_ALLOW_REMOTE_IMAGES", false),
 			TraceDir:          strings.TrimSpace(getEnv("GEMINI_TRACE_DIR", "")),
 			TraceMaxFiles:     getEnvInt("GEMINI_TRACE_MAX_FILES", 0),
+			TraceRaw:          getEnvBool("GEMINI_TRACE_RAW", false),
 		},
 	}
 
 	cfg.Gemini.BlockMaxBackoff = time.Duration(cfg.BlockMaxBackoffMin) * time.Minute
 	cfg.Gemini.StateMaxAge = time.Duration(cfg.StateMaxAgeMin) * time.Minute
 	cfg.Gemini.StateFile = stateFilePath(getEnv("GEMINI_STATE_FILE", ""), cfg.Gemini.CookieFile, cfg.Gemini.Cookie)
+	cfg.Gemini.CallsFile = callsFilePath(getEnv("GEMINI_CALLS_FILE", ""), cfg.Gemini.StateFile)
 
 	// GEMINI_BL: empty or "auto" → auto-resolve from the Gemini page (with the
 	// baked-in default as fallback); an explicit value disables auto-resolution.
@@ -154,8 +165,9 @@ func loadConfig(envFile string) *Config {
 
 // defaultThinkingModeCodes are the web "mode" codes observed in the real catalog
 // (model id → mode): Pro = 3, Flash-Lite = 6, Hydrogen = 1. They are only sent
-// together with a thinking level, and only for these ids; override or empty the
-// variable if the catalog changes.
+// together with a thinking level. Since the catalogue itself carries the code
+// (AvailableModel.ModeCode), this table is only a fallback for a catalogue
+// restored from an older state file; setting the variable makes it authoritative.
 const defaultThinkingModeCodes = "e6fa609c3fa255c0=3,8c46e95b1a07cecc=6,56fdd199312815e2=1"
 
 // parseModeCodes parses "id=code,id=code" (invalid entries are skipped).
@@ -332,4 +344,18 @@ func splitKeys(s string) []string {
 		}
 	}
 	return out
+}
+
+// callsFilePath returns the journal of generations: the explicit value ("off"
+// disables it), else a file beside the state file, else none.
+func callsFilePath(explicit, stateFile string) string {
+	switch v := strings.TrimSpace(explicit); {
+	case strings.EqualFold(v, "off"):
+		return ""
+	case v != "":
+		return v
+	case stateFile != "":
+		return strings.TrimSuffix(stateFile, ".state.json") + ".calls.jsonl"
+	}
+	return ""
 }

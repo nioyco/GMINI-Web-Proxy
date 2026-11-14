@@ -45,6 +45,12 @@ type AvailableModel struct {
 	Description   string
 	Capacity      int
 	CapacityField int
+	// Read from the catalogue entry as Google sends it (may be empty/zero when the
+	// layout changes): the menu label ([11], e.g. "Detailed research"), the
+	// internal family code ([8], e.g. "Carbon4p0") and the web "mode" code ([17]).
+	MenuLabel string `json:",omitempty"`
+	Family    string `json:",omitempty"`
+	ModeCode  int    `json:",omitempty"`
 }
 
 // Params builds the base GenParams selecting this model. Callers then attach
@@ -509,6 +515,9 @@ func parseModels(innerJSON string) ([]*AvailableModel, error) {
 			ModelID:       id,
 			DisplayName:   strAt(ml, 1),
 			Description:   strAt(ml, 2),
+			MenuLabel:     strAt(ml, 11),
+			Family:        strAt(ml, 8),
+			ModeCode:      intAt(ml, 17),
 			Capacity:      capacity,
 			CapacityField: capField,
 		})
@@ -593,4 +602,13 @@ func indexAny(arr []any, i int) any {
 		return nil
 	}
 	return arr[i]
+}
+
+// intAt returns arr[i] as a small positive integer, or 0.
+func intAt(arr []any, i int) int {
+	f, ok := indexAny(arr, i).(float64)
+	if !ok || f < 0 || f > 1000 || f != float64(int(f)) {
+		return 0
+	}
+	return int(f)
 }

@@ -244,3 +244,29 @@ func TestProgressHintsDuringLongToolCall(t *testing.T) {
 		t.Errorf("final frame must carry the whole tool call")
 	}
 }
+
+// The web mode code comes from the catalogue; the built-in table is only a
+// fallback and an explicit GEMINI_THINKING_MODE_CODES wins.
+func TestApplyEffortModeCodeSource(t *testing.T) {
+	cfg := testConfig()
+	cfg.ThinkingModes = map[string]int{"idA": 3}
+	s := newTestServer(t, cfg)
+	cat := &gemini.AvailableModel{Name: "a", ModelID: "idA", ModeCode: 8}
+	old := &gemini.AvailableModel{Name: "a", ModelID: "idA"}
+	var p gemini.GenParams
+	s.applyEffort(&p, cat, "low", "")
+	if p.Level == 0 || p.Mode != 8 {
+		t.Errorf("catalogue code not used: %+v", p)
+	}
+	p = gemini.GenParams{}
+	s.applyEffort(&p, old, "low", "")
+	if p.Mode != 3 {
+		t.Errorf("fallback table not used: %+v", p)
+	}
+	cfg.ThinkingModesExplicit = true
+	p = gemini.GenParams{}
+	s.applyEffort(&p, cat, "low", "")
+	if p.Mode != 3 {
+		t.Errorf("explicit table should win: %+v", p)
+	}
+}

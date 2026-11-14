@@ -28,7 +28,11 @@ type traceResult struct {
 	Frames      int
 	FirstTextMS int64
 	LastFrameMS int64
+	Raw         []string // raw response lines (only stored when TraceRaw is on)
 }
+
+// traceRawMax caps the raw response kept per trace file.
+const traceRawMax = 4 << 20
 
 type traceFile struct {
 	Time          string `json:"time"`
@@ -49,6 +53,9 @@ type traceFile struct {
 	Prompt        string `json:"prompt"`
 	Response      string `json:"response"`
 	Thought       string `json:"thought,omitempty"`
+	// RawFrames is the unparsed response (GEMINI_TRACE_RAW=1): it lets a change in
+	// Google's response layout be studied offline. It may hold conversation ids.
+	RawFrames []string `json:"raw_frames,omitempty"`
 }
 
 var traceMu sync.Mutex
@@ -69,6 +76,9 @@ func (c *Client) writeTrace(met *CallMetrics, p GenParams, r traceResult) {
 		FirstTextMS: r.FirstTextMS, LastFrameMS: r.LastFrameMS,
 		PromptBytes: len(p.Prompt), ResponseBytes: len(r.Text), ThoughtBytes: len(r.Thought),
 		Prompt: p.Prompt, Response: r.Text, Thought: r.Thought,
+	}
+	if c.cfg.TraceRaw {
+		tf.RawFrames = r.Raw
 	}
 	if met != nil {
 		tf.RequestID = met.ID

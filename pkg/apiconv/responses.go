@@ -87,6 +87,9 @@ func OpenAIModelList(models []*gemini.AvailableModel) any {
 			Description: m.Description,
 			DisplayName: m.DisplayName,
 			ModelID:     m.ModelID,
+			MenuLabel:   m.MenuLabel,
+			Family:      m.Family,
+			ModeCode:    m.ModeCode,
 		})
 	}
 	return modelsListResponse{Object: "list", Data: data}
@@ -255,6 +258,9 @@ type modelObject struct {
 	// stable hexadecimal id. Both help tools map catalog entries to client entries.
 	DisplayName string `json:"display_name,omitempty"`
 	ModelID     string `json:"model_id,omitempty"`
+	MenuLabel   string `json:"menu_label,omitempty"`
+	Family      string `json:"family,omitempty"`
+	ModeCode    int    `json:"mode_code,omitempty"`
 }
 
 // responseObject is a Responses API response, used for both the non-streaming
