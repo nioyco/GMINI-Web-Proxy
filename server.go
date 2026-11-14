@@ -215,7 +215,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// the SSE stream is opened immediately and kept alive with comment frames so
 	// the client does not see a silent connection during long generations.
 	if interval := s.keepaliveInterval(); req.Stream && toolsActive && interval > 0 {
-		s.streamChatTools(r.Context(), w, cid, m.Name, p, interval)
+		s.streamChatTools(r.Context(), w, cid, m.Name, p, interval, req.DeclaredTools())
 		return
 	}
 
@@ -225,7 +225,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		sendError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
 	}
-	text, toolCalls := s.finishText(r.Context(), text, toolsActive)
+	text, toolCalls := s.finishText(r.Context(), text, toolsActive, req.DeclaredTools())
 
 	if req.Stream {
 		// Tools + stream: emit one chunk carrying the full message, then DONE.
@@ -299,7 +299,7 @@ func (s *Server) streamChat(ctx context.Context, w http.ResponseWriter, cid, mod
 // streamChatTools serves a stream=true request with active tools: SSE is opened
 // up front and kept alive while the blocking generation runs (see awaitGenerate),
 // then the usual single complete chunk and [DONE] follow.
-func (s *Server) streamChatTools(ctx context.Context, w http.ResponseWriter, cid, model string, p gemini.GenParams, interval time.Duration) {
+func (s *Server) streamChatTools(ctx context.Context, w http.ResponseWriter, cid, model string, p gemini.GenParams, interval time.Duration, declared []apiconv.DeclaredTool) {
 	sse, ok := openSSE(w)
 	if !ok {
 		sendError(w, http.StatusInternalServerError, "streaming unsupported")
@@ -318,7 +318,7 @@ func (s *Server) streamChatTools(ctx context.Context, w http.ResponseWriter, cid
 		s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+res.err.Error())), sse.done())
 		return
 	}
-	text, toolCalls := s.finishText(ctx, res.text, true)
+	text, toolCalls := s.finishText(ctx, res.text, true, declared)
 	s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
 }
 
@@ -467,7 +467,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		case res.err != nil:
 			s.sseTail(ctx, sse, sse.event("error", responsesStreamError("upstream error: "+res.err.Error())))
 		default:
-			text, toolCalls := s.finishText(ctx, res.text, true)
+			text, toolCalls := s.finishText(ctx, res.text, true, req.DeclaredTools())
 			s.writeResponsesStream(ctx, sse, rid, mid, m.Name, prompt, text, toolCalls)
 		}
 		return
@@ -478,7 +478,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		sendError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
 	}
-	text, toolCalls := s.finishText(r.Context(), text, toolsActive)
+	text, toolCalls := s.finishText(r.Context(), text, toolsActive, req.DeclaredTools())
 
 	if req.Stream {
 		sse, ok := openSSE(w)
@@ -577,7 +577,7 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		case res.err != nil:
 			s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+res.err.Error())))
 		default:
-			s.sseTail(ctx, sse, sse.data(s.googleResponse(ctx, m.Name, prompt, res.text, hasTools)))
+			s.sseTail(ctx, sse, sse.data(s.googleResponse(ctx, m.Name, prompt, res.text, hasTools, req.DeclaredTools())))
 		}
 		return
 	}
@@ -587,7 +587,7 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		sendError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
 	}
-	response := s.googleResponse(r.Context(), m.Name, prompt, text, hasTools)
+	response := s.googleResponse(r.Context(), m.Name, prompt, text, hasTools, req.DeclaredTools())
 
 	if stream {
 		sse, ok := openSSE(w)
@@ -716,7 +716,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		case res.err != nil:
 			s.sseTail(ctx, sse, sse.event("error", apiconv.AnthropicError("upstream error: "+res.err.Error())))
 		default:
-			text, toolCalls := s.finishText(ctx, res.text, true)
+			text, toolCalls := s.finishText(ctx, res.text, true, req.DeclaredTools())
 			s.streamMessagesFull(ctx, sse, msgID, m.Name, prompt, text, toolCalls)
 		}
 		return
@@ -727,7 +727,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		sendAnthropicError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
 	}
-	text, toolCalls := s.finishText(r.Context(), text, toolsActive)
+	text, toolCalls := s.finishText(r.Context(), text, toolsActive, req.DeclaredTools())
 
 	if req.Stream {
 		// Tools + stream (keepalive disabled): replay the full message as SSE events.

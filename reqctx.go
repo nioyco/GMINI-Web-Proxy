@@ -95,6 +95,8 @@ type statsCounters struct {
 	echoStripped      atomic.Int64
 	echoFabricated    atomic.Int64
 	upstreamRefusal   atomic.Int64
+	toolCallUnparsed  atomic.Int64
+	toolNameInferred  atomic.Int64
 
 	// Upstream aggregates (only requests that reached Gemini).
 	upstreamRequests  atomic.Int64

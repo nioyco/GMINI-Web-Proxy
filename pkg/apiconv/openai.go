@@ -245,6 +245,11 @@ func toolChoiceInstruction(tc toolChoiceMode) string {
 	return ""
 }
 
+// toolNameRule makes the "name" field explicit: the model once answered with the
+// arguments object alone.
+const toolNameRule = "The \"name\" field is REQUIRED in every tool call and must be exactly one of the available tool names; " +
+	"never output an arguments object without \"name\"."
+
 // noEchoRules forbids the model from imitating the labels the proxy uses to
 // flatten the conversation history (they are input markers, not output format).
 const noEchoRules = "Rules about the conversation history:\n" +
@@ -267,6 +272,7 @@ func messagesToPrompt(messages []Message, tools []Tool, tc toolChoiceMode) strin
 				"Call format (use this exact format):\n"+
 				"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n"+
 				"When calling tools, output ONLY the tool_call block(s), nothing else.\n"+
+				toolNameRule+"\n"+
 				noEchoRules+"\n\n"+
 				"Available tools:\n"+string(defsJSON)+
 				toolChoiceInstruction(tc))
@@ -318,7 +324,18 @@ func messagesToPrompt(messages []Message, tools []Tool, tc toolChoiceMode) strin
 // calls are preserved in the cleaned text. If no fenced tool call is found and the
 // whole reply is a bare JSON tool call (no fence at all), that is parsed too.
 func ParseToolCalls(text string) (string, []ToolCall) {
+	clean, calls, _ := ParseToolCallsWith(text, nil)
+	return clean, calls
+}
+
+// ParseToolCallsWith is ParseToolCalls with the tools declared by the request: a
+// tool-intent fence (tool_call, function_call, ...) whose JSON lacks a "name" is
+// recovered by inferring the tool from the declared schemas (see toolinfer.go), and
+// variant key names are accepted. The report lists tool-intent fences that could
+// not be converted (they stay in the text) and the names that were inferred.
+func ParseToolCallsWith(text string, declared []DeclaredTool) (string, []ToolCall, ParseReport) {
 	var calls []ToolCall
+	var rep ParseReport
 	var clean strings.Builder
 	last := 0
 
@@ -326,7 +343,12 @@ func ParseToolCalls(text string) (string, []ToolCall) {
 		// loc layout: [matchStart, matchEnd, tagStart, tagEnd, bodyStart, bodyEnd].
 		tag := strings.ToLower(text[loc[2]:loc[3]])
 		body := strings.TrimSpace(text[loc[4]:loc[5]])
-		blockCalls := decodeToolCalls(body, toolFenceTags[tag])
+		var blockCalls []ToolCall
+		if toolFenceTags[tag] {
+			blockCalls = decodeIntentBlock(body, tag, declared, &rep)
+		} else {
+			blockCalls = decodeToolCalls(body, false)
+		}
 		if len(blockCalls) == 0 {
 			continue // not a tool call: leave the block where it is
 		}
@@ -340,10 +362,10 @@ func ParseToolCalls(text string) (string, []ToolCall) {
 	if len(calls) == 0 {
 		// Bare-JSON fallback: the entire reply is a tool call with no code fence.
 		if bare := toolCallsFromJSON([]byte(result), false); len(bare) > 0 {
-			return "", bare
+			return "", bare, rep
 		}
 	}
-	return result, calls
+	return result, calls, rep
 }
 
 // decodeToolCalls reads one or more JSON values from a fenced block body and turns

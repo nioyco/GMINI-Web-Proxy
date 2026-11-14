@@ -207,6 +207,7 @@ func buildGoogleToolPrompt(toolDefs []googleToolDef) string {
 		"```\n\n" +
 		"When calling tools:\n" +
 		"- Output ONLY the function_call block(s), nothing else\n" +
+		"- " + toolNameRule + "\n" +
 		"- You may call multiple tools with multiple blocks\n" +
 		"- After receiving a [Tool result for ...], use that data to answer the user\n" +
 		noEchoRules + "\n\n" +
@@ -268,12 +269,21 @@ type GoogleFunctionCall struct {
 // handling fenced blocks, bare blocks, and a raw JSON object. Returns the cleaned
 // text and the calls.
 func ParseGoogleFunctionCalls(text string) (string, []GoogleFunctionCall) {
+	clean, calls, _ := ParseGoogleFunctionCallsWith(text, nil)
+	return clean, calls
+}
+
+// ParseGoogleFunctionCallsWith is ParseGoogleFunctionCalls with the declared
+// functions: function_call blocks lacking a "name" are resolved by inference and
+// variant key names are accepted (see toolinfer.go).
+func ParseGoogleFunctionCallsWith(text string, declared []DeclaredTool) (string, []GoogleFunctionCall, ParseReport) {
 	var calls []GoogleFunctionCall
+	var rep ParseReport
 	clean := text
 	for _, re := range googleFCParsers {
 		for _, m := range re.FindAllStringSubmatch(clean, -1) {
-			if call, ok := decodeGoogleCall(m[1]); ok {
-				calls = append(calls, call)
+			for _, tc := range decodeIntentBlock(m[1], "function_call", declared, &rep) {
+				calls = append(calls, GoogleFunctionCall{Name: tc.Function.Name, Args: json.RawMessage(tc.Function.Arguments)})
 			}
 		}
 		clean = strings.TrimSpace(re.ReplaceAllString(clean, ""))
@@ -284,7 +294,7 @@ func ParseGoogleFunctionCalls(text string) (string, []GoogleFunctionCall) {
 			clean = ""
 		}
 	}
-	return clean, calls
+	return clean, calls, rep
 }
 
 // decodeGoogleCall parses a single function-call JSON object, accepting both
@@ -315,21 +325,31 @@ func decodeGoogleCall(s string) (GoogleFunctionCall, bool) {
 // When hasTools is set and the model emitted function_call blocks, the text is
 // replaced with the parsed call parts.
 func GoogleResponse(model, prompt, text string, hasTools bool) any {
-	r, _ := googleResponse(model, prompt, text, hasTools, false)
+	r, _, _ := googleResponse(model, prompt, text, hasTools, false, nil)
 	return r
 }
 
 // GoogleResponseEx is GoogleResponse plus history-echo filtering of the returned
 // text (after function calls were extracted); it reports what was stripped.
 func GoogleResponseEx(model, prompt, text string, hasTools bool) (any, EchoStats) {
-	return googleResponse(model, prompt, text, hasTools, true)
+	r, st, _ := googleResponse(model, prompt, text, hasTools, true, nil)
+	return r, st
 }
 
-func googleResponse(model, prompt, text string, hasTools, strip bool) (any, EchoStats) {
+// GoogleResponseWith is GoogleResponseEx with the declared functions (tolerant
+// parsing and name inference) and the parse report. strip=false skips the echo filter.
+func GoogleResponseWith(model, prompt, text string, hasTools, strip bool, declared []DeclaredTool) (any, EchoStats, ParseReport) {
+	return googleResponse(model, prompt, text, hasTools, strip, declared)
+}
+
+func googleResponse(model, prompt, text string, hasTools, strip bool, declared []DeclaredTool) (any, EchoStats, ParseReport) {
 	var st EchoStats
+	var rep ParseReport
 	parts := []GooglePart{{Text: text}}
 	if hasTools && text != "" {
-		clean, calls := ParseGoogleFunctionCalls(text)
+		var clean string
+		var calls []GoogleFunctionCall
+		clean, calls, rep = ParseGoogleFunctionCallsWith(text, declared)
 		if strip {
 			clean, st = StripEcho(clean)
 		}
@@ -362,7 +382,7 @@ func googleResponse(model, prompt, text string, hasTools, strip bool) (any, Echo
 			TotalTokenCount:      in + out,
 		},
 		ModelVersion: model,
-	}, st
+	}, st, rep
 }
 
 // GoogleStreamChunk builds a single incremental streamGenerateContent frame

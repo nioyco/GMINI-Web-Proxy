@@ -38,11 +38,13 @@ func (s *Server) noteRefusal(ctx context.Context, text string) {
 // finishText post-processes a complete model reply: tool calls are extracted first
 // (so a real call is never affected), then the remaining text is cleaned of
 // history echoes. The refusal marker is evaluated on the raw reply.
-func (s *Server) finishText(ctx context.Context, raw string, toolsActive bool) (string, []apiconv.ToolCall) {
+func (s *Server) finishText(ctx context.Context, raw string, toolsActive bool, declared []apiconv.DeclaredTool) (string, []apiconv.ToolCall) {
 	s.noteRefusal(ctx, raw)
 	text, calls := raw, []apiconv.ToolCall(nil)
 	if toolsActive && text != "" {
-		text, calls = apiconv.ParseToolCalls(text)
+		var rep apiconv.ParseReport
+		text, calls, rep = apiconv.ParseToolCallsWith(text, declared)
+		s.noteParse(ctx, rep)
 	}
 	if !s.cfg.DisableEchoFilter {
 		var st apiconv.EchoStats
@@ -53,13 +55,11 @@ func (s *Server) finishText(ctx context.Context, raw string, toolsActive bool) (
 }
 
 // googleResponse builds a generateContent reply with echo filtering and markers.
-func (s *Server) googleResponse(ctx context.Context, model, prompt, text string, hasTools bool) any {
+func (s *Server) googleResponse(ctx context.Context, model, prompt, text string, hasTools bool, declared []apiconv.DeclaredTool) any {
 	s.noteRefusal(ctx, text)
-	if s.cfg.DisableEchoFilter {
-		return apiconv.GoogleResponse(model, prompt, text, hasTools)
-	}
-	resp, st := apiconv.GoogleResponseEx(model, prompt, text, hasTools)
+	resp, st, rep := apiconv.GoogleResponseWith(model, prompt, text, hasTools, !s.cfg.DisableEchoFilter, declared)
 	s.noteEcho(ctx, st)
+	s.noteParse(ctx, rep)
 	return resp
 }
 
@@ -86,4 +86,36 @@ func (s *Server) echoEmitter(ctx context.Context, emitRaw func(string), acc *str
 		s.noteRefusal(ctx, acc.String())
 	}
 	return emit, finish
+}
+
+// noteParse logs and counts tool-call parsing events (no values, key names only):
+// "tool_call_unparsed" for a tool-intent fence that stayed text, "tool_name_inferred"
+// for a call whose name was recovered from the declared tools.
+func (s *Server) noteParse(ctx context.Context, rep apiconv.ParseReport) {
+	for _, u := range rep.Unparsed {
+		s.stats.toolCallUnparsed.Add(1)
+		s.rlog(ctx).Warn("tool_call_unparsed", "tag", u.Tag, "keys", safeKeyList(u.Keys),
+			"declared_tools", u.Declared, "reason", u.Reason)
+	}
+	for _, name := range rep.Inferred {
+		s.stats.toolNameInferred.Add(1)
+		s.rlog(ctx).Info("tool_name_inferred", "tool", safeKeyList([]string{name}))
+	}
+}
+
+// safeKeyList joins key names for logging, replacing anything that is not a plain
+// identifier and capping the list, so model-controlled text cannot reach the log.
+func safeKeyList(keys []string) string {
+	out := make([]string, 0, len(keys))
+	for i, k := range keys {
+		if i == 40 {
+			out = append(out, "...")
+			break
+		}
+		if !safeNameRe.MatchString(k) {
+			k = "(unsafe)"
+		}
+		out = append(out, k)
+	}
+	return strings.Join(out, ",")
 }
