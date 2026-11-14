@@ -319,7 +319,11 @@ func (c *Client) acquireBackground(f CallFamily) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := nowFn()
-	var active []*famBlock
+	type gated struct {
+		fb *famBlock
+		f  CallFamily
+	}
+	var active []gated
 	for _, g := range gatingFamilies(f) {
 		fb := b.fams[g]
 		if fb == nil || !fb.active() {
@@ -328,10 +332,17 @@ func (c *Client) acquireBackground(f CallFamily) bool {
 		if now.Before(fb.backoffUntil) || now.Before(fb.probeUntil) {
 			return false
 		}
-		active = append(active, fb)
+		active = append(active, gated{fb, g})
 	}
-	for _, fb := range active {
-		fb.probeUntil = now.Add(probeWindow)
+	// One probe per window: the window is the family's current backoff step (at
+	// least probeWindow), so an inconclusive probe (network error, no answer) is
+	// not followed by another one before a full step (AUDIT-13 A9).
+	for _, a := range active {
+		w := probeWindow
+		if d := c.backoffFor(a.f, a.fb.level); d > w {
+			w = d
+		}
+		a.fb.probeUntil = now.Add(w)
 	}
 	return true
 }

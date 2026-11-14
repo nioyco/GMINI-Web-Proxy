@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
 	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
@@ -286,5 +287,26 @@ func TestStatusShowsToolPromptRulesState(t *testing.T) {
 		if apiconv.ToolPromptRules() == off {
 			t.Errorf("off=%v: package switch = %v", off, apiconv.ToolPromptRules())
 		}
+	}
+}
+
+func TestLot1SessionSettings(t *testing.T) {
+	for _, k := range []string{"GEMINI_BLOCK_MAX_BACKOFF_MIN", "GEMINI_STATE_MAX_AGE_MIN", "GEMINI_MODELS_REFRESH_HOURS", "GEMINI_STATE_FILE", "GEMINI_COOKIE", "GEMINI_COOKIE_FILE"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+	t.Setenv("GEMINI_COOKIE_FILE", "/d/cookie.txt")
+	cfg := loadConfig(filepath.Join(t.TempDir(), "none.env"))
+	if cfg.Gemini.BlockMaxBackoff != time.Hour || cfg.Gemini.StateMaxAge != 6*time.Hour || cfg.ModelsRefreshHours != 24 ||
+		cfg.Gemini.StateFile != "/d/cookie.txt.state.json" {
+		t.Errorf("defaults: backoff=%v stateAge=%v refresh=%d state=%q", cfg.Gemini.BlockMaxBackoff, cfg.Gemini.StateMaxAge, cfg.ModelsRefreshHours, cfg.Gemini.StateFile)
+	}
+	t.Setenv("GEMINI_BLOCK_MAX_BACKOFF_MIN", "30")
+	t.Setenv("GEMINI_STATE_MAX_AGE_MIN", "0") // invalid -> default
+	t.Setenv("GEMINI_MODELS_REFRESH_HOURS", "0")
+	t.Setenv("GEMINI_STATE_FILE", "off")
+	cfg = loadConfig(filepath.Join(t.TempDir(), "none.env"))
+	if cfg.Gemini.BlockMaxBackoff != 30*time.Minute || cfg.Gemini.StateMaxAge != 6*time.Hour || cfg.ModelsRefreshHours != 0 || cfg.Gemini.StateFile != "" {
+		t.Errorf("overrides: backoff=%v stateAge=%v refresh=%d state=%q", cfg.Gemini.BlockMaxBackoff, cfg.Gemini.StateMaxAge, cfg.ModelsRefreshHours, cfg.Gemini.StateFile)
 	}
 }

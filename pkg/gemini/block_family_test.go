@@ -163,3 +163,23 @@ func TestCatalogRefreshFailureWarnRateLimited(t *testing.T) {
 		t.Errorf("WARN count = %d, want 1\n%s", n, logs)
 	}
 }
+
+// AUDIT-13 A9: after an /app refusal, one probe per window, the window being the
+// current step: an inconclusive probe is not followed by another for a full step.
+func TestAppProbeOncePerStep(t *testing.T) {
+	now := fixedBlockTiming(t)
+	c, _ := blockClient(t, rtFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("unused") }))
+	c.recordBlock(&BlockedError{Family: FamilyApp, Host: "gemini.google.com", Path: "/app"})
+	*now = now.Add(5*time.Minute + time.Second)
+	if !c.acquireBackground(FamilyApp) {
+		t.Fatal("probe after the 5 min step")
+	}
+	*now = now.Add(4 * time.Minute) // probe was inconclusive (no block, no success)
+	if c.acquireBackground(FamilyApp) {
+		t.Fatal("a second probe inside the same 5 min window")
+	}
+	*now = now.Add(time.Minute + time.Second)
+	if !c.acquireBackground(FamilyApp) {
+		t.Fatal("next window: one probe")
+	}
+}
