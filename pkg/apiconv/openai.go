@@ -8,22 +8,11 @@ package apiconv
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync/atomic"
 
 	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
 )
-
-// fenceRe matches a fenced code block emitted by the model. The model is asked to
-// wrap tool calls in ```tool_call ... ```, but in practice it varies the fence
-// language (tool_code, json, or none), omits the closing fence, or puts the
-// closing fence on the same line as the body. This pattern is deliberately
-// lenient: group 1 is the (optional) language tag, group 2 is the block body, and
-// the closing fence is optional (falls back to end-of-string for an unterminated
-// block). Whether a matched block is actually a tool call is decided by parsing
-// its body, not by the tag, so non-tool code blocks are left untouched.
-var fenceRe = regexp.MustCompile("(?s)```[ \\t]*([\\w-]*)[ \\t]*\\r?\\n(.*?)(?:```|$)")
 
 // toolFenceTags are language tags that signal tool-call intent. A block carrying
 // one of these is treated as a tool call whenever its body names a tool, even if
@@ -369,10 +358,9 @@ func ParseToolCallsWith(text string, declared []DeclaredTool) (string, []ToolCal
 	var clean strings.Builder
 	last := 0
 
-	for _, loc := range fenceRe.FindAllStringSubmatchIndex(text, -1) {
-		// loc layout: [matchStart, matchEnd, tagStart, tagEnd, bodyStart, bodyEnd].
-		tag := strings.ToLower(text[loc[2]:loc[3]])
-		body := strings.TrimSpace(text[loc[4]:loc[5]])
+	for _, fb := range findFences(text) {
+		tag := strings.ToLower(fb.tag)
+		body := strings.TrimSpace(text[fb.bodyStart:fb.bodyEnd])
 		var blockCalls []ToolCall
 		if toolFenceTags[tag] {
 			blockCalls = decodeIntentBlock(body, tag, declared, &rep)
@@ -382,8 +370,8 @@ func ParseToolCallsWith(text string, declared []DeclaredTool) (string, []ToolCal
 		if len(blockCalls) == 0 {
 			continue // not a tool call: leave the block where it is
 		}
-		clean.WriteString(text[last:loc[0]])
-		last = loc[1]
+		clean.WriteString(text[last:fb.start])
+		last = fb.end
 		calls = append(calls, blockCalls...)
 	}
 	clean.WriteString(text[last:])
