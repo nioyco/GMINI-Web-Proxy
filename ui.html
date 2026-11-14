@@ -81,6 +81,13 @@ function who(identity,suspect,seen){
   if(identity==="not_stated")return badge("none","Non indiqué par Google");
   return badge("none","Aucun appel");
 }
+function why(e){
+  if(/not authenticated/.test(e))return "la session Google n'est pas connectée (cookie expiré : raccourci 7). Aucun appel n'a été fait.";
+  if(/less than/.test(e))return "dernière tentative trop récente : attendre 5 minutes. Aucun appel n'a été fait.";
+  if(/backoff in force/.test(e))return "un blocage anti-robot de Google est en cours : attendre sa levée. Aucun appel n'a été fait.";
+  if(/google blocked/.test(e))return "Google a refusé cet appel (page anti-robot). Le catalogue déjà connu reste utilisé ; ne pas réessayer tout de suite.";
+  return e;
+}
 async function load(){
   let d;
   try{
@@ -103,7 +110,7 @@ async function load(){
   ];
   $("tiles").innerHTML=t.map(([k,v])=>`<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
   $("models").innerHTML="<tr><th>Nom chez Google</th><th>Nom à utiliser (proxy)</th><th>Identifiant stable</th><th>Qui répond (dernier appel)</th><th class=num>Appels</th><th class=num>Avec pensées</th><th class=num>1er texte (médiane)</th><th>Dernier appel</th></tr>"+
-    d.models.map(m=>`<tr><td><b>${esc(m.description||m.display_name||"—")}</b>${m.default?' <span class="sub">défaut</span>':""}<div class="sub">${esc([m.menu_label,m.family].filter(Boolean).join(" · "))}</div></td><td><code>${esc(m.name)}</code></td><td><code>${esc(m.model_id||"—")}</code></td><td>${who(m.last_time?m.last_identity:"",m.last_suspect,m.last_seen_models)}</td><td class=num>${m.calls}</td><td class=num>${m.calls?m.with_thoughts+" / "+m.calls:"—"}</td><td class=num>${dur(m.median_first_text_ms)}</td><td>${hm(m.last_time)}</td></tr>`).join("");
+    d.models.map(m=>`<tr><td><b>${esc(m.description||m.display_name||"—")}</b>${m.default?' <span class="sub">défaut</span>':""}<div class="sub">${esc([m.menu_label,m.family].filter(Boolean).join(" · "))}</div></td><td><code>${esc(m.name)}</code></td><td><code>${esc(m.model_id||"—")}</code></td><td>${m.withdrawn_since?badge("bad","Retiré par Google depuis "+hm(m.withdrawn_since))+'<div class="sub">limite d\'utilisation atteinte ou accès retiré : les demandes sont refusées</div>':who(m.last_time?m.last_identity:"",m.last_suspect,m.last_seen_models)}</td><td class=num>${m.calls}</td><td class=num>${m.calls?m.with_thoughts+" / "+m.calls:"—"}</td><td class=num>${dur(m.median_first_text_ms)}</td><td>${hm(m.last_time)}</td></tr>`).join("");
   const a=d.antigravity;
   if(a.file_state!=="ok"){$("ag").innerHTML=`<tr><td>Fichier des modèles d'Antigravity ${a.file_state==="off"?"non consulté (désactivé)":a.file_state==="absent"?"introuvable":"illisible"}.</td></tr>`;$("agcmd").innerHTML=""}
   else{
@@ -118,7 +125,7 @@ async function load(){
 $("refresh").onclick=async()=>{
   $("refreshmsg").textContent="Demande en cours (un seul appel à Google)…";
   try{const r=await fetch("/_ui/api/models/refresh",{method:"POST",headers:{"X-GMINI-UI":TOKEN}});const j=await r.json();
-    $("refreshmsg").textContent=j.refreshed?`Catalogue actualisé : ${j.models_count} modèles.`:"Non actualisé : "+(j.error||r.status)}
+    $("refreshmsg").textContent=j.refreshed?`Catalogue actualisé : ${j.models_count} modèles.`:"Non actualisé : "+why(j.error||String(r.status))}
   catch(e){$("refreshmsg").textContent="Échec : "+e.message}
   load();
 };

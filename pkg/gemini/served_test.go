@@ -99,3 +99,30 @@ func TestParseModelsCatalogueExtras(t *testing.T) {
 		t.Errorf("tolerant parsing failed: %+v %+v", ms[1], ms[2])
 	}
 }
+
+// A model dropped by a newer catalogue (web usage limit reached, 2026-11-14) is
+// remembered, refused with an explicit message, and forgotten when it returns.
+func TestWithdrawnModels(t *testing.T) {
+	c, _ := New(Config{}, nil)
+	pro := &AvailableModel{Name: "gemini-detailed-research", ModelID: "e6fa609c3fa255c0", Description: "3.1 Pro"}
+	lite := &AvailableModel{Name: "gemini-quick-answers", ModelID: "8c46e95b1a07cecc", Description: "3.5 Flash-Lite"}
+	c.storeModels([]*AvailableModel{lite, pro}, "dynamic")
+	c.storeModels([]*AvailableModel{lite}, "dynamic")
+	if w := c.WithdrawnModels(); len(w) != 1 || w[0].Model.Name != pro.Name {
+		t.Fatalf("withdrawn=%+v", w)
+	}
+	_, err := c.ResolveModel(pro.Name)
+	if err == nil || !containsStr(err.Error(), "no longer in the catalogue") || !containsStr(err.Error(), "3.1 Pro") {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := c.ResolveModel("never-seen"); err == nil || containsStr(err.Error(), "no longer") {
+		t.Fatalf("err=%v", err)
+	}
+	c.storeModels([]*AvailableModel{lite, pro}, "dynamic")
+	if len(c.WithdrawnModels()) != 0 {
+		t.Errorf("model came back but is still withdrawn")
+	}
+	if _, err := c.ResolveModel(pro.Name); err != nil {
+		t.Errorf("err=%v", err)
+	}
+}

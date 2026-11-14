@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Local management page (GET /_ui). It is served to loopback clients only and
@@ -87,6 +88,7 @@ type uiModel struct {
 	Description string `json:"description"`
 	Default     bool   `json:"default"`
 	MenuLabel   string `json:"menu_label"`
+	Withdrawn   string `json:"withdrawn_since"` // RFC 3339; "" = listed by Google now
 	Family      string `json:"family"`
 	// Journal figures (successful streamed calls among the recent ones).
 	Calls          int    `json:"calls"`
@@ -183,6 +185,11 @@ func (s *Server) uiModels() []uiModel {
 		}
 		out = append(out, u)
 	}
+	for _, wd := range s.client.WithdrawnModels() {
+		out = append(out, uiModel{Name: wd.Model.Name, ModelID: wd.Model.ModelID, DisplayName: wd.Model.DisplayName,
+			Description: wd.Model.Description, MenuLabel: wd.Model.MenuLabel, Family: wd.Model.Family,
+			MedianFirstMS: -1, Withdrawn: wd.Since.Format(time.RFC3339)})
+	}
 	return out
 }
 
@@ -251,7 +258,9 @@ func (s *Server) uiAntigravity(models []uiModel) uiAntigravity {
 	_, port, _ := net.SplitHostPort(s.cfg.Listen)
 	catalogue := map[string]bool{}
 	for _, m := range models {
-		catalogue[m.Name] = true
+		if m.Withdrawn == "" {
+			catalogue[m.Name] = true
+		}
 	}
 	have := map[string]bool{}
 	for _, e := range entries {
@@ -272,7 +281,7 @@ func (s *Server) uiAntigravity(models []uiModel) uiAntigravity {
 		out.Entries = append(out.Entries, row)
 	}
 	for _, m := range models {
-		if !have[m.Name] {
+		if !have[m.Name] && m.Withdrawn == "" {
 			out.Missing = append(out.Missing, m.Name)
 		}
 	}

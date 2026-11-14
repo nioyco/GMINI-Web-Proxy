@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -210,7 +211,11 @@ func (s *Server) withTracking(next http.Handler) http.Handler {
 		s.active.add(ri)
 		s.stats.requests.Add(1)
 		sw := &statusWriter{ResponseWriter: w}
-		s.log.Info("request_start", "request_id", id, "method", r.Method, "route", ri.route)
+		// The management page polls its own API every few seconds: not logged.
+		quiet := strings.HasPrefix(ri.route, "/_ui") && r.Method == http.MethodGet
+		if !quiet {
+			s.log.Info("request_start", "request_id", id, "method", r.Method, "route", ri.route)
+		}
 
 		defer func() {
 			s.active.remove(ri)
@@ -237,6 +242,9 @@ func (s *Server) withTracking(next http.Handler) http.Handler {
 				s.stats.firstByteMS.Add(m.FirstByteMS.Load())
 				s.stats.upstreamReqBytes.Add(m.ReqBytes.Load())
 				s.stats.upstreamRespBytes.Add(m.RespBytes.Load())
+			}
+			if quiet && status < 400 {
+				return
 			}
 			s.log.Info("request_end",
 				"request_id", id, "method", r.Method, "route", ri.route,

@@ -140,6 +140,9 @@ type Client struct {
 	catalogAt      time.Time // last successful listModels fetch (or restored state)
 	catalogTriedAt time.Time // last listModels attempt (success or not)
 	catalogWarnAt  time.Time // last "model list refresh failed" WARN (guarded by modelMu)
+	// withdrawn holds models that a later catalogue no longer lists (observed when
+	// the web usage limit is reached). In memory only (guarded by modelMu).
+	withdrawn map[string]WithdrawnModel
 
 	// Session state file (AUDIT-13 A5).
 	stateMu      sync.Mutex

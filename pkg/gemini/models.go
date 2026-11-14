@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -96,6 +97,13 @@ func (c *Client) ResolveModel(name string) (*AvailableModel, error) {
 	m, ok := c.models[name]
 	c.modelMu.Unlock()
 	if !ok {
+		c.modelMu.Lock()
+		wd, was := c.withdrawn[name]
+		c.modelMu.Unlock()
+		if was {
+			return nil, fmt.Errorf("model %q (%s) is no longer in the catalogue Google returns for this account since %s: usage limit reached or access removed; nothing was sent to Gemini",
+				name, wd.Model.Description, wd.Since.Format("15:04"))
+		}
 		return nil, fmt.Errorf("unknown model: %q", name)
 	}
 	return m, nil
@@ -257,10 +265,43 @@ func (c *Client) storeModels(models []*AvailableModel, source string) {
 		order = append(order, m.Name)
 	}
 	c.modelMu.Lock()
+	// A model that disappears from a catalogue fetched from Google is remembered
+	// as withdrawn; it is forgotten again when it comes back.
+	if source == "dynamic" {
+		for name, old := range c.models {
+			if _, still := reg[name]; !still && old.ModelID != "" {
+				if c.withdrawn == nil {
+					c.withdrawn = map[string]WithdrawnModel{}
+				}
+				c.withdrawn[name] = WithdrawnModel{Model: *old, Since: time.Now()}
+			}
+		}
+	}
+	for name := range reg {
+		delete(c.withdrawn, name)
+	}
 	c.models = reg
 	c.modelOrder = order
 	c.modelsSource = source
 	c.modelMu.Unlock()
+}
+
+// WithdrawnModel is a model that was in the catalogue and no longer is.
+type WithdrawnModel struct {
+	Model AvailableModel
+	Since time.Time
+}
+
+// WithdrawnModels lists the models dropped by a later catalogue, by name.
+func (c *Client) WithdrawnModels() []WithdrawnModel {
+	c.modelMu.Lock()
+	defer c.modelMu.Unlock()
+	out := make([]WithdrawnModel, 0, len(c.withdrawn))
+	for _, w := range c.withdrawn {
+		out = append(out, w)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Model.Name < out[j].Model.Name })
+	return out
 }
 
 // ─── Fetching ────────────────────────────────────────────────────────────────
