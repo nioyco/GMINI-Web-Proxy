@@ -12,7 +12,9 @@ import (
 
 func statusRT(status int, body string, calls *atomic.Int32) rtFunc {
 	return func(r *http.Request) (*http.Response, error) {
-		calls.Add(1)
+		if !strings.HasSuffix(r.URL.Path, "/app") { // count generations only (a session error reloads /app once)
+			calls.Add(1)
+		}
 		return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 	}
 }

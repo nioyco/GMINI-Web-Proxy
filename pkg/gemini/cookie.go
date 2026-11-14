@@ -70,52 +70,88 @@ func (c *Client) RotateCookieIfStale(ctx context.Context, minAge time.Duration) 
 // StartupRotate is RotateCookieIfStale with the default recency threshold.
 func (c *Client) StartupRotate(ctx context.Context) { c.RotateCookieIfStale(ctx, startupRotateMinAge) }
 
-// authRecoverySchedule spaces the auth re-checks while the session is not
-// authenticated (a var so tests can shrink it).
-var authRecoverySchedule = []time.Duration{time.Minute, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute, 15 * time.Minute}
+// authRecoverySchedule spaces the /app re-checks after a failed fetch (network
+// error) while the session is not authenticated; blocks follow the block
+// backoff instead. authRecoveryPoll is how often the loop looks at the local
+// state (no Google call). Vars so tests can shrink them.
+var (
+	authRecoverySchedule = []time.Duration{time.Minute, 2 * time.Minute, 5 * time.Minute, 15 * time.Minute, 30 * time.Minute, 60 * time.Minute}
+	authRecoveryPoll     = time.Minute
+)
 
-// AuthRecoveryLoop re-checks the session until it authenticates, so a proxy that
-// started anonymous (Google block, expired cookie later re-exported to the cookie
-// file) recovers without a restart. It honours the block backoff, spaces checks
-// by authRecoverySchedule (with jitter), and on success refreshes the model list
-// and calls onRecovered (e.g. to start the cookie refresh loop), then returns.
+// AuthRecoveryLoop watches the session while a cookie is configured and, when
+// it is not authenticated (started anonymous, Google block at startup, session
+// lost after a generation error), re-checks the /app page sparingly so the proxy
+// recovers without a restart (AUDIT-13 A6, A9):
+//   - after a block: one probe once the /app backoff has elapsed;
+//   - after a failed fetch: spaced by authRecoverySchedule;
+//   - when the page was served without a session token (dead cookie): no new
+//     check until the cookie changes (file re-exported, or a rotation renewed it).
+//
+// While authenticated it makes no call. On each recovery it refreshes the model
+// list when the current one is not a dynamic catalog, then calls onRecovered.
+// It returns when ctx is cancelled.
 func (c *Client) AuthRecoveryLoop(ctx context.Context, onRecovered func()) {
 	fails := 0
+	var lastTry time.Time
 	for {
-		i := fails
-		if i >= len(authRecoverySchedule) {
-			i = len(authRecoverySchedule) - 1
-		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(jitterFn(authRecoverySchedule[i])):
+		case <-time.After(authRecoveryPoll):
+		}
+		if c.Authenticated() {
+			fails = 0
+			continue
+		}
+		if cookie, _ := c.loadCookie(); cookie == "" { // local: picks up a rewritten file
+			continue
+		}
+		last := c.lastAuthCheck()
+		switch last.result {
+		case authBlocked:
+			// acquireBackground below enforces the /app backoff.
+		case authFetchFailed:
+			i := fails
+			if i >= len(authRecoverySchedule) {
+				i = len(authRecoverySchedule) - 1
+			}
+			if !lastTry.IsZero() && time.Since(lastTry) < jitterFn(authRecoverySchedule[i]) {
+				continue
+			}
+		default:
+			// Dead cookie, never checked, or a session lost since: only a different
+			// cookie justifies loading /app again.
+			if last.result != "" && c.cookieGeneration() == last.gen {
+				continue
+			}
 		}
 		if !c.acquireBackground(FamilyApp) {
 			continue
 		}
+		lastTry = time.Now()
 		rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		c.invalidateAppPage() // a re-check must see the live page, not the startup copy
+		c.invalidateAppPage() // a re-check must see the live page, not a cached copy
 		status := c.CheckAuth(rctx)
 		if status != "authenticated" {
 			cancel()
-			if status == "anonymous" {
-				continue // cookie not configured (yet): keep waiting at the slowest pace
+			if c.lastAuthCheck().result == authFetchFailed {
+				fails++
 			}
-			fails++
 			continue
 		}
-		c.fetchModels(rctx)
+		fails = 0
+		if c.ModelsSourceLabel() != "dynamic" {
+			_ = c.fetchModels(rctx)
+		}
 		cancel()
 		c.modelMu.Lock()
 		count, source := len(c.modelOrder), c.modelsSource
 		c.modelMu.Unlock()
-		c.log.Info("gemini session recovered: authenticated, model list refreshed",
-			"models", count, "source", source)
+		c.log.Info("gemini session recovered: authenticated", "models", count, "source", source)
 		if onRecovered != nil {
 			onRecovered()
 		}
-		return
 	}
 }
 
@@ -166,9 +202,8 @@ func (c *Client) RotateCookie(ctx context.Context) {
 	c.cookieMu.Unlock()
 	c.recordRotation(rotRenewed, nil, info)
 	c.log.Info("rotated __Secure-1PSIDTS cookie")
-	// Keep the XSRF "at" token in sync with the rotated session. The model list is
-	// refreshed by the caller (startup, then the periodic refresh loop).
-	c.refreshAtToken(ctx)
+	// The /app page is NOT reloaded after a rotation any more (AUDIT-13 A6): the
+	// XSRF token is refreshed only when a generation reports a session error.
 }
 
 // storeCookie makes newCookie the current cookie jar: a file-backed cookie is
@@ -180,6 +215,9 @@ func (c *Client) storeCookie(newCookie string) error {
 		}
 	}
 	c.cookieMu.Lock()
+	if newCookie != c.cookieStr {
+		c.cookieGen++
+	}
 	c.cookieStr, c.cookieSAPI, c.cookieLoaded = newCookie, cookieValue(newCookie, cookieSAPISID), true
 	if c.cfg.CookieFile != "" {
 		if info, err := os.Stat(c.cfg.CookieFile); err == nil {

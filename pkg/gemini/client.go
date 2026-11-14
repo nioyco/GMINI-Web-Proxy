@@ -84,9 +84,6 @@ func readLimited(r io.Reader, max int64) ([]byte, error) {
 	return b, nil
 }
 
-// buildLabelTTL is how long an auto-resolved build label is reused before refresh.
-const buildLabelTTL = 30 * time.Minute
-
 // Client talks to the Gemini web backend. It is safe for concurrent use.
 type Client struct {
 	cfg  Config
@@ -104,6 +101,7 @@ type Client struct {
 	cookieSAPI   string
 	cookieMtime  time.Time
 	cookieLoaded bool
+	cookieGen    uint64    // bumped whenever the cookie jar changes (rotation, capture, file rewrite)
 	rotatedAt    time.Time // last successful __Secure-1PSIDTS rotation (guarded by cookieMu)
 	rot          rotState  // rotation attempt tracking (guarded by cookieMu)
 	block        blockState
@@ -115,17 +113,22 @@ type Client struct {
 	appBody []byte
 	appAt   time.Time
 
-	// Build label, optionally auto-resolved from the Gemini page.
-	blMu         sync.Mutex
-	bl           string
-	blAuto       bool
-	blAt         time.Time
-	blRefreshing bool
+	// Build label, optionally auto-resolved from the Gemini page. It is only
+	// refreshed when the page is loaded (startup without a recent state, session
+	// reload): there is no TTL any more (AUDIT-13 A6).
+	blMu        sync.Mutex
+	bl          string
+	blAuto      bool
+	blAt        time.Time
+	blResolving bool
 
 	// XSRF "at" token (SNlM0e), scraped from the signed-in page. Required on
 	// authenticated StreamGenerate requests; anonymous requests omit it.
-	atMu    sync.Mutex
-	atToken string
+	atMu     sync.Mutex
+	atToken  string
+	atAt     time.Time // when atToken was obtained (page scrape or restored state)
+	reauthAt time.Time // last session reload triggered by a generation error
+	auth     authCheck // outcome of the last /app auth check (guarded by atMu)
 
 	// Model registry, populated from the listModels RPC (or the static fallback
 	// set). modelOrder preserves a stable listing order.
@@ -253,59 +256,39 @@ func (c *Client) streamURL() string {
 		geminiBaseURL, prefix, url.QueryEscape(c.CurrentBL()), reqid)
 }
 
-// CurrentBL returns the active build label, kicking off a background refresh when
-// auto-resolution is enabled and the cached value has gone stale.
+// CurrentBL returns the active build label. It is a pure accessor: it never
+// triggers a Google call (AUDIT-13 A4/A6).
 func (c *Client) CurrentBL() string {
 	c.blMu.Lock()
-	bl := c.bl
-	stale := c.blAuto && !c.blRefreshing && (c.blAt.IsZero() || time.Since(c.blAt) > buildLabelTTL)
-	if stale {
-		c.blRefreshing = true
-	}
-	c.blMu.Unlock()
-	if stale && !c.acquireBackground(FamilyApp) { // blocked: no background call yet
-		c.blMu.Lock()
-		c.blRefreshing = false
-		c.blMu.Unlock()
-		stale = false
-	}
-	if stale {
-		go c.fetchAndStoreBL(context.Background())
-	}
-	return bl
+	defer c.blMu.Unlock()
+	return c.bl
 }
 
-// ResolveBuildLabel synchronously resolves the build label (used at startup). It
-// is a no-op when auto-resolution is disabled.
+// ResolveBuildLabel synchronously resolves the build label (used at startup when
+// no recent state was restored). It is a no-op when auto-resolution is disabled.
+// The /app page it loads is cached briefly and reused by CheckAuth.
 func (c *Client) ResolveBuildLabel(ctx context.Context) {
 	if !c.blAuto {
 		return
 	}
 	c.blMu.Lock()
-	if c.blRefreshing {
+	if c.blResolving {
 		c.blMu.Unlock()
 		return
 	}
-	c.blRefreshing = true
+	c.blResolving = true
 	c.blMu.Unlock()
-	c.fetchAndStoreBL(ctx)
-}
-
-// fetchAndStoreBL fetches the build label and stores it, recording the attempt
-// time even on failure so refreshes are not retried too aggressively.
-func (c *Client) fetchAndStoreBL(ctx context.Context) {
 	bl := c.fetchBuildLabel(ctx)
 	c.blMu.Lock()
 	if bl != "" {
-		c.bl = bl
+		c.bl, c.blAt = bl, time.Now()
 	}
-	c.blAt = time.Now()
-	c.blRefreshing = false
+	c.blResolving = false
 	c.blMu.Unlock()
 	if bl != "" {
 		c.log.Info("resolved gemini build label", "bl", bl)
 	} else {
-		c.log.Warn("could not resolve gemini build label; using fallback", "fallback", c.cfg.GeminiBL)
+		c.log.Warn("could not resolve gemini build label; using fallback", "fallback", c.CurrentBL())
 	}
 }
 
@@ -326,6 +309,10 @@ func (c *Client) fetchAppPage(ctx context.Context) ([]byte, error) {
 		return nil, cleanErr(err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		return nil, fmt.Errorf("gemini /app page: http %d", resp.StatusCode)
+	}
 	return io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 }
 
@@ -392,37 +379,75 @@ func (c *Client) accountPrefix() string {
 	return "/u/" + c.cfg.AuthUser
 }
 
+// Outcomes of an /app auth check (authCheck.result).
+const (
+	authOK          = "authenticated"
+	authAnonymous   = "anonymous"
+	authBlocked     = "blocked"
+	authFetchFailed = "fetch_failed"
+	authNoToken     = "not_authenticated" // page served without a session token
+)
+
+// authCheck records the last /app auth check: when, its outcome, and the cookie
+// generation it was made with (so a dead cookie is not re-checked until it
+// changes).
+type authCheck struct {
+	at     time.Time
+	result string
+	gen    uint64
+}
+
+func (c *Client) recordAuthCheck(result string, gen uint64) {
+	c.atMu.Lock()
+	c.auth = authCheck{at: time.Now(), result: result, gen: gen}
+	c.atMu.Unlock()
+}
+
+func (c *Client) lastAuthCheck() authCheck {
+	c.atMu.Lock()
+	defer c.atMu.Unlock()
+	return c.auth
+}
+
 // CheckAuth reports whether the configured cookie establishes a signed-in Gemini
 // session, detected via the SNlM0e token (issued only to authenticated sessions).
 // It returns a short human-readable status and logs a warning when a cookie is
 // present but does not authenticate. The token value itself is never logged.
 func (c *Client) CheckAuth(ctx context.Context) string {
 	cookie, _ := c.loadCookie()
+	gen := c.cookieGeneration()
 	if cookie == "" {
+		c.recordAuthCheck(authAnonymous, gen)
 		return "anonymous"
 	}
 	html, err := c.fetchAppPageCached(ctx, appPageMaxAge)
 	if err != nil {
 		c.log.Warn("cookie auth check failed", "err", err)
 		if errors.Is(err, ErrGoogleBlocked) {
+			c.recordAuthCheck(authBlocked, gen)
 			return "unknown (blocked by Google)"
 		}
+		c.recordAuthCheck(authFetchFailed, gen)
 		return "unknown (fetch failed)"
 	}
 	c.applyBuildLabel(html)
 	if m := snlm0eRe.FindSubmatch(html); m != nil {
 		c.setAt(string(m[1])) // authenticated requests must echo this XSRF token back
+		c.recordAuthCheck(authOK, gen)
 		c.log.Info("gemini cookie authenticated")
 		return "authenticated"
 	}
+	c.setAt("")
+	c.recordAuthCheck(authNoToken, gen)
 	c.log.Warn("gemini cookie is NOT authenticating — requests run anonymously",
 		"hint", "the session needs __Secure-1PSIDTS (it expires; re-export the cookie)")
 	return "NOT authenticated"
 }
 
 // currentAt returns the XSRF "at" token to send with StreamGenerate: the SNlM0e
-// value scraped from the signed-in page (refreshed after each cookie rotation, as
-// it rotates with the session). Empty for anonymous sessions, which need no token.
+// value scraped from the signed-in page (at startup, or after a session error of a
+// generation), or restored from the state file. Empty for anonymous sessions,
+// which need no token.
 func (c *Client) currentAt() string {
 	c.atMu.Lock()
 	defer c.atMu.Unlock()
@@ -433,6 +458,10 @@ func (c *Client) currentAt() string {
 func (c *Client) setAt(token string) {
 	c.atMu.Lock()
 	c.atToken = token
+	c.atAt = time.Time{}
+	if token != "" {
+		c.atAt = time.Now()
+	}
 	c.atMu.Unlock()
 }
 
@@ -465,24 +494,43 @@ func (c *Client) ImagesSupported() bool {
 	return c.currentAt() != ""
 }
 
-// reloadSession is the session-reload hook used after a session error of a
-// generation. It returns true when a new attempt is worthwhile.
-func (c *Client) reloadSession(ctx context.Context) bool { return false }
+// reauthMinInterval is the minimum spacing of session reloads triggered by a
+// generation error (a var so tests can shrink it). It bounds the /app loads a
+// systematic 400/401 could cause to one per interval.
+var reauthMinInterval = 10 * time.Minute
 
-// refreshAtToken re-scrapes the SNlM0e XSRF token from the signed-in page and
-// caches it. Called after a cookie rotation so the token stays in sync with the
-// refreshed session.
-func (c *Client) refreshAtToken(ctx context.Context) {
-	if cookie, _ := c.loadCookie(); cookie == "" || c.blockedNow(FamilyApp) {
-		return
+// reloadSession reloads the /app page once after a session error of a
+// generation, to pick up a fresh XSRF token and build label (AUDIT-13 A6). It
+// returns true when a new token was obtained, i.e. one new attempt is
+// worthwhile. It makes no call when no cookie is configured, when the previous
+// reload is younger than reauthMinInterval, or while a gemini.google.com block
+// is in force.
+func (c *Client) reloadSession(ctx context.Context) bool {
+	if cookie, _ := c.loadCookie(); cookie == "" {
+		return false
 	}
-	html, err := c.fetchAppPage(ctx)
-	if err != nil {
-		return
+	c.atMu.Lock()
+	recent := !c.reauthAt.IsZero() && time.Since(c.reauthAt) < reauthMinInterval
+	if !recent {
+		c.reauthAt = time.Now()
 	}
-	if m := snlm0eRe.FindSubmatch(html); m != nil {
-		c.setAt(string(m[1]))
+	c.atMu.Unlock()
+	if recent {
+		c.log.Warn("session reload skipped: previous reload too recent", "min_interval", reauthMinInterval)
+		return false
 	}
+	if !c.acquireBackground(FamilyApp) {
+		c.log.Warn("session reload skipped: google block backoff in force")
+		return false
+	}
+	c.invalidateAppPage()
+	status := c.CheckAuth(ctx)
+	if status != "authenticated" {
+		c.log.Warn("session reload after an authentication error did not restore the session", "status", status)
+		return false
+	}
+	c.log.Info("gemini session reloaded after an authentication error")
+	return true
 }
 
 // newRequest assembles a POST request with all required headers and auth. When a
@@ -984,9 +1032,19 @@ func (c *Client) loadCookieFile() (cookie, sapisid string) {
 	}
 	cookie = strings.TrimSpace(string(data))
 	sapisid = cookieValue(cookie, cookieSAPISID)
+	if c.cookieLoaded && cookie != c.cookieStr {
+		c.cookieGen++ // the file was rewritten (e.g. a re-exported cookie)
+	}
 	c.cookieStr, c.cookieSAPI = cookie, sapisid
 	c.cookieMtime, c.cookieLoaded = info.ModTime(), true
 	return cookie, sapisid
+}
+
+// cookieGeneration returns the cookie-jar generation (bumped on every change).
+func (c *Client) cookieGeneration() uint64 {
+	c.cookieMu.Lock()
+	defer c.cookieMu.Unlock()
+	return c.cookieGen
 }
 
 // makeSapisidHash builds the SAPISIDHASH Authorization header value.

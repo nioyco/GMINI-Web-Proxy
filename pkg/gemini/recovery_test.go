@@ -100,19 +100,36 @@ func TestBackgroundSuspendedDuringBlock(t *testing.T) {
 	}
 }
 
-func TestAuthRecoveryAfterBlockAndAnonymousStart(t *testing.T) {
-	oldS, oldJ, oldB, oldA, oldP := authRecoverySchedule, jitterFn, blockSchedule, appBlockSchedule, probeWindow
-	defer func() {
-		authRecoverySchedule, jitterFn, blockSchedule, appBlockSchedule, probeWindow = oldS, oldJ, oldB, oldA, oldP
-	}()
+func shrinkRecovery(t *testing.T) {
+	t.Helper()
+	oldS, oldJ, oldB, oldA, oldP, oldPoll := authRecoverySchedule, jitterFn, blockSchedule, appBlockSchedule, probeWindow, authRecoveryPoll
+	t.Cleanup(func() {
+		authRecoverySchedule, jitterFn, blockSchedule, appBlockSchedule, probeWindow, authRecoveryPoll = oldS, oldJ, oldB, oldA, oldP, oldPoll
+	})
 	authRecoverySchedule = []time.Duration{10 * time.Millisecond}
 	jitterFn = func(d time.Duration) time.Duration { return d }
 	blockSchedule = []time.Duration{20 * time.Millisecond}
 	appBlockSchedule = []time.Duration{20 * time.Millisecond}
 	probeWindow = 5 * time.Millisecond
+	authRecoveryPoll = 2 * time.Millisecond
+}
 
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting for %s", what)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// Block at startup → one probe after the backoff → page without token (dead
+// cookie) → NO further /app load until the cookie changes → recovery.
+func TestAuthRecoveryAfterBlockAndAnonymousStart(t *testing.T) {
+	shrinkRecovery(t)
 	var mu sync.Mutex
-	phase := 0 // 0: blocked, 1: anonymous page, 2: authenticated
 	var appCalls int
 	c, logs := newAutoBLClient(t, Config{Cookie: "SAPISID=s; __Secure-1PSIDTS=ts", GeminiBL: "x"}, rtFunc(func(r *http.Request) (*http.Response, error) {
 		mu.Lock()
@@ -128,28 +145,35 @@ func TestAuthRecoveryAfterBlockAndAnonymousStart(t *testing.T) {
 				return resp200(r, appPageAuth), nil
 			}
 		}
-		_ = phase
 		return resp200(r, ""), nil
 	}))
+	app := func() int { mu.Lock(); defer mu.Unlock(); return appCalls }
 	if got := c.CheckAuth(context.Background()); !strings.Contains(got, "blocked") {
 		t.Fatalf("startup auth = %q", got)
 	}
 	if c.Authenticated() {
 		t.Fatal("must start anonymous")
 	}
-	var recovered atomic.Bool
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	var recovered atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go func() { c.AuthRecoveryLoop(ctx, func() { recovered.Store(true) }); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("recovery loop did not finish")
+	go func() { c.AuthRecoveryLoop(ctx, func() { recovered.Add(1) }); close(done) }()
+	waitFor(t, "the probe after the block", func() bool { return app() == 2 })
+	time.Sleep(80 * time.Millisecond) // many polls, cookie unchanged
+	if got := app(); got != 2 {
+		t.Fatalf("/app loaded %d times with an unchanged dead cookie, want 2", got)
 	}
-	if !c.Authenticated() || !recovered.Load() {
-		t.Errorf("authenticated=%v recovered=%v\n%s", c.Authenticated(), recovered.Load(), logs)
+	if err := c.storeCookie("SAPISID=s; __Secure-1PSIDTS=fresh"); err != nil { // re-exported cookie
+		t.Fatal(err)
 	}
+	waitFor(t, "recovery", func() bool { return recovered.Load() == 1 })
+	time.Sleep(30 * time.Millisecond) // authenticated: no more calls
+	if got := app(); got != 3 || !c.Authenticated() {
+		t.Errorf("/app calls = %d authenticated=%v", got, c.Authenticated())
+	}
+	cancel()
+	<-done
 	if !strings.Contains(logs.String(), "session recovered") {
 		t.Errorf("no INFO recovery log:\n%s", logs)
 	}

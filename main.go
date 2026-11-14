@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -91,13 +92,16 @@ func main() {
 	// The catalog is refreshed at most once per GEMINI_MODELS_REFRESH_HOURS, on its
 	// own timer (never chained to a rotation tick).
 	go client.CatalogRefreshLoop(ctx, time.Duration(cfg.ModelsRefreshHours)*time.Hour)
-	// Started without a signed-in session although a cookie is configured (Google
-	// block, stale cookie): keep re-checking in the background, no restart needed.
-	if authStatus != "authenticated" && !refresh && authStatus != "anonymous" &&
-		(cfg.Gemini.Cookie != "" || cfg.Gemini.CookieFile != "") {
+	// Whenever a cookie is configured, watch the session: while it is not signed in
+	// (Google block at startup, stale cookie, session lost after a generation
+	// error) it is re-checked sparingly; while signed in, no call is made.
+	if cfg.Gemini.Cookie != "" || cfg.Gemini.CookieFile != "" {
+		var startRotation sync.Once
 		go client.AuthRecoveryLoop(ctx, func() {
-			if cfg.CookieRefresh > 0 {
-				go client.CookieRefreshLoop(ctx, time.Duration(cfg.CookieRefresh)*time.Minute)
+			if !refresh && cfg.CookieRefresh > 0 {
+				startRotation.Do(func() {
+					go client.CookieRefreshLoop(ctx, time.Duration(cfg.CookieRefresh)*time.Minute)
+				})
 			}
 		})
 	}
