@@ -310,3 +310,17 @@ func TestLot1SessionSettings(t *testing.T) {
 		t.Errorf("overrides: backoff=%v stateAge=%v refresh=%d state=%q", cfg.Gemini.BlockMaxBackoff, cfg.Gemini.StateMaxAge, cfg.ModelsRefreshHours, cfg.Gemini.StateFile)
 	}
 }
+
+// The history-marker neutralization (AUDIT-13 T-04) is on by default and can be
+// turned off with GEMINI_NEUTRALIZE_HISTORY_MARKERS=0.
+func TestMarkerNeutralizationSwitch(t *testing.T) {
+	t.Setenv("GEMINI_NEUTRALIZE_HISTORY_MARKERS", "")
+	os.Unsetenv("GEMINI_NEUTRALIZE_HISTORY_MARKERS")
+	if cfg := loadConfig(filepath.Join(t.TempDir(), "none.env")); cfg.DisableMarkerNeutralization {
+		t.Fatal("neutralization must be on by default")
+	}
+	t.Setenv("GEMINI_NEUTRALIZE_HISTORY_MARKERS", "0")
+	if cfg := loadConfig(filepath.Join(t.TempDir(), "none.env")); !cfg.DisableMarkerNeutralization {
+		t.Fatal("GEMINI_NEUTRALIZE_HISTORY_MARKERS=0 must disable neutralization")
+	}
+}

@@ -28,7 +28,8 @@ type statusResponse struct {
 	CookieRotation     rotationStatus        `json:"cookie_rotation"`
 	GoogleBlock        googleBlock           `json:"google_block"`
 	UpstreamParams     gemini.UpstreamParams `json:"upstream_params"`
-	ToolPromptRules    bool                  `json:"tool_prompt_noecho_rules"` // GEMINI_TOOL_PROMPT_NOECHO_RULES
+	ToolPromptRules    bool                  `json:"tool_prompt_noecho_rules"`   // GEMINI_TOOL_PROMPT_NOECHO_RULES
+	MarkerNeutralized  bool                  `json:"neutralize_history_markers"` // GEMINI_NEUTRALIZE_HISTORY_MARKERS
 	IgnoredFields      ignoredFields         `json:"ignored_request_fields"`
 	SessionState       sessionState          `json:"session_state"`
 }
@@ -206,6 +207,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		CatalogAgeSec: ageSec(ss.CatalogAt), CatalogStale: ss.CatalogStale}
 	resp.UpstreamParams = s.client.UpstreamParams()
 	resp.ToolPromptRules = apiconv.ToolPromptRules()
+	resp.MarkerNeutralized = apiconv.MarkerNeutralization()
 	resp.IgnoredFields = ignoredFields{
 		Note:   "top-level fields received from clients that the proxy parses or forwards nowhere (e.g. temperature, reasoning_effort); counted since start",
 		Counts: s.ignored.snapshot(),

@@ -45,6 +45,9 @@ type Config struct {
 	// DisableToolPromptRules removes the extra tool-prompt rules added in P6/P10
 	// (GEMINI_TOOL_PROMPT_NOECHO_RULES=0|false|off), restoring the original prompt.
 	DisableToolPromptRules bool
+	// DisableMarkerNeutralization stops escaping history markers ([User]:, ...) found
+	// in input contents (GEMINI_NEUTRALIZE_HISTORY_MARKERS=0|false|off; default: on).
+	DisableMarkerNeutralization bool
 	// AllowedHosts are extra Host header values accepted beside the loopback names
 	// (GEMINI_ALLOWED_HOSTS, comma-separated).
 	AllowedHosts []string
@@ -80,16 +83,17 @@ func loadConfig(envFile string) *Config {
 		CookieRefresh: getEnvInt("GEMINI_COOKIE_REFRESH_MIN", 9),
 		APIKeys:       splitKeys(getEnv("GEMINI_API_KEYS", "")),
 
-		SSEKeepaliveSec:        getEnvInt("GEMINI_SSE_KEEPALIVE_SEC", 15),
-		ShutdownGraceSec:       shutdownGrace(getEnvInt("GEMINI_SHUTDOWN_GRACE_SEC", defaultShutdownGraceSec)),
-		AllowNoAuth:            getEnvBool("GEMINI_ALLOW_NO_AUTH", false),
-		DisableEchoFilter:      !getEnvBool("GEMINI_STRIP_HISTORY_ECHO", true),
-		DisableToolPromptRules: !getEnvBool("GEMINI_TOOL_PROMPT_NOECHO_RULES", true),
-		CORSOrigins:            splitKeys(getEnv("GEMINI_CORS_ORIGINS", "")),
-		AllowedHosts:           splitKeys(getEnv("GEMINI_ALLOWED_HOSTS", "")),
-		ModelsRefreshHours:     nonNegative(getEnvInt("GEMINI_MODELS_REFRESH_HOURS", 24), 24),
-		BlockMaxBackoffMin:     positive(getEnvInt("GEMINI_BLOCK_MAX_BACKOFF_MIN", 60), 60),
-		StateMaxAgeMin:         positive(getEnvInt("GEMINI_STATE_MAX_AGE_MIN", 360), 360),
+		SSEKeepaliveSec:             getEnvInt("GEMINI_SSE_KEEPALIVE_SEC", 15),
+		ShutdownGraceSec:            shutdownGrace(getEnvInt("GEMINI_SHUTDOWN_GRACE_SEC", defaultShutdownGraceSec)),
+		AllowNoAuth:                 getEnvBool("GEMINI_ALLOW_NO_AUTH", false),
+		DisableEchoFilter:           !getEnvBool("GEMINI_STRIP_HISTORY_ECHO", true),
+		DisableToolPromptRules:      !getEnvBool("GEMINI_TOOL_PROMPT_NOECHO_RULES", true),
+		DisableMarkerNeutralization: !getEnvBool("GEMINI_NEUTRALIZE_HISTORY_MARKERS", true),
+		CORSOrigins:                 splitKeys(getEnv("GEMINI_CORS_ORIGINS", "")),
+		AllowedHosts:                splitKeys(getEnv("GEMINI_ALLOWED_HOSTS", "")),
+		ModelsRefreshHours:          nonNegative(getEnvInt("GEMINI_MODELS_REFRESH_HOURS", 24), 24),
+		BlockMaxBackoffMin:          positive(getEnvInt("GEMINI_BLOCK_MAX_BACKOFF_MIN", 60), 60),
+		StateMaxAgeMin:              positive(getEnvInt("GEMINI_STATE_MAX_AGE_MIN", 360), 360),
 		Gemini: gemini.Config{
 			LogParams:      getEnvBool("GEMINI_LOG_REQUESTS", false),
 			RetryAttempts:  getEnvInt("GEMINI_RETRY_ATTEMPTS", 3),
