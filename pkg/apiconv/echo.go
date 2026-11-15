@@ -259,3 +259,11 @@ func IsUpstreamToolRefusal(text string) bool {
 	}
 	return toolRefusalEN.MatchString(t) || toolRefusalFR.MatchString(t)
 }
+
+var internalToolRe = regexp.MustCompile(`(?i)(expand_skills|retriever:expand_skills|<GenerateWidget\b|trigger(ing)?\s+artifact\s+generation|artifact\s+generation\s+using)`)
+
+// IsInternalToolSignal reports whether text or thought indicates that Gemini
+// tried to use its built-in internal tools (expand_skills, internal artifact, widget).
+func IsInternalToolSignal(text string) bool {
+	return internalToolRe.MatchString(text)
+}

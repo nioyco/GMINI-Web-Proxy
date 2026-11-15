@@ -60,9 +60,10 @@ type reqInfo struct {
 	echoStripped   atomic.Int64
 	echoFabricated atomic.Int64
 	refusal        atomic.Bool
+	internalTool   atomic.Bool
 	met            gemini.CallMetrics // upstream timing/size, filled by the gemini client
 
-	// In-flight tracking (K7)
+	// In-flight tracking (K7, K8)
 	inFlightMu      sync.RWMutex
 	servedID        string
 	servedName      string
@@ -70,6 +71,7 @@ type reqInfo struct {
 	thoughtBytes    int
 	textBytes       int
 	lastFrameTime   time.Time
+	statusNote      string
 }
 
 func (ri *reqInfo) setServed(id, name, verdict string) {
@@ -95,7 +97,16 @@ func (ri *reqInfo) setProgress(thoughtBytes, textBytes int) {
 	ri.inFlightMu.Unlock()
 }
 
-// InFlightRequest summarizes one request currently in progress (K7).
+func (ri *reqInfo) setStatusNote(note string) {
+	if ri == nil {
+		return
+	}
+	ri.inFlightMu.Lock()
+	ri.statusNote = note
+	ri.inFlightMu.Unlock()
+}
+
+// InFlightRequest summarizes one request currently in progress (K7, K8).
 type InFlightRequest struct {
 	ID              string  `json:"id"`
 	Model           string  `json:"model"`
@@ -107,6 +118,7 @@ type InFlightRequest struct {
 	ThoughtBytes    int     `json:"thought_bytes"`
 	TextBytes       int     `json:"text_bytes"`
 	LastFrameAgeSec float64 `json:"last_frame_age_sec"`
+	StatusNote      string  `json:"status_note,omitempty"`
 }
 
 func (ri *reqInfo) inFlightSnapshot(now time.Time) InFlightRequest {
@@ -134,6 +146,7 @@ func (ri *reqInfo) inFlightSnapshot(now time.Time) InFlightRequest {
 		ThoughtBytes:    ri.thoughtBytes,
 		TextBytes:       ri.textBytes,
 		LastFrameAgeSec: lastAge,
+		StatusNote:      ri.statusNote,
 	}
 }
 
@@ -161,17 +174,18 @@ func addKeepalive(ctx context.Context) {
 
 // statsCounters are the simple process-wide counters exposed by /_status.
 type statsCounters struct {
-	requests          atomic.Int64
-	status2xx         atomic.Int64
-	status4xx         atomic.Int64
-	status5xx         atomic.Int64
-	keepalives        atomic.Int64
-	abortedOnShutdown atomic.Int64
-	echoStripped      atomic.Int64
-	echoFabricated    atomic.Int64
-	upstreamRefusal   atomic.Int64
-	toolCallUnparsed  atomic.Int64
-	toolNameInferred  atomic.Int64
+	requests             atomic.Int64
+	status2xx            atomic.Int64
+	status4xx            atomic.Int64
+	status5xx            atomic.Int64
+	keepalives           atomic.Int64
+	abortedOnShutdown    atomic.Int64
+	echoStripped         atomic.Int64
+	echoFabricated       atomic.Int64
+	upstreamRefusal      atomic.Int64
+	toolCallUnparsed     atomic.Int64
+	toolNameInferred     atomic.Int64
+	internalToolDetected atomic.Int64
 
 	// Upstream aggregates (only requests that reached Gemini).
 	upstreamRequests  atomic.Int64

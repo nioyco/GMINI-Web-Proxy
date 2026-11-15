@@ -187,6 +187,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			"upstream_refusal":          s.stats.upstreamRefusal.Load(),
 			"tool_call_unparsed":        s.stats.toolCallUnparsed.Load(),
 			"tool_name_inferred":        s.stats.toolNameInferred.Load(),
+			"internal_tool_detected":    s.stats.internalToolDetected.Load(),
 			"upstream_requests":         s.stats.upstreamRequests.Load(),
 			"upstream_attempts":         s.stats.upstreamAttempts.Load(),
 			"upstream_retries":          s.stats.upstreamRetries.Load(),

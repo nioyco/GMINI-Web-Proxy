@@ -208,7 +208,7 @@ func buildGoogleToolPrompt(toolDefs []googleToolDef) string {
 		"- Output ONLY the function_call block(s), nothing else\n" +
 		"- You may call multiple tools with multiple blocks\n" +
 		"- After receiving a [Tool result for ...], use that data to answer the user\n" +
-		googleToolRules() +
+		googleToolRules(toolDefs) +
 		"Available tools:\n" + string(spec)
 }
 

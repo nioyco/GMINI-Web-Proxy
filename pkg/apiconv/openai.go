@@ -250,21 +250,54 @@ func SetToolPromptRules(on bool) { toolPromptRules.Store(on) }
 // ToolPromptRules reports whether the extra tool-prompt rules are enabled.
 func ToolPromptRules() bool { return toolPromptRules.Load() }
 
+// toolSpecificRules formats environment instructions for specific active tools (K8).
+func toolSpecificRules(hasWriteFile, hasSearchWeb bool) string {
+	var extra []string
+	if hasWriteFile {
+		extra = append(extra, "- The word \"artifact\" in instructions refers to a local file to write with the provided \"write_file\" tool, never Gemini's built-in artifact, Canvas or skills features.")
+	}
+	if hasSearchWeb {
+		extra = append(extra, "- Web searches must be performed only using the provided \"search_web\" tool, never built-in web search.")
+	}
+	if len(extra) == 0 {
+		return ""
+	}
+	return strings.Join(extra, "\n") + "\n"
+}
+
 // openAIToolRules is the text between the "output ONLY the tool_call block(s)"
 // sentence and "Available tools:" (one newline when the rules are off).
-func openAIToolRules() string {
+func openAIToolRules(defs []toolDef) string {
 	if !ToolPromptRules() {
 		return "\n"
 	}
-	return toolNameRule + "\n" + noEchoRules + "\n\n"
+	hasWriteFile, hasSearchWeb := false, false
+	for _, d := range defs {
+		if d.Name == "write_file" {
+			hasWriteFile = true
+		}
+		if d.Name == "search_web" {
+			hasSearchWeb = true
+		}
+	}
+	return toolNameRule + "\n" + noEchoRules + toolSpecificRules(hasWriteFile, hasSearchWeb) + "\n\n"
 }
 
 // googleToolRules is the same for the Google function_call prompt.
-func googleToolRules() string {
+func googleToolRules(toolDefs []googleToolDef) string {
 	if !ToolPromptRules() {
 		return "\n"
 	}
-	return "- " + toolNameRule + "\n" + noEchoRules + "\n\n"
+	hasWriteFile, hasSearchWeb := false, false
+	for _, d := range toolDefs {
+		if d.Name == "write_file" {
+			hasWriteFile = true
+		}
+		if d.Name == "search_web" {
+			hasSearchWeb = true
+		}
+	}
+	return "- " + toolNameRule + "\n" + noEchoRules + toolSpecificRules(hasWriteFile, hasSearchWeb) + "\n\n"
 }
 
 // toolNameRule makes the "name" field explicit: the model once answered with the
@@ -299,7 +332,7 @@ func messagesToPrompt(messages []Message, tools []Tool, tc toolChoiceMode) strin
 				"Call format (use this exact format):\n"+
 				"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n"+
 				"When calling tools, output ONLY the tool_call block(s), nothing else.\n"+
-				openAIToolRules()+
+				openAIToolRules(defs)+
 				"Available tools:\n"+string(defsJSON)+
 				toolChoiceInstruction(tc))
 		}

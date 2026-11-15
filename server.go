@@ -482,6 +482,11 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 	var early strings.Builder
 	released := false
 	warnEmitted := false
+	thoughtBytes := 0
+	lastFrameTime := time.Now()
+	silenceWarned := false
+	silenceThreshold := time.Duration(s.silenceWarningSec()) * time.Second
+
 	write := func(err error) bool {
 		if err != nil {
 			s.rlog(ctx).Warn("sse write failed; aborting generation", "err", err)
@@ -492,6 +497,11 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 		return true
 	}
 	handle := func(e event) bool {
+		if apiconv.IsInternalToolSignal(e.thought) || apiconv.IsInternalToolSignal(e.text) {
+			if ri != nil && !ri.internalTool.Swap(true) {
+				s.stats.internalToolDetected.Add(1)
+			}
+		}
 		if e.servedID != "" {
 			verdict := "confirmed"
 			if p.Model != nil && p.Model.ModelID != "" && e.servedID != p.Model.ModelID {
@@ -514,8 +524,14 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 			return true
 		}
 		if e.thought != "" {
+			thoughtBytes += len(e.thought)
+			lastFrameTime = time.Now()
 			forwarded = true
 			return write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, e.thought)))
+		}
+		lastFrameTime = time.Now()
+		if silenceWarned && ri != nil {
+			ri.setStatusNote("")
 		}
 		raw.WriteString(e.text)
 		out := gate.Push(filter(e.text))
@@ -573,6 +589,29 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 		forwarded = true
 		return write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note)))
 	}
+	// If thoughts have arrived but no answer text follows for SilenceWarningSec,
+	// warn the user that Gemini may be executing an internal tool.
+	checkSilence := func() bool {
+		if silenceWarned || !s.cfg.StreamThoughts {
+			return true
+		}
+		if thoughtBytes > 0 && raw.Len() == 0 {
+			age := time.Since(lastFrameTime)
+			if age >= silenceThreshold {
+				silenceWarned = true
+				sec := int(age.Round(time.Second).Seconds())
+				note := fmt.Sprintf("\nGemini ne répond plus depuis %d s ; il utilise peut-être un outil interne (recherche web ou génération d'artifact).\n", sec)
+				if ri != nil {
+					ri.setStatusNote(fmt.Sprintf("Gemini ne répond plus depuis %d s ; il utilise peut-être un outil interne", sec))
+				}
+				s.rlog(ctx).Warn("upstream_silence_after_thoughts", "silence_sec", sec, "thought_bytes", thoughtBytes)
+				forwarded = true
+				return write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note)))
+			}
+		}
+		return true
+	}
+
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
 	var genErr error
@@ -584,6 +623,9 @@ loop:
 			return
 		case <-ticker.C:
 			if !hint() {
+				return
+			}
+			if !checkSilence() {
 				return
 			}
 			if time.Since(lastWrite) >= interval && !keepalive() {
@@ -768,6 +810,13 @@ func (s *Server) warnCooldown() time.Duration {
 		return 10 * time.Minute
 	}
 	return time.Duration(s.cfg.WarnSuspectCooldownMin) * time.Minute
+}
+
+func (s *Server) silenceWarningSec() int {
+	if s.cfg.SilenceWarningSec > 0 {
+		return s.cfg.SilenceWarningSec
+	}
+	return 45
 }
 
 // maybeSuspectWarningFor checks and emits a warning for a given verdict (in-flight

@@ -69,6 +69,9 @@ type Config struct {
 	// StreamThoughts forwards the model's thinking text as reasoning_content
 	// (GEMINI_STREAM_THOUGHTS, default on).
 	StreamThoughts bool
+	// SilenceWarningSec warns in stream thoughts if thoughts have arrived but no
+	// answer text follows for this duration (GEMINI_SILENCE_WARN_SEC, default 45).
+	SilenceWarningSec int
 	// DefaultThinkingLevel is the effort applied when a request names none
 	// (GEMINI_THINKING_LEVEL = low | medium | high; empty = send nothing). EXPERIMENTAL.
 	DefaultThinkingLevel string
@@ -127,6 +130,7 @@ func loadConfig(envFile string) *Config {
 		AntigravityModelsFile:       getEnv("GEMINI_ANTIGRAVITY_MODELS_FILE", ""),
 		StreamToolsProgress:         getEnvBool("GEMINI_STREAM_TOOLS_PROGRESS", true),
 		StreamThoughts:              getEnvBool("GEMINI_STREAM_THOUGHTS", true),
+		SilenceWarningSec:           nonNegative(getEnvInt("GEMINI_SILENCE_WARN_SEC", 45), 45),
 		DefaultThinkingLevel:        strings.ToLower(strings.TrimSpace(getEnv("GEMINI_THINKING_LEVEL", ""))),
 		ThinkingModes:               parseModeCodes(getEnv("GEMINI_THINKING_MODE_CODES", defaultThinkingModeCodes)),
 		ThinkingModesExplicit:       strings.TrimSpace(getEnv("GEMINI_THINKING_MODE_CODES", "")) != "",
