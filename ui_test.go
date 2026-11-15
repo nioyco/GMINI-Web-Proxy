@@ -221,4 +221,7 @@ func TestUISessionDegradedExposedAndCleared(t *testing.T) {
 	if !strings.Contains(wHTML.Body.String(), "Identité non garantie sur ") || !strings.Contains(wHTML.Body.String(), "actualiser le cookie (raccourci 7)") {
 		t.Error("ui.html missing name_only / model identity warning banner")
 	}
+	if !strings.Contains(wHTML.Body.String(), "Le renouvellement automatique est arrêté : relancer le raccourci 7 (choix 2) pour garder la session") {
+		t.Error("ui.html missing explicit suspended rotation action message")
+	}
 }

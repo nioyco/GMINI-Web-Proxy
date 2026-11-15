@@ -72,7 +72,7 @@ func (c *Client) saveState() {
 	if !c.stateEnabled() {
 		return
 	}
-	cookie, _ := c.loadCookie()
+	cookie, _ := c.currentCookieDirect()
 	st := persistedState{Version: stateVersion, SavedAt: time.Now(), Session: sessionFingerprint(cookie)}
 	c.atMu.Lock()
 	st.At, st.AtAt = c.atToken, c.atAt
@@ -123,6 +123,9 @@ func (c *Client) saveState() {
 		return
 	}
 	c.stateSavedAt = st.SavedAt
+	if info, err := os.Stat(c.cfg.StateFile); err == nil {
+		c.stateMtime = info.ModTime()
+	}
 }
 
 // StateRestore tells what RestoreState found.
@@ -142,42 +145,56 @@ type StateRestore struct {
 // same session whatever their age (the catalog is then refreshed by the catalog
 // loop when due, and marked stale in /_status while the session is not
 // authenticated).
-func (c *Client) RestoreState() StateRestore {
-	var out StateRestore
-	if !c.stateEnabled() {
-		return out
+func (c *Client) currentCookieDirect() (string, string) {
+	if c.cfg.Cookie != "" {
+		c.cookieMu.Lock()
+		cached, cachedSapi := c.cookieStr, c.cookieSAPI
+		c.cookieMu.Unlock()
+		if cached != "" {
+			return cached, cachedSapi
+		}
+		return c.cfg.Cookie, cookieValue(c.cfg.Cookie, cookieSAPISID)
 	}
+	if c.cfg.CookieFile == "" {
+		return "", ""
+	}
+	cookie, sapisid, _ := c.loadCookieFile()
+	return cookie, sapisid
+}
+
+func (c *Client) readPersistedState() (persistedState, time.Time, bool) {
 	info, err := os.Stat(c.cfg.StateFile)
 	if errors.Is(err, fs.ErrNotExist) {
-		return out
+		return persistedState{}, time.Time{}, false
 	}
 	if err != nil {
 		c.log.Warn("session state unreadable", "path", c.cfg.StateFile, "err", err)
-		return out
+		return persistedState{}, time.Time{}, false
 	}
 	if info.Mode().Perm()&0o077 != 0 {
 		if err := os.Chmod(c.cfg.StateFile, 0o600); err != nil {
 			c.log.Warn("session state permissions too wide and not fixable; ignored", "path", c.cfg.StateFile)
-			return out
+			return persistedState{}, time.Time{}, false
 		}
 		c.log.Warn("session state permissions tightened to 0600", "path", c.cfg.StateFile)
 	}
 	data, err := os.ReadFile(c.cfg.StateFile)
 	if err != nil {
 		c.log.Warn("session state unreadable", "path", c.cfg.StateFile, "err", err)
-		return out
+		return persistedState{}, time.Time{}, false
 	}
 	var st persistedState
 	if err := json.Unmarshal(data, &st); err != nil || st.Version != stateVersion {
 		c.log.Warn("session state ignored: unrecognised format", "path", c.cfg.StateFile)
-		return out
+		return persistedState{}, time.Time{}, false
 	}
-	cookie, _ := c.loadCookie()
-	if fp := sessionFingerprint(cookie); fp == "" || fp != st.Session {
-		c.log.Warn("session state ignored: it belongs to another session (cookie changed)")
-		return out
-	}
-	maxAge := c.cfg.StateMaxAge
+	return st, info.ModTime(), true
+}
+
+func (c *Client) applyRestoredSession(cookie string, st persistedState, mtime time.Time, resetRotation bool) bool {
+	c.stateMu.Lock()
+	c.stateMtime = mtime
+	c.stateMu.Unlock()
 	if st.BL != "" && c.blAuto {
 		c.blMu.Lock()
 		c.bl, c.blAt = st.BL, st.BLAt
@@ -186,15 +203,70 @@ func (c *Client) RestoreState() StateRestore {
 	if curHash := psidtsHash(cookie); curHash != "" && !st.PSIDTSAt.IsZero() && (st.PSIDTSHash == "" || st.PSIDTSHash == curHash) {
 		c.cookieMu.Lock()
 		c.psidtsAt, c.psidtsHash = st.PSIDTSAt, curHash
+		if resetRotation {
+			c.rotatedAt = time.Time{}
+			c.rot.noNewTokenStreak = 0
+			c.rot.suspended = false
+		}
+		c.cookieMu.Unlock()
+	} else if resetRotation && st.At != "" {
+		c.cookieMu.Lock()
+		c.rot.noNewTokenStreak = 0
+		c.rot.suspended = false
 		c.cookieMu.Unlock()
 	}
-	if st.At != "" && !st.AtAt.IsZero() && time.Since(st.AtAt) < maxAge {
+	if st.At != "" && !st.AtAt.IsZero() && time.Since(st.AtAt) < c.cfg.StateMaxAge {
 		c.atMu.Lock()
 		c.atToken, c.atAt = st.At, st.AtAt
 		c.atMu.Unlock()
 		c.recordAuthCheck(authOK, c.cookieGeneration())
-		out.SessionFresh = true
+		return true
 	}
+	return false
+}
+
+// maybeReloadExternalState reloads at, bl and psidts_at in a running client when
+// either cookie.txt or .state.json was rewritten externally (e.g. shortcut 7).
+func (c *Client) maybeReloadExternalState(cookie string, cookieChanged bool) {
+	if !c.stateEnabled() || c.cfg.Cookie != "" || c.cfg.CookieFile == "" {
+		return
+	}
+	info, err := os.Stat(c.cfg.StateFile)
+	if err != nil {
+		return
+	}
+	c.stateMu.Lock()
+	stateChanged := c.stateMtime.IsZero() || !info.ModTime().Equal(c.stateMtime)
+	c.stateMu.Unlock()
+	if !cookieChanged && !stateChanged {
+		return
+	}
+	st, mtime, ok := c.readPersistedState()
+	if !ok {
+		return
+	}
+	if fp := sessionFingerprint(cookie); fp == "" || fp != st.Session {
+		return
+	}
+	c.applyRestoredSession(cookie, st, mtime, true)
+	c.log.Info("session state hot-reloaded from disk", "token_age_sec", ageSeconds(st.AtAt))
+}
+
+func (c *Client) RestoreState() StateRestore {
+	var out StateRestore
+	if !c.stateEnabled() {
+		return out
+	}
+	st, mtime, ok := c.readPersistedState()
+	if !ok {
+		return out
+	}
+	cookie, _ := c.currentCookieDirect()
+	if fp := sessionFingerprint(cookie); fp == "" || fp != st.Session {
+		c.log.Warn("session state ignored: it belongs to another session (cookie changed)")
+		return out
+	}
+	out.SessionFresh = c.applyRestoredSession(cookie, st, mtime, false)
 	if len(st.Models) > 0 && !st.ModelsAt.IsZero() {
 		c.storeModels(st.Models, "persisted")
 		c.modelMu.Lock()
@@ -235,6 +307,7 @@ type SessionStateStatus struct {
 
 // SessionState returns the session state view. It makes no Google call.
 func (c *Client) SessionState() SessionStateStatus {
+	_, _ = c.loadCookie()
 	out := SessionStateStatus{Persisted: c.stateEnabled()}
 	c.stateMu.Lock()
 	out.LastSaved = c.stateSavedAt

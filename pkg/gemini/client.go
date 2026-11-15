@@ -155,6 +155,7 @@ type Client struct {
 	// Session state file (AUDIT-13 A5).
 	stateMu      sync.Mutex
 	stateSavedAt time.Time
+	stateMtime   time.Time
 
 	// Content-free journal of generations (served.go).
 	calls callJournal
@@ -507,6 +508,7 @@ func (c *Client) setAt(token string) {
 // Authenticated reports whether the cookie established a signed-in session (an
 // XSRF "at" token is held). It exposes no secret.
 func (c *Client) Authenticated() bool {
+	_, _ = c.loadCookie()
 	return c.currentAt() != ""
 }
 
@@ -711,6 +713,7 @@ func (c *Client) Generate(ctx context.Context, p GenParams) (string, error) {
 // generateAttempts runs up to attempts blocking generations. first marks the
 // initial call (request metrics and parameter log are recorded once).
 func (c *Client) generateAttempts(ctx context.Context, p GenParams, images []uploadedImage, met *CallMetrics, start time.Time, attempts int, first bool) (string, error) {
+	_, _ = c.loadCookie()
 	// The body carries the XSRF token: rebuild it for each series of attempts so a
 	// reloaded token is used.
 	body, reqUUID, err := c.buildBody(p, images)
@@ -865,6 +868,7 @@ func (c *Client) GenerateStreamEvents(ctx context.Context, p GenParams, h Stream
 // streamOnce performs one streaming generation attempt (n: 0 first, 1 after a
 // session reload).
 func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedImage, h StreamHandlers, n int) error {
+	_, _ = c.loadCookie()
 	body, reqUUID, err := c.buildBody(p, images)
 	if err != nil {
 		return err
@@ -1295,33 +1299,36 @@ func (c *Client) loadCookie() (cookie, sapisid string) {
 	if c.cfg.CookieFile == "" {
 		return "", ""
 	}
-	return c.loadCookieFile()
+	cookie, sapisid, changed := c.loadCookieFile()
+	c.maybeReloadExternalState(cookie, changed)
+	return cookie, sapisid
 }
 
 // loadCookieFile reads the cookie file, caching the parsed result by mtime so
 // the file is not re-read and re-parsed on every request.
-func (c *Client) loadCookieFile() (cookie, sapisid string) {
+func (c *Client) loadCookieFile() (cookie, sapisid string, changed bool) {
 	c.cookieMu.Lock()
 	defer c.cookieMu.Unlock()
 
 	info, err := os.Stat(c.cfg.CookieFile)
 	if err != nil {
 		c.log.Error("cookie stat failed", "path", c.cfg.CookieFile, "err", err)
-		return c.cookieStr, c.cookieSAPI // fall back to last good value
+		return c.cookieStr, c.cookieSAPI, false // fall back to last good value
 	}
 	if c.cookieLoaded && info.ModTime().Equal(c.cookieMtime) {
-		return c.cookieStr, c.cookieSAPI
+		return c.cookieStr, c.cookieSAPI, false
 	}
 
 	data, err := os.ReadFile(c.cfg.CookieFile)
 	if err != nil {
 		c.log.Error("cookie load failed", "path", c.cfg.CookieFile, "err", err)
-		return c.cookieStr, c.cookieSAPI
+		return c.cookieStr, c.cookieSAPI, false
 	}
 	cookie = strings.TrimSpace(string(data))
 	sapisid = cookieValue(cookie, cookieSAPISID)
 	newHash := psidtsHash(cookie)
 	if c.cookieLoaded && cookie != c.cookieStr {
+		changed = true
 		c.cookieGen++ // the file was rewritten (e.g. a re-exported cookie)
 		c.rot.noNewTokenStreak = 0
 		c.rot.suspended = false
@@ -1339,7 +1346,7 @@ func (c *Client) loadCookieFile() (cookie, sapisid string) {
 	}
 	c.cookieStr, c.cookieSAPI = cookie, sapisid
 	c.cookieMtime, c.cookieLoaded = info.ModTime(), true
-	return cookie, sapisid
+	return cookie, sapisid, changed
 }
 
 // cookieGeneration returns the cookie-jar generation (bumped on every change).

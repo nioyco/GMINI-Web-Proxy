@@ -7,8 +7,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -316,5 +318,120 @@ func TestCheckAuthBlockedOrErrorPreservesPersistedTokenAndBL(t *testing.T) {
 	}
 	if c.Authenticated() || c.currentAt() != "" {
 		t.Fatal("signed-out /app page must clear at")
+	}
+}
+
+// K4: A running Client reloads both cookie.txt and .state.json (at, bl, psidts_at)
+// written externally (by recuperer_cookie_gemini.mjs) without restarting, clears
+// rotation suspension, and works both when cookie.txt changes and when only
+// .state.json is refreshed.
+func TestRunningClientHotReloadsCookieAndStateFile(t *testing.T) {
+	dir := t.TempDir()
+	cookiePath := filepath.Join(dir, "cookie.txt")
+	statePath := cookiePath + ".state.json"
+
+	writePair := func(sapi, ts, at, bl string, tsAt time.Time, bumpTime time.Time) {
+		cookie := "__Secure-1PSID=p1; __Secure-1PSIDTS=" + ts + "; SAPISID=" + sapi
+		if err := writeFileAtomic(cookiePath, []byte(cookie), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Chtimes(cookiePath, bumpTime, bumpTime)
+
+		sSum := sha256.Sum256([]byte(sapi))
+		tsSum := sha256.Sum256([]byte(ts))
+		raw, _ := json.Marshal(map[string]any{
+			"version":             1,
+			"saved_at":            bumpTime.UTC().Format(time.RFC3339),
+			"session_fingerprint": hex.EncodeToString(sSum[:8]),
+			"at":                  at,
+			"at_at":               time.Now().UTC().Format(time.RFC3339),
+			"bl":                  bl,
+			"bl_at":               bumpTime.UTC().Format(time.RFC3339),
+			"psidts_at":           tsAt.UTC().Format(time.RFC3339),
+			"psidts_hash":         hex.EncodeToString(tsSum[:8]),
+		})
+		if err := writeFileAtomic(statePath, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Chtimes(statePath, bumpTime, bumpTime)
+	}
+
+	t1 := time.Now().Add(-2 * time.Hour)
+	writePair("sapi-1", "ts-1", "AT_1", "bl_1", t1, t1)
+
+	var gotURL, gotAT, gotCookie string
+	rt := rtFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.Contains(r.URL.Host, "accounts.google.com") {
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+		}
+		gotURL = r.URL.String()
+		gotCookie = r.Header.Get("Cookie")
+		b, _ := io.ReadAll(r.Body)
+		vals, _ := url.ParseQuery(string(b))
+		gotAT = vals.Get("at")
+		return resp200(r, ")]}'\n\n50\n"+servedLine("e6fa609c3fa255c0", "3.1 Pro")+"\n"), nil
+	})
+
+	c, err := New(Config{
+		CookieFile:         cookiePath,
+		StateFile:          statePath,
+		GeminiBLAuto:       true,
+		RotateSuspendAfter: 3,
+		RetryAttempts:      1,
+		RequestTimeout:     5,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetTransport(rt)
+	c.RestoreState()
+
+	// Simulate 3 no_new_token rotations suspending auto-rotation.
+	for i := 0; i < 3; i++ {
+		c.RotateCookie(context.Background())
+	}
+	if !c.RotationStatus().Suspended {
+		t.Fatal("expected rotation to be suspended after 3 no_new_token")
+	}
+
+	// External update: new cookie + new state written while client stays running.
+	t2 := time.Now().Add(-10 * time.Second)
+	writePair("sapi-1", "ts-2", "AT_2", "bl_2", t2, t2)
+
+	if _, err := c.Generate(context.Background(), GenParams{Prompt: "ping"}); err != nil {
+		t.Fatalf("Generate after external update: %v", err)
+	}
+	if gotAT != "AT_2" || !strings.Contains(gotURL, "bl=bl_2") || !strings.Contains(gotCookie, "ts-2") {
+		t.Fatalf("running client used stale auth/bl/cookie: at=%q url=%q cookie=%q", gotAT, gotURL, gotCookie)
+	}
+	rs := c.RotationStatus()
+	if rs.Suspended || rs.TokenAgeSource != "state" || rs.TokenAge > time.Minute {
+		t.Fatalf("rotation status not updated after hot-reload: %+v", rs)
+	}
+
+	// External update of ONLY .state.json (cookie.txt unchanged): must still reload at & bl.
+	t3 := time.Now()
+	sSum := sha256.Sum256([]byte("sapi-1"))
+	tsSum := sha256.Sum256([]byte("ts-2"))
+	raw3, _ := json.Marshal(map[string]any{
+		"version":             1,
+		"saved_at":            t3.UTC().Format(time.RFC3339),
+		"session_fingerprint": hex.EncodeToString(sSum[:8]),
+		"at":                  "AT_3",
+		"at_at":               t3.UTC().Format(time.RFC3339),
+		"bl":                  "bl_3",
+		"bl_at":               t3.UTC().Format(time.RFC3339),
+		"psidts_at":           t3.UTC().Format(time.RFC3339),
+		"psidts_hash":         hex.EncodeToString(tsSum[:8]),
+	})
+	if err := writeFileAtomic(statePath, raw3, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(statePath, t3, t3)
+	if _, err := c.Generate(context.Background(), GenParams{Prompt: "pong"}); err != nil {
+		t.Fatalf("Generate after state-only update: %v", err)
+	}
+	if gotAT != "AT_3" || !strings.Contains(gotURL, "bl=bl_3") {
+		t.Fatalf("state-only hot reload missed: at=%q url=%q", gotAT, gotURL)
 	}
 }
