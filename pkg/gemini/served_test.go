@@ -368,3 +368,32 @@ func TestGenerateScansFramesPosition39(t *testing.T) {
 		t.Fatalf("r2=%+v", r2)
 	}
 }
+
+// K5: "model absent from the last catalogue" WARN is rate-limited to once per
+// hour per model.
+func TestWithdrawnModelWarnRateLimited(t *testing.T) {
+	var logs bytes.Buffer
+	c, err := New(Config{}, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pro := &AvailableModel{Name: "gemini-detailed-research", ModelID: "e6fa609c3fa255c0"}
+	carb := &AvailableModel{Name: "gemini-4-carbon", ModelID: "95a4c0abcba24364"}
+	lite := &AvailableModel{Name: "gemini-quick-answers", ModelID: "cf41b0e0dd7d53e5"}
+	c.storeModels([]*AvailableModel{lite, pro, carb}, "dynamic")
+	c.storeModels([]*AvailableModel{lite}, "dynamic")
+
+	for i := 0; i < 4; i++ {
+		if _, err := c.ResolveModel(pro.Name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := c.ResolveModel(carb.Name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := strings.Count(logs.String(), "model absent from the last catalogue"); n != 2 {
+		t.Fatalf("absent WARN count = %d, want 2 (1 per model)\n%s", n, logs.String())
+	}
+}

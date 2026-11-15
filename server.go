@@ -182,6 +182,12 @@ func (s *Server) handleModelsRefresh(w http.ResponseWriter, r *http.Request) {
 	err := s.client.RefreshModels(ctx)
 	resp := map[string]any{"refreshed": err == nil, "models_count": len(s.client.ModelNames()),
 		"models_source": s.client.ModelsSourceLabel(), "session_degraded": s.client.CatalogHealth().SessionDegraded}
+	if next := s.client.CatalogRefreshNextAt(); !next.IsZero() {
+		if rem := int64(time.Until(next).Seconds() + 0.999); rem > 0 {
+			resp["cooldown_sec"] = rem
+			resp["next_refresh_at"] = next.UTC().Format(time.RFC3339)
+		}
+	}
 	status := http.StatusOK
 	switch {
 	case errors.Is(err, gemini.ErrCatalogRefreshRefused):

@@ -56,16 +56,18 @@ type modelIdentity struct {
 // sessionState describes the persisted session state by ages only: never the
 // token, never the file path (AUDIT-13 A5).
 type sessionState struct {
-	Persisted            bool    `json:"persisted"`
-	LastSavedAgeSec      *int64  `json:"last_saved_age_sec"`
-	TokenAgeSec          *int64  `json:"token_age_sec"`       // XSRF "at" token (value never exposed)
-	BuildLabelAge        *int64  `json:"build_label_age_sec"` // null: fallback label
-	CatalogAgeSec        *int64  `json:"catalog_age_sec"`     // null: never fetched from Google
-	CatalogStale         bool    `json:"catalog_stale"`       // persisted catalog served without a session
-	SessionDegraded      bool    `json:"session_degraded"`    // listModels shrank to <=1 model while >=2 known
-	SessionDegradedSince *string `json:"session_degraded_since,omitempty"`
-	SessionStatusLabel   string  `json:"session_status_label,omitempty"`
-	AccountStatusCode    int     `json:"account_status_code,omitempty"`
+	Persisted              bool    `json:"persisted"`
+	LastSavedAgeSec        *int64  `json:"last_saved_age_sec"`
+	TokenAgeSec            *int64  `json:"token_age_sec"`       // XSRF "at" token (value never exposed)
+	BuildLabelAge          *int64  `json:"build_label_age_sec"` // null: fallback label
+	CatalogAgeSec          *int64  `json:"catalog_age_sec"`     // null: never fetched from Google
+	CatalogStale           bool    `json:"catalog_stale"`       // persisted catalog served without a session
+	CatalogRefreshCooldown int64   `json:"catalog_refresh_cooldown_sec"`
+	CatalogRefreshNextAt   *string `json:"catalog_refresh_next_at,omitempty"`
+	SessionDegraded        bool    `json:"session_degraded"` // listModels shrank to <=1 model while >=2 known
+	SessionDegradedSince   *string `json:"session_degraded_since,omitempty"`
+	SessionStatusLabel     string  `json:"session_status_label,omitempty"`
+	AccountStatusCode      int     `json:"account_status_code,omitempty"`
 }
 
 // ignoredFields lists request fields received but not used by the proxy.
@@ -240,6 +242,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	if ch.SessionDegraded {
 		resp.SessionState.SessionStatusLabel = "session affaiblie : actualiser le cookie"
+	}
+	if next := s.client.CatalogRefreshNextAt(); !next.IsZero() {
+		if rem := int64(time.Until(next).Seconds() + 0.999); rem > 0 {
+			resp.SessionState.CatalogRefreshCooldown = rem
+			resp.SessionState.CatalogRefreshNextAt = rfc3339Ptr(next)
+		}
 	}
 	ids := s.client.ModelIdentities()
 	resp.ModelIdentities = make([]modelIdentity, 0, len(ids))

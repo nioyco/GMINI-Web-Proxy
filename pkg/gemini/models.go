@@ -99,14 +99,26 @@ func (c *Client) ResolveModel(name string) (*AvailableModel, error) {
 	if !ok {
 		c.modelMu.Lock()
 		wd, was := c.withdrawn[name]
+		shouldWarn := false
+		if was {
+			if c.absentWarnAt == nil {
+				c.absentWarnAt = map[string]time.Time{}
+			}
+			if last, seen := c.absentWarnAt[name]; !seen || time.Since(last) >= absentModelWarnEvery {
+				c.absentWarnAt[name] = time.Now()
+				shouldWarn = true
+			}
+		}
 		c.modelMu.Unlock()
 		if was {
 			// The catalogue Google returns can shrink without the model being
 			// refused (2026-11-15: one model listed while the web page offered
 			// four and the usage was at 1 %). The request is sent with the last
 			// known id; the reply itself says which model answered.
-			c.log.Warn("model absent from the last catalogue; sending the request with its last known id",
-				"model", name, "model_id", wd.Model.ModelID, "absent_since", wd.Since.Format("15:04"))
+			if shouldWarn {
+				c.log.Warn("model absent from the last catalogue; sending the request with its last known id",
+					"model", name, "model_id", wd.Model.ModelID, "absent_since", wd.Since.Format("15:04"))
+			}
 			m := wd.Model
 			return &m, nil
 		}
@@ -256,6 +268,26 @@ func (c *Client) CatalogHealth() CatalogHealthStatus {
 		Since:           c.sessionDegradedAt,
 		AccountStatus:   c.sessionAccountStatus,
 	}
+}
+
+// CatalogRefreshNextAt returns when the next manual RefreshModels call is
+// allowed (considering the 5-min minimum interval and any FamilyBatch backoff),
+// or the zero time if one may run now.
+func (c *Client) CatalogRefreshNextAt() time.Time {
+	var due time.Time
+	c.modelMu.Lock()
+	if !c.catalogTriedAt.IsZero() {
+		due = c.catalogTriedAt.Add(catalogManualMinInterval)
+	}
+	c.modelMu.Unlock()
+	bs := c.GoogleBlockStatus()
+	if fb, ok := bs.Families[FamilyBatch]; ok && fb.Active && fb.BackoffUntil.After(due) {
+		due = fb.BackoffUntil
+	}
+	if !due.After(time.Now()) {
+		return time.Time{}
+	}
+	return due
 }
 
 // RefreshModels refreshes the model catalog on explicit request (one listModels
@@ -424,9 +456,13 @@ func (c *Client) fetchModels(ctx context.Context) error {
 	return err
 }
 
-// catalogWarnEvery rate-limits the "model list refresh failed" WARN (a var so
-// tests can shrink it).
-var catalogWarnEvery = time.Hour
+// catalogWarnEvery rate-limits the "model list refresh failed" WARN, and
+// absentModelWarnEvery rate-limits the "model absent from the last catalogue"
+// WARN per model (vars so tests can shrink them).
+var (
+	catalogWarnEvery     = time.Hour
+	absentModelWarnEvery = time.Hour
+)
 
 // catalogWarnDue reports whether the refresh-failure WARN may be emitted now.
 func (c *Client) catalogWarnDue() bool {

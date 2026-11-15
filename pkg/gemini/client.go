@@ -138,10 +138,11 @@ type Client struct {
 	modelMu        sync.Mutex
 	models         map[string]*AvailableModel
 	modelOrder     []string
-	modelsSource   string    // "dynamic" | "fallback" | "static" | "persisted"
-	catalogAt      time.Time // last successful listModels fetch (or restored state)
-	catalogTriedAt time.Time // last listModels attempt (success or not)
-	catalogWarnAt  time.Time // last "model list refresh failed" WARN (guarded by modelMu)
+	modelsSource   string               // "dynamic" | "fallback" | "static" | "persisted"
+	catalogAt      time.Time            // last successful listModels fetch (or restored state)
+	catalogTriedAt time.Time            // last listModels attempt (success or not)
+	catalogWarnAt  time.Time            // last "model list refresh failed" WARN (guarded by modelMu)
+	absentWarnAt   map[string]time.Time // last "model absent from the last catalogue" WARN per model
 	// withdrawn holds models that a later catalogue no longer lists (observed when
 	// the web usage limit is reached). In memory only (guarded by modelMu).
 	withdrawn map[string]WithdrawnModel

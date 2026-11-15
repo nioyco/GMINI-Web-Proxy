@@ -28,7 +28,8 @@ code,.mono{font-family:var(--mono);font-size:12px}
 .b{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}
 .ok{color:var(--ok);background:var(--okbg)}.warn{color:var(--warn);background:var(--warnbg)}.bad{color:var(--bad);background:var(--badbg)}.info{color:var(--info);background:var(--infobg)}.none{color:var(--mute);background:transparent;border:1px solid var(--line)}
 button{font:inherit;padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer}
-button:hover{border-color:var(--mute)}
+button:hover:not(:disabled){border-color:var(--mute)}
+button:disabled{opacity:.5;cursor:not-allowed}
 .note{color:var(--mute);font-size:12px;margin-top:10px}
 .cmd{display:block;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-top:6px;font-family:var(--mono);font-size:12px;white-space:pre-wrap;word-break:break-all;user-select:all}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:space-between;margin-bottom:10px}
@@ -107,6 +108,9 @@ async function load(){
     d=await r.json();$("err").style.display="none";
   }catch(e){$("err").textContent="Proxy injoignable : "+e.message;$("err").style.display="block";return}
   const s=d.status,g=s.google_block,ss=s.session_state||{};
+  refreshNextMs=ss.catalog_refresh_cooldown_sec>0?Date.now()+ss.catalog_refresh_cooldown_sec*1000:0;
+  if(refreshNextMs>0&&!$("refreshmsg").dataset.err)$("refreshmsg").dataset.auto="1";
+  syncRefresh();
   $("ver").textContent=`version ${s.version} · ${String(s.commit).slice(0,7)}${s.dirty?" (modifié)":""} · ${d.listen}`;
   $("upd").textContent="mis à jour à "+new Date().toLocaleTimeString("fr-FR");
   const mm=(s.model_identities||[]).filter(x=>x.mismatch_since);
@@ -153,14 +157,34 @@ async function load(){
   $("calls").innerHTML="<tr><th>Heure</th><th>Modèle demandé</th><th>Qui répond</th><th class=num>Niveau</th><th class=num>Durée</th><th class=num>1er texte</th><th class=num>Prompt</th><th class=num>Réponse</th><th class=num>Pensées</th><th>Erreur</th><th>Requête</th></tr>"+
     (d.calls.length?d.calls.map(c=>`<tr><td>${hm(c.time)}</td><td><code>${esc(c.model)}</code></td><td>${who(c.identity,c.suspect,(c.seen_model_ids||[]).join(", "),c.served_name)}</td><td class=num>${c.thinking_level||"—"}</td><td class=num>${dur(c.duration_ms)}</td><td class=num>${dur(c.first_text_ms)}</td><td class=num>${ko(c.prompt_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${ko(c.thought_bytes)}</td><td>${c.error?badge("bad",c.error):""}</td><td><code>${esc((c.request_id||"").slice(0,8))}</code></td></tr>`).join(""):"<tr><td colspan=11 class=sub>Aucun appel enregistré pour l'instant.</td></tr>");
 }
+let refreshNextMs=0;
+const fmtCooldown=sec=>{const m=Math.floor(sec/60),r=sec%60;return (m>0?m+" min ":"")+r+" s";};
+function syncRefresh(){
+  const b=$("refresh"),rem=Math.max(0,Math.ceil((refreshNextMs-Date.now())/1000));
+  if(rem>0){
+    b.disabled=true;
+    b.textContent="Actualiser le catalogue ("+fmtCooldown(rem)+")";
+    const err=$("refreshmsg").dataset.err||"";
+    if(err||$("refreshmsg").dataset.auto==="1"){
+      $("refreshmsg").textContent=(err?err+" — ":"")+"Prochain essai autorisé dans "+fmtCooldown(rem)+".";
+    }
+  }else{
+    b.disabled=false;
+    b.textContent="Actualiser le catalogue";
+    if($("refreshmsg").dataset.auto==="1"){$("refreshmsg").textContent="";$("refreshmsg").dataset.auto="";}
+  }
+}
 $("refresh").onclick=async()=>{
+  $("refreshmsg").dataset.err="";$("refreshmsg").dataset.auto="";
   $("refreshmsg").textContent="Demande en cours (un seul appel à Google)…";
   try{const r=await fetch("/_ui/api/models/refresh",{method:"POST",headers:{"X-GMINI-UI":TOKEN}});const j=await r.json();
-    $("refreshmsg").textContent=j.refreshed?`Catalogue actualisé : ${j.models_count} modèles.`:"Non actualisé : "+why(j.error||String(r.status))}
-  catch(e){$("refreshmsg").textContent="Échec : "+e.message}
-  load();
+    if(j.cooldown_sec>0)refreshNextMs=Date.now()+j.cooldown_sec*1000;
+    if(j.refreshed){$("refreshmsg").textContent=`Catalogue actualisé : ${j.models_count} modèles.`;}
+    else{const msg="Non actualisé : "+why(j.error||String(r.status));$("refreshmsg").dataset.err=msg;$("refreshmsg").textContent=msg;}
+  }catch(e){$("refreshmsg").textContent="Échec : "+e.message}
+  syncRefresh();load();
 };
-load();setInterval(()=>{if(!document.hidden)load()},5000);
+load();setInterval(()=>{if(!document.hidden)load()},5000);setInterval(()=>{if(!document.hidden&&refreshNextMs>0)syncRefresh()},1000);
 </script>
 </body>
 </html>
