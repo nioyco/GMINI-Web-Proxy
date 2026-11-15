@@ -39,6 +39,10 @@ type Server struct {
 	// keepaliveOverride, when > 0, replaces the cfg-derived keepalive interval
 	// (sub-second values for tests). Never set in production.
 	keepaliveOverride time.Duration
+	// heldDurationOverride and heldNoteOverride override the K9 120 s held cap
+	// and 30 s progress note period in tests. Never set in production.
+	heldDurationOverride time.Duration
+	heldNoteOverride     time.Duration
 	// uiToken protects the API of the local management page (ui.go); empty: page off.
 	uiToken string
 
@@ -433,9 +437,185 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 		sendError(w, http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
-	created := time.Now().Unix()
-	genCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	var gate apiconv.ProgressGate
+	var echo apiconv.EchoFilter
+	res := s.runStreamTools(ctx, sse, p, interval, declared, &streamToolsHooks{
+		progressive: true,
+		cid:         cid,
+		created:     time.Now().Unix(),
+		model:       model,
+		gate:        &gate,
+		echo:        &echo,
+	})
+	if res.aborted {
+		return
+	}
+	if res.earlyStopMsg != "" {
+		s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, res.earlyStopMsg, nil)), sse.done())
+		return
+	}
+	if res.earlyStopReason == "" && (res.genErr != nil || res.rawText == "") {
+		if !res.forwarded && (res.genErr == nil || gemini.Retryable(res.genErr)) && !errors.Is(res.genErr, gemini.ErrSessionAuth) {
+			// Nothing reached the client yet: let the buffered path retry.
+			s.rlog(ctx).Warn("progressive stream gave nothing; falling back to the buffered path", "err", res.genErr)
+			bres := s.awaitGenerate(ctx, sse, p, interval)
+			switch {
+			case bres.out == kaGone:
+			case bres.out == kaShutdown:
+				s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
+			case bres.err != nil:
+				s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+bres.err.Error())), sse.done())
+			default:
+				if note := s.maybeSuspectWarning(ctx, model); note != "" {
+					if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, note)); err != nil {
+						s.rlog(ctx).Warn("sse write failed", "err", err)
+						return
+					}
+				}
+				text, toolCalls := s.finishText(ctx, bres.text, true, declared)
+				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
+			}
+			return
+		}
+		genErr := res.genErr
+		if genErr == nil {
+			genErr = gemini.ErrEmptyResponse
+		}
+		s.rlog(ctx).Warn("stream+tools upstream error after SSE open", "err", genErr, "forwarded", res.forwarded)
+		s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+genErr.Error())), sse.done())
+		return
+	}
+
+	if res.earlyStopReason == "" {
+		isGlitch := !res.released && apiconv.IsUpstreamGlitch(res.rawText)
+		isToolRefusal := !res.released && len(declared) > 0 && apiconv.IsUpstreamToolRefusal(res.rawText)
+		if isGlitch || isToolRefusal {
+			// Gemini sent a canned non-answer (generic refusal, "can't use Workspace",
+			// a bare widget placeholder, or claimed local tools are not declared/accessible).
+			// Nothing of it reached the client: try once more.
+			s.rlog(ctx).Warn("upstream_glitch", "bytes", len(res.rawText), "tool_refusal", isToolRefusal, "action", "retry_once")
+			if s.cfg.StreamThoughts {
+				retryMsg := "\nGemini a renvoyé un message de service au lieu de traiter la demande : nouvelle tentative…\n"
+				if isToolRefusal {
+					retryMsg = "\nGemini affirme ne pas avoir d'outils locaux : nouvelle tentative avec consigne corrective…\n"
+				}
+				if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, retryMsg)); err != nil {
+					s.rlog(ctx).Warn("sse write failed", "err", err)
+					return
+				}
+			}
+			retryParams := glitchRetryParams(p)
+			if isToolRefusal {
+				retryParams = toolRefusalRetryParams(p)
+			}
+			bres := s.awaitGenerate(ctx, sse, retryParams, interval)
+			switch {
+			case bres.out == kaGone:
+			case bres.out == kaShutdown:
+				s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
+			case bres.err != nil:
+				s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+bres.err.Error())), sse.done())
+			case isToolRefusal && apiconv.IsUpstreamToolRefusal(bres.text):
+				s.rlog(ctx).Warn("upstream_tool_refusal", "bytes", len(bres.text), "action", "reported")
+				msg := "GMINI : Gemini a affirmé deux fois qu'aucun outil local n'est déclaré ou disponible (« " +
+					strings.TrimSpace(bres.text) + " »). Relancez la demande ou ouvrez une nouvelle conversation."
+				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
+			case apiconv.IsUpstreamGlitch(bres.text):
+				s.rlog(ctx).Warn("upstream_glitch", "bytes", len(bres.text), "action", "reported")
+				msg := "GMINI : Gemini a répondu deux fois par un message de service au lieu de traiter la demande (« " +
+					strings.TrimSpace(bres.text) + " »). Reformulez la demande en donnant le chemin complet du dossier ou du fichier, puis relancez."
+				if strings.Contains(bres.text, "<GenerateWidget") {
+					msg = "GMINI : Gemini a tenté deux fois d'ouvrir un de ses propres outils d'affichage au lieu de répondre. Relancez la demande, ou ouvrez une nouvelle conversation."
+				}
+				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
+			default:
+				if !res.warnEmitted {
+					if note := s.maybeSuspectWarning(ctx, model); note != "" {
+						if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, note)); err != nil {
+							s.rlog(ctx).Warn("sse write failed", "err", err)
+							return
+						}
+					}
+				}
+				text, toolCalls := s.finishText(ctx, bres.text, true, declared)
+				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
+			}
+			return
+		}
+	}
+
+	ri := reqFrom(ctx)
+	sentBytes := res.transmittedBytes
+	if !res.released {
+		if res.early != "" {
+			if err := sse.data(apiconv.ChatChunk(cid, res.created, model, res.early)); err != nil {
+				s.rlog(ctx).Warn("sse write failed", "err", err)
+				return
+			}
+			sentBytes += len(res.early)
+			ri.setSent(sentBytes)
+		}
+	}
+	if !s.cfg.DisableEchoFilter {
+		if out := gate.Push(echo.Flush()); out != "" {
+			if err := sse.data(apiconv.ChatChunk(cid, res.created, model, out)); err != nil {
+				s.rlog(ctx).Warn("sse write failed", "err", err)
+				return
+			}
+			sentBytes += len(out)
+			ri.setSent(sentBytes)
+		}
+	}
+	// Say so when another model than the one asked for probably answered.
+	if !res.warnEmitted {
+		if note := s.maybeSuspectWarning(ctx, model); note != "" {
+			if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, note)); err != nil {
+				s.rlog(ctx).Warn("sse write failed", "err", err)
+				return
+			}
+		}
+	}
+	text, toolCalls := s.finishText(ctx, strings.TrimSpace(res.rawText), true, declared)
+	rest, ok := gate.Rest(text)
+	if !ok {
+		s.rlog(ctx).Warn("progress_text_mismatch", "sent_bytes", len(gate.Sent()), "final_bytes", len(text))
+	}
+	ri.setSent(sentBytes + len(rest))
+	s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, rest, toolCalls)), sse.done())
+}
+
+type streamToolsHooks struct {
+	progressive bool
+	cid         string
+	created     int64
+	model       string
+	gate        *apiconv.ProgressGate
+	echo        *apiconv.EchoFilter
+}
+
+type streamToolsResult struct {
+	rawText          string
+	earlyStopReason  string // "" | "marker" | "size" | "duration"
+	earlyStopMsg     string
+	genErr           error
+	forwarded        bool
+	released         bool
+	early            string
+	warnEmitted      bool
+	aborted          bool // SSE write failed or client cancelled
+	created          int64
+	transmittedBytes int
+}
+
+// runStreamTools drives s.streamEvents for all stream+tools routes with keepalives,
+// in-flight tracking, K8 silence detection, and K9 early-stop / runaway caps.
+func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.GenParams, interval time.Duration, declared []apiconv.DeclaredTool, hooks *streamToolsHooks) streamToolsResult {
+	var res streamToolsResult
+	if hooks != nil {
+		res.created = hooks.created
+	}
+	genCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 
 	type event struct {
 		text       string
@@ -463,39 +643,77 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 			}
 		},
 	}
-	if s.cfg.StreamThoughts {
+	if hooks != nil && hooks.progressive && s.cfg.StreamThoughts {
 		h.Thought = func(d string) { push(event{thought: d}) }
 	}
 	go func() { done <- s.streamEvents(genCtx, p, h) }()
 
 	var raw strings.Builder
-	var gate apiconv.ProgressGate
-	var echo apiconv.EchoFilter
 	filter := func(d string) string {
-		if s.cfg.DisableEchoFilter {
+		if hooks == nil || hooks.echo == nil || s.cfg.DisableEchoFilter {
 			return d
 		}
-		return echo.Push(d)
+		return hooks.echo.Push(d)
 	}
-	start, lastWrite, forwarded := time.Now(), time.Now(), false
+	start, lastWrite := time.Now(), time.Now()
 	const earlyHold = 400
 	var early strings.Builder
-	released := false
-	warnEmitted := false
 	thoughtBytes := 0
-	lastFrameTime := time.Now()
+	lastFrameTime := start
 	silenceWarned := false
 	silenceThreshold := time.Duration(s.silenceWarningSec()) * time.Second
+	maxHeldBytes := s.maxHeldBytes()
+	maxHeldDur := s.maxHeldDuration()
+	heldNoteEvery := s.heldNoteInterval()
+
+	rawAtLastUsefulTx := 0
+	var heldSince, lastHeldNoteAt time.Time
+	completeToolCalls, lastCompleteEnd := 0, 0
+	lastHeldNoteBytes := 0
 
 	write := func(err error) bool {
 		if err != nil {
 			s.rlog(ctx).Warn("sse write failed; aborting generation", "err", err)
-			cancel()
+			cancel(err)
+			res.aborted = true
 			return false
 		}
 		lastWrite = time.Now()
 		return true
 	}
+	keepalive := func() bool {
+		if err := sse.comment("keepalive"); err != nil {
+			s.rlog(ctx).Warn("sse keepalive write failed", "err", err)
+			cancel(err)
+			res.aborted = true
+			return false
+		}
+		addKeepalive(ctx)
+		lastWrite = time.Now()
+		return true
+	}
+	cancelled := func() {
+		res.aborted = true
+		if errors.Is(context.Cause(ctx), errAbortedOnShutdown) {
+			if hooks != nil && hooks.progressive {
+				s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
+			}
+			return
+		}
+		s.rlog(ctx).Warn("stream+tools cancelled by client", "err", ctx.Err(), "elapsed", time.Since(start).Round(time.Millisecond))
+	}
+	triggerCap := func(reason string, heldBytes int) {
+		res.earlyStopReason = reason
+		s.noteEarlyStop(ctx, reason, completeToolCalls, raw.Len(), heldBytes, res.transmittedBytes, time.Since(start))
+		if completeToolCalls > 0 && lastCompleteEnd > 0 {
+			cancel(gemini.ErrEarlyStop)
+			res.rawText = raw.String()[:lastCompleteEnd]
+		} else {
+			cancel(gemini.ErrEarlyStopAborted)
+			res.earlyStopMsg = fmt.Sprintf("GMINI : la réponse de Gemini s'emballe (%d Ko sans fin) ; demande interrompue.", koCount(heldBytes))
+		}
+	}
+
 	handle := func(e event) bool {
 		if apiconv.IsInternalToolSignal(e.thought) || apiconv.IsInternalToolSignal(e.text) {
 			if ri != nil && !ri.internalTool.Swap(true) {
@@ -513,10 +731,10 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 			if ri != nil {
 				ri.setServed(e.servedID, e.servedName, verdict)
 			}
-			if !warnEmitted && (verdict == "other_model" || verdict == "name_only") {
-				if note := s.maybeSuspectWarningFor(ctx, model, verdict, e.servedID); note != "" {
-					warnEmitted = true
-					if !write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note))) {
+			if hooks != nil && hooks.progressive && !res.warnEmitted && (verdict == "other_model" || verdict == "name_only") {
+				if note := s.maybeSuspectWarningFor(ctx, hooks.model, verdict, e.servedID); note != "" {
+					res.warnEmitted = true
+					if !write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, note))) {
 						return false
 					}
 				}
@@ -526,73 +744,151 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 		if e.thought != "" {
 			thoughtBytes += len(e.thought)
 			lastFrameTime = time.Now()
-			forwarded = true
-			return write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, e.thought)))
+			if ri != nil {
+				ri.setReceived(thoughtBytes, raw.Len())
+			}
+			if hooks != nil && hooks.progressive {
+				res.forwarded = true
+				return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, e.thought)))
+			}
+			return true
 		}
 		lastFrameTime = time.Now()
 		if silenceWarned && ri != nil {
 			ri.setStatusNote("")
 		}
+		prevRawLen := raw.Len()
 		raw.WriteString(e.text)
-		out := gate.Push(filter(e.text))
-		if !released {
-			// The first few hundred bytes are held back: a canned non-answer of
-			// Gemini is short, and holding it lets the request be retried instead.
-			early.WriteString(out)
-			if raw.Len() < earlyHold {
-				return true
+		if ri != nil {
+			ri.setReceived(thoughtBytes, raw.Len())
+		}
+
+		scan := apiconv.ScanToolCalls(raw.String(), declared)
+		if scan.CompleteCalls > 0 && completeToolCalls == 0 {
+			lastHeldNoteAt = time.Now()
+		}
+		completeToolCalls, lastCompleteEnd = scan.CompleteCalls, scan.LastCallEnd
+		if scan.HasMarker {
+			heldBytes := raw.Len() - rawAtLastUsefulTx
+			res.earlyStopReason = "marker"
+			res.rawText = raw.String()[:scan.CutAt]
+			s.noteEarlyStop(ctx, "marker", completeToolCalls, raw.Len(), heldBytes, res.transmittedBytes, time.Since(start))
+			cancel(gemini.ErrEarlyStop)
+			if hooks != nil && hooks.progressive && hooks.gate != nil {
+				cutInDelta := scan.CutAt - prevRawLen
+				if cutInDelta < 0 {
+					cutInDelta = 0
+				}
+				if cutInDelta > len(e.text) {
+					cutInDelta = len(e.text)
+				}
+				if cutInDelta > 0 {
+					out := hooks.gate.Push(filter(e.text[:cutInDelta]))
+					if !res.released {
+						early.WriteString(out)
+					} else if out != "" {
+						res.forwarded = true
+						res.transmittedBytes += len(out)
+						ri.setSent(res.transmittedBytes)
+						if !write(sse.data(apiconv.ChatChunk(hooks.cid, hooks.created, hooks.model, out))) {
+							return false
+						}
+					}
+				}
 			}
-			released, out = true, early.String()
-		}
-		if out != "" {
-			forwarded = true
-			return write(sse.data(apiconv.ChatChunk(cid, created, model, out)))
-		}
-		return true
-	}
-	keepalive := func() bool {
-		if err := sse.comment("keepalive"); err != nil {
-			s.rlog(ctx).Warn("sse keepalive write failed", "err", err)
-			cancel()
 			return false
 		}
-		addKeepalive(ctx)
-		lastWrite = time.Now()
-		return true
-	}
-	cancelled := func() {
-		if errors.Is(context.Cause(ctx), errAbortedOnShutdown) {
-			s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
-			return
+
+		if hooks != nil && hooks.progressive && hooks.gate != nil {
+			out := hooks.gate.Push(filter(e.text))
+			if !res.released {
+				// The first few hundred bytes are held back: a canned non-answer of
+				// Gemini is short, and holding it lets the request be retried instead.
+				early.WriteString(out)
+				if raw.Len() >= earlyHold {
+					res.released, out = true, early.String()
+				} else {
+					out = ""
+				}
+			}
+			if res.released && out != "" {
+				res.forwarded = true
+				rawAtLastUsefulTx = raw.Len()
+				heldSince = time.Time{}
+				res.transmittedBytes += len(out)
+				ri.setSent(res.transmittedBytes)
+				if !write(sse.data(apiconv.ChatChunk(hooks.cid, hooks.created, hooks.model, out))) {
+					return false
+				}
+			}
 		}
-		s.rlog(ctx).Warn("stream+tools cancelled by client", "err", ctx.Err(), "elapsed", time.Since(start).Round(time.Millisecond))
+
+		heldBytes := raw.Len() - rawAtLastUsefulTx
+		if heldBytes > 0 && heldSince.IsZero() {
+			heldSince = time.Now()
+		}
+		if maxHeldBytes > 0 && heldBytes > maxHeldBytes {
+			triggerCap("size", heldBytes)
+			return false
+		}
+		return true
 	}
 
 	if !keepalive() { // bytes right after the headers
-		return
+		return res
 	}
 	tick := interval / 4
 	if tick <= 0 {
 		tick = interval
 	}
+	if maxHeldDur > 0 && maxHeldDur/4 > 0 && maxHeldDur/4 < tick {
+		tick = maxHeldDur / 4
+	}
+	if heldNoteEvery > 0 && heldNoteEvery/4 > 0 && heldNoteEvery/4 < tick {
+		tick = heldNoteEvery / 4
+	}
+	if tick < 5*time.Millisecond {
+		tick = 5 * time.Millisecond
+	}
+
 	// While a (possibly long) tool call is being written nothing can be forwarded:
 	// a short progress note goes out as reasoning_content instead, so the client
 	// shows activity and its inactivity timer is reset by real data.
 	hintEvery, lastHeld := interval/3, 0
 	hint := func() bool {
-		held := gate.Held()
-		if !s.cfg.StreamThoughts || held < 512 || held == lastHeld || time.Since(lastWrite) < hintEvery {
+		if completeToolCalls > 0 {
+			if raw.Len() <= lastCompleteEnd || raw.Len() == lastHeldNoteBytes || heldNoteEvery <= 0 || time.Since(lastHeldNoteAt) < heldNoteEvery {
+				return true
+			}
+			lastHeldNoteAt = time.Now()
+			lastHeldNoteBytes = raw.Len()
+			held := raw.Len() - rawAtLastUsefulTx
+			msg := fmt.Sprintf("appel d'outil reçu, Gemini continue d'écrire : %d Ko", koCount(held))
+			if ri != nil {
+				ri.setStatusNote(msg)
+			}
+			if hooks != nil && hooks.progressive && s.cfg.StreamThoughts {
+				res.forwarded = true
+				return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, msg+"\n")))
+			}
+			return true
+		}
+		if hooks == nil || !hooks.progressive || hooks.gate == nil || !s.cfg.StreamThoughts {
+			return true
+		}
+		held := hooks.gate.Held()
+		if held < 512 || held == lastHeld || time.Since(lastWrite) < hintEvery {
 			return true
 		}
 		lastHeld = held
 		note := fmt.Sprintf("Préparation d'un appel d'outil… %d Ko reçus (%s)\n", (held+512)/1024, time.Since(start).Round(time.Second))
-		forwarded = true
-		return write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note)))
+		res.forwarded = true
+		return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, note)))
 	}
 	// If thoughts have arrived but no answer text follows for SilenceWarningSec,
 	// warn the user that Gemini may be executing an internal tool.
 	checkSilence := func() bool {
-		if silenceWarned || !s.cfg.StreamThoughts {
+		if silenceWarned {
 			return true
 		}
 		if thoughtBytes > 0 && raw.Len() == 0 {
@@ -605,8 +901,10 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 					ri.setStatusNote(fmt.Sprintf("Gemini ne répond plus depuis %d s ; il utilise peut-être un outil interne", sec))
 				}
 				s.rlog(ctx).Warn("upstream_silence_after_thoughts", "silence_sec", sec, "thought_bytes", thoughtBytes)
-				forwarded = true
-				return write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note)))
+				if hooks != nil && hooks.progressive && s.cfg.StreamThoughts {
+					res.forwarded = true
+					return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, note)))
+				}
 			}
 		}
 		return true
@@ -614,33 +912,43 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
-	var genErr error
 loop:
 	for {
 		select {
 		case <-ctx.Done():
 			cancelled()
-			return
+			return res
 		case <-ticker.C:
+			heldBytes := raw.Len() - rawAtLastUsefulTx
+			if maxHeldDur > 0 && heldBytes > 0 && !heldSince.IsZero() && time.Since(heldSince) >= maxHeldDur {
+				triggerCap("duration", heldBytes)
+				break loop
+			}
 			if !hint() {
-				return
+				return res
 			}
 			if !checkSilence() {
-				return
+				return res
 			}
 			if time.Since(lastWrite) >= interval && !keepalive() {
-				return
+				return res
 			}
 		case e := <-events:
 			if !handle(e) {
-				return
+				if res.aborted {
+					return res
+				}
+				break loop
 			}
-		case genErr = <-done:
+		case res.genErr = <-done:
 			for { // the generation is over: drain what it queued
 				select {
 				case e := <-events:
 					if !handle(e) {
-						return
+						if res.aborted {
+							return res
+						}
+						break loop
 					}
 					continue
 				default:
@@ -652,121 +960,42 @@ loop:
 	}
 	if ctx.Err() != nil {
 		cancelled()
-		return
+		return res
 	}
+	if res.earlyStopReason == "" {
+		res.rawText = raw.String()
+	}
+	res.early = early.String()
+	return res
+}
 
-	if genErr != nil || raw.Len() == 0 {
-		if !forwarded && (genErr == nil || gemini.Retryable(genErr)) && !errors.Is(genErr, gemini.ErrSessionAuth) {
-			// Nothing reached the client yet: let the buffered path retry.
-			s.rlog(ctx).Warn("progressive stream gave nothing; falling back to the buffered path", "err", genErr)
-			res := s.awaitGenerate(ctx, sse, p, interval)
-			switch {
-			case res.out == kaGone:
-			case res.out == kaShutdown:
-				s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
-			case res.err != nil:
-				s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+res.err.Error())), sse.done())
-			default:
-				if note := s.maybeSuspectWarning(ctx, model); note != "" {
-					if !write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note))) {
-						return
-					}
-				}
-				text, toolCalls := s.finishText(ctx, res.text, true, declared)
-				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
-			}
-			return
-		}
-		if genErr == nil {
-			genErr = gemini.ErrEmptyResponse
-		}
-		s.rlog(ctx).Warn("stream+tools upstream error after SSE open", "err", genErr, "forwarded", forwarded)
-		s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+genErr.Error())), sse.done())
-		return
+// awaitStreamOrGenerate runs runStreamTools when progressive streaming is enabled
+// (giving non-chat routes early-stop, runaway caps and in-flight tracking) and
+// falls back to awaitGenerate otherwise.
+func (s *Server) awaitStreamOrGenerate(ctx context.Context, sse *sseStream, p gemini.GenParams, interval time.Duration, declared []apiconv.DeclaredTool) kaResult {
+	if s.streamEvents == nil {
+		return s.awaitGenerate(ctx, sse, p, interval)
 	}
-
-	isGlitch := !released && apiconv.IsUpstreamGlitch(raw.String())
-	isToolRefusal := !released && len(declared) > 0 && apiconv.IsUpstreamToolRefusal(raw.String())
-	if isGlitch || isToolRefusal {
-		// Gemini sent a canned non-answer (generic refusal, "can't use Workspace",
-		// a bare widget placeholder, or claimed local tools are not declared/accessible).
-		// Nothing of it reached the client: try once more.
-		s.rlog(ctx).Warn("upstream_glitch", "bytes", raw.Len(), "tool_refusal", isToolRefusal, "action", "retry_once")
-		if s.cfg.StreamThoughts {
-			retryMsg := "\nGemini a renvoyé un message de service au lieu de traiter la demande : nouvelle tentative…\n"
-			if isToolRefusal {
-				retryMsg = "\nGemini affirme ne pas avoir d'outils locaux : nouvelle tentative avec consigne corrective…\n"
-			}
-			if !write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, retryMsg))) {
-				return
-			}
+	res := s.runStreamTools(ctx, sse, p, interval, declared, nil)
+	if res.aborted {
+		if errors.Is(context.Cause(ctx), errAbortedOnShutdown) {
+			return kaResult{out: kaShutdown}
 		}
-		retryParams := glitchRetryParams(p)
-		if isToolRefusal {
-			retryParams = toolRefusalRetryParams(p)
-		}
-		res := s.awaitGenerate(ctx, sse, retryParams, interval)
-		switch {
-		case res.out == kaGone:
-		case res.out == kaShutdown:
-			s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
-		case res.err != nil:
-			s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+res.err.Error())), sse.done())
-		case isToolRefusal && apiconv.IsUpstreamToolRefusal(res.text):
-			s.rlog(ctx).Warn("upstream_tool_refusal", "bytes", len(res.text), "action", "reported")
-			msg := "GMINI : Gemini a affirmé deux fois qu'aucun outil local n'est déclaré ou disponible (« " +
-				strings.TrimSpace(res.text) + " »). Relancez la demande ou ouvrez une nouvelle conversation."
-			s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
-		case apiconv.IsUpstreamGlitch(res.text):
-			s.rlog(ctx).Warn("upstream_glitch", "bytes", len(res.text), "action", "reported")
-			msg := "GMINI : Gemini a répondu deux fois par un message de service au lieu de traiter la demande (« " +
-				strings.TrimSpace(res.text) + " »). Reformulez la demande en donnant le chemin complet du dossier ou du fichier, puis relancez."
-			if strings.Contains(res.text, "<GenerateWidget") {
-				msg = "GMINI : Gemini a tenté deux fois d'ouvrir un de ses propres outils d'affichage au lieu de répondre. Relancez la demande, ou ouvrez une nouvelle conversation."
-			}
-			s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
-		default:
-			if !warnEmitted {
-				if note := s.maybeSuspectWarning(ctx, model); note != "" {
-					if !write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note))) {
-						return
-					}
-				}
-			}
-			text, toolCalls := s.finishText(ctx, res.text, true, declared)
-			s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
-		}
-		return
+		return kaResult{out: kaGone}
 	}
-	if !released {
-		released = true
-		if out := early.String(); out != "" {
-			if !write(sse.data(apiconv.ChatChunk(cid, created, model, out))) {
-				return
-			}
+	if res.earlyStopMsg != "" {
+		return kaResult{text: res.earlyStopMsg}
+	}
+	if res.earlyStopReason != "" {
+		return kaResult{text: res.rawText}
+	}
+	if res.genErr != nil || res.rawText == "" {
+		if res.genErr == nil || (gemini.Retryable(res.genErr) && !errors.Is(res.genErr, gemini.ErrSessionAuth)) {
+			return s.awaitGenerate(ctx, sse, p, interval)
 		}
+		return kaResult{err: res.genErr}
 	}
-	if !s.cfg.DisableEchoFilter {
-		if out := gate.Push(echo.Flush()); out != "" {
-			if !write(sse.data(apiconv.ChatChunk(cid, created, model, out))) {
-				return
-			}
-		}
-	}
-	// Say so when another model than the one asked for probably answered.
-	if !warnEmitted {
-		if note := s.maybeSuspectWarning(ctx, model); note != "" {
-			if !write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note))) {
-				return
-			}
-		}
-	}
-	text, toolCalls := s.finishText(ctx, strings.TrimSpace(raw.String()), true, declared)
-	rest, ok := gate.Rest(text)
-	if !ok {
-		s.rlog(ctx).Warn("progress_text_mismatch", "sent_bytes", len(gate.Sent()), "final_bytes", len(text))
-	}
-	s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, rest, toolCalls)), sse.done())
+	return kaResult{text: res.rawText}
 }
 
 // ─── Shared keepalive helper ─────────────────────────────────────────────────
@@ -817,6 +1046,67 @@ func (s *Server) silenceWarningSec() int {
 		return s.cfg.SilenceWarningSec
 	}
 	return 45
+}
+
+func (s *Server) maxHeldBytes() int {
+	if s.cfg.MaxHeldBytes < 0 {
+		return 0
+	}
+	if s.cfg.MaxHeldBytes == 0 {
+		return 64 * 1024
+	}
+	return s.cfg.MaxHeldBytes
+}
+
+func (s *Server) maxHeldDuration() time.Duration {
+	if s.heldDurationOverride > 0 {
+		return s.heldDurationOverride
+	}
+	if s.cfg.MaxHeldSec < 0 {
+		return 0
+	}
+	if s.cfg.MaxHeldSec == 0 {
+		return 120 * time.Second
+	}
+	return time.Duration(s.cfg.MaxHeldSec) * time.Second
+}
+
+func (s *Server) heldNoteInterval() time.Duration {
+	if s.heldNoteOverride > 0 {
+		return s.heldNoteOverride
+	}
+	return 30 * time.Second
+}
+
+func koCount(bytes int) int {
+	if bytes <= 0 {
+		return 0
+	}
+	k := (bytes + 512) / 1024
+	if k < 1 {
+		return 1
+	}
+	return k
+}
+
+func (s *Server) noteEarlyStop(ctx context.Context, reason string, toolCalls, rawBytes, heldBytes, sentBytes int, elapsed time.Duration) {
+	s.stats.earlyStop.Add(1)
+	switch reason {
+	case "marker":
+		s.stats.earlyStopMarker.Add(1)
+	case "size":
+		s.stats.earlyStopSize.Add(1)
+	case "duration":
+		s.stats.earlyStopDuration.Add(1)
+	}
+	s.rlog(ctx).Warn("early_stop",
+		"reason", reason,
+		"tool_calls", toolCalls,
+		"raw_bytes", rawBytes,
+		"held_bytes", heldBytes,
+		"sent_bytes", sentBytes,
+		"elapsed_ms", elapsed.Milliseconds(),
+	)
 }
 
 // maybeSuspectWarningFor checks and emits a warning for a given verdict (in-flight
@@ -1008,7 +1298,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 			sendError(w, http.StatusInternalServerError, "streaming unsupported")
 			return
 		}
-		res := s.awaitGenerate(ctx, sse, p, interval)
+		res := s.awaitStreamOrGenerate(ctx, sse, p, interval, req.DeclaredTools())
 		switch {
 		case res.out == kaGone:
 		case res.out == kaShutdown:
@@ -1118,7 +1408,7 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 			sendError(w, http.StatusInternalServerError, "streaming unsupported")
 			return
 		}
-		res := s.awaitGenerate(ctx, sse, p, interval)
+		res := s.awaitStreamOrGenerate(ctx, sse, p, interval, req.DeclaredTools())
 		switch {
 		case res.out == kaGone:
 		case res.out == kaShutdown:
@@ -1257,7 +1547,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			sendAnthropicError(w, http.StatusInternalServerError, "streaming unsupported")
 			return
 		}
-		res := s.awaitGenerate(ctx, sse, p, interval)
+		res := s.awaitStreamOrGenerate(ctx, sse, p, interval, req.DeclaredTools())
 		switch {
 		case res.out == kaGone:
 		case res.out == kaShutdown:

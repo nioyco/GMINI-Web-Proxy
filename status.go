@@ -34,6 +34,8 @@ type statusResponse struct {
 	StreamThoughts     bool                  `json:"stream_thoughts"`            // GEMINI_STREAM_THOUGHTS
 	ThinkingLevel      string                `json:"thinking_level_default"`     // GEMINI_THINKING_LEVEL ("" = not sent)
 	MaxPromptBytes     int                   `json:"max_prompt_bytes"`           // GEMINI_MAX_PROMPT_BYTES (0 = no limit)
+	MaxHeldBytes       int                   `json:"max_held_bytes"`             // GEMINI_MAX_HELD_BYTES (0 = no limit)
+	MaxHeldSec         int                   `json:"max_held_sec"`               // GEMINI_MAX_HELD_SEC (0 = no limit)
 	TraceEnabled       bool                  `json:"content_trace_enabled"`      // GEMINI_TRACE_DIR set (files hold conversation content)
 	TemporaryChat      bool                  `json:"temporary_chat"`             // GEMINI_TEMPORARY_CHAT
 	IgnoredFields      ignoredFields         `json:"ignored_request_fields"`
@@ -188,6 +190,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			"tool_call_unparsed":        s.stats.toolCallUnparsed.Load(),
 			"tool_name_inferred":        s.stats.toolNameInferred.Load(),
 			"internal_tool_detected":    s.stats.internalToolDetected.Load(),
+			"early_stop":                s.stats.earlyStop.Load(),
+			"early_stop_marker":         s.stats.earlyStopMarker.Load(),
+			"early_stop_size":           s.stats.earlyStopSize.Load(),
+			"early_stop_duration":       s.stats.earlyStopDuration.Load(),
 			"upstream_requests":         s.stats.upstreamRequests.Load(),
 			"upstream_attempts":         s.stats.upstreamAttempts.Load(),
 			"upstream_retries":          s.stats.upstreamRetries.Load(),
@@ -268,6 +274,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	resp.MarkerNeutralized = apiconv.MarkerNeutralization()
 	resp.StreamProgress, resp.StreamThoughts = s.cfg.StreamToolsProgress, s.cfg.StreamThoughts
 	resp.ThinkingLevel, resp.MaxPromptBytes = s.cfg.DefaultThinkingLevel, s.cfg.MaxPromptBytes
+	resp.MaxHeldBytes, resp.MaxHeldSec = s.maxHeldBytes(), int(s.maxHeldDuration().Seconds())
 	resp.TraceEnabled = s.client.TraceEnabled()
 	resp.TemporaryChat = s.cfg.Gemini.TemporaryChat
 	resp.IgnoredFields = ignoredFields{

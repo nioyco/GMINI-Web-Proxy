@@ -63,13 +63,14 @@ type reqInfo struct {
 	internalTool   atomic.Bool
 	met            gemini.CallMetrics // upstream timing/size, filled by the gemini client
 
-	// In-flight tracking (K7, K8)
+	// In-flight tracking (K7, K8, K9)
 	inFlightMu      sync.RWMutex
 	servedID        string
 	servedName      string
 	inFlightVerdict string
 	thoughtBytes    int
 	textBytes       int
+	sentBytes       int
 	lastFrameTime   time.Time
 	statusNote      string
 }
@@ -97,6 +98,30 @@ func (ri *reqInfo) setProgress(thoughtBytes, textBytes int) {
 	ri.inFlightMu.Unlock()
 }
 
+func (ri *reqInfo) setReceived(thoughtBytes, textBytes int) {
+	if ri == nil {
+		return
+	}
+	ri.inFlightMu.Lock()
+	if thoughtBytes > ri.thoughtBytes {
+		ri.thoughtBytes = thoughtBytes
+	}
+	if textBytes > ri.textBytes {
+		ri.textBytes = textBytes
+	}
+	ri.lastFrameTime = time.Now()
+	ri.inFlightMu.Unlock()
+}
+
+func (ri *reqInfo) setSent(sentBytes int) {
+	if ri == nil {
+		return
+	}
+	ri.inFlightMu.Lock()
+	ri.sentBytes = sentBytes
+	ri.inFlightMu.Unlock()
+}
+
 func (ri *reqInfo) setStatusNote(note string) {
 	if ri == nil {
 		return
@@ -106,7 +131,7 @@ func (ri *reqInfo) setStatusNote(note string) {
 	ri.inFlightMu.Unlock()
 }
 
-// InFlightRequest summarizes one request currently in progress (K7, K8).
+// InFlightRequest summarizes one request currently in progress (K7, K8, K9).
 type InFlightRequest struct {
 	ID              string  `json:"id"`
 	Model           string  `json:"model"`
@@ -117,6 +142,7 @@ type InFlightRequest struct {
 	DurationMS      int64   `json:"duration_ms"`
 	ThoughtBytes    int     `json:"thought_bytes"`
 	TextBytes       int     `json:"text_bytes"`
+	SentBytes       int     `json:"sent_bytes"`
 	LastFrameAgeSec float64 `json:"last_frame_age_sec"`
 	StatusNote      string  `json:"status_note,omitempty"`
 }
@@ -145,6 +171,7 @@ func (ri *reqInfo) inFlightSnapshot(now time.Time) InFlightRequest {
 		DurationMS:      durMS,
 		ThoughtBytes:    ri.thoughtBytes,
 		TextBytes:       ri.textBytes,
+		SentBytes:       ri.sentBytes,
 		LastFrameAgeSec: lastAge,
 		StatusNote:      ri.statusNote,
 	}
@@ -186,6 +213,10 @@ type statsCounters struct {
 	toolCallUnparsed     atomic.Int64
 	toolNameInferred     atomic.Int64
 	internalToolDetected atomic.Int64
+	earlyStop            atomic.Int64
+	earlyStopMarker      atomic.Int64
+	earlyStopSize        atomic.Int64
+	earlyStopDuration    atomic.Int64
 
 	// Upstream aggregates (only requests that reached Gemini).
 	upstreamRequests  atomic.Int64

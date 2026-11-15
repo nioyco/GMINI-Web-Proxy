@@ -72,6 +72,14 @@ const maxResponseBytes = 32 << 20 // 32 MiB
 // ErrResponseTooLarge is returned when the upstream response exceeds maxResponseBytes.
 var ErrResponseTooLarge = errors.New("gemini response exceeds the 32 MiB size limit")
 
+// ErrEarlyStop is used as a cancellation cause when the proxy intentionally stops
+// reading a runaway upstream stream after receiving complete tool call(s).
+var ErrEarlyStop = errors.New("early_stop")
+
+// ErrEarlyStopAborted is used as a cancellation cause when the proxy stops reading
+// a runaway upstream stream because a safety cap was exceeded without a tool call.
+var ErrEarlyStopAborted = errors.New("early_stop_aborted")
+
 // readLimited reads at most max bytes, returning ErrResponseTooLarge when the
 // body is longer.
 func readLimited(r io.Reader, max int64) ([]byte, error) {
@@ -909,19 +917,41 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 		rec.FirstTextMS, rec.FirstThoughtMS = shape.firstTextMS, shape.firstThoughtMS
 		rec.TextBytes, rec.ThoughtBytes = len(prevText), len(prevThought)
 		if runErr != nil {
-			rec.Error = "stream_interrupted"
+			if errors.Is(runErr, ErrEarlyStopAborted) {
+				rec.Error = "early_stop"
+			} else {
+				rec.Error = "stream_interrupted"
+			}
 		} else if prevText == "" {
 			rec.Error = "empty"
 		}
 		c.recordCall(rec, scan)
 	}()
+	earlyCause := func() (error, bool) {
+		cause := context.Cause(ctx)
+		if errors.Is(cause, ErrEarlyStop) {
+			return nil, true
+		}
+		if errors.Is(cause, ErrEarlyStopAborted) {
+			return ErrEarlyStopAborted, true
+		}
+		return nil, false
+	}
 	if ctx.Err() != nil {
+		if err, ok := earlyCause(); ok {
+			runErr = err
+			return err
+		}
 		return c.clientCancelled(ctx, met, t0)
 	}
 	sent = true
 	resp, err := c.http.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
+			if cerr, ok := earlyCause(); ok {
+				runErr = cerr
+				return cerr
+			}
 			runErr = c.clientCancelled(ctx, met, t0)
 			return runErr
 		}
@@ -940,6 +970,14 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 	emitted, thoughtEmitted := false, false
 	identEmitted := false
 	for {
+		if ctx.Err() != nil {
+			if cerr, ok := earlyCause(); ok {
+				runErr = cerr
+				return cerr
+			}
+			runErr = c.clientCancelled(ctx, met, t0)
+			return runErr
+		}
 		line, readErr := reader.ReadString('\n')
 		if line != "" {
 			respBytes += len(line)
@@ -992,6 +1030,10 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 				return nil
 			}
 			if ctx.Err() != nil {
+				if cerr, ok := earlyCause(); ok {
+					runErr = cerr
+					return cerr
+				}
 				runErr = c.clientCancelled(ctx, met, t0)
 				return runErr
 			}
