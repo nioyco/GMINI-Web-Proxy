@@ -115,6 +115,7 @@ async function load(){
     ["Requêtes en cours",String(Math.max(0,s.active_requests-1))],
     ["Proxy démarré depuis",age(s.uptime_sec)],
     ["Trace des échanges",s.content_trace_enabled?badge("info","Activée"):badge("none","Désactivée")],
+    ["Conversations temporaires",s.temporary_chat?badge("info","Activées"):badge("none","Désactivées")],
     ["Niveau de réflexion par défaut",esc(s.thinking_level_default||"non envoyé")]
   ];
   $("tiles").innerHTML=t.map(([k,v])=>`<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");

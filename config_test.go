@@ -341,3 +341,26 @@ func TestRotateSuspendThresholdEnv(t *testing.T) {
 		t.Fatalf("RotateSuspendAfter(0) = %d, want -1", got)
 	}
 }
+
+func TestTemporaryChatEnvAndStatus(t *testing.T) {
+	noEnv := filepath.Join(t.TempDir(), "none.env")
+	t.Setenv("GEMINI_TEMPORARY_CHAT", "")
+	os.Unsetenv("GEMINI_TEMPORARY_CHAT")
+	if loadConfig(noEnv).Gemini.TemporaryChat {
+		t.Fatal("GEMINI_TEMPORARY_CHAT must default to false")
+	}
+	t.Setenv("GEMINI_TEMPORARY_CHAT", "1")
+	cfg := loadConfig(noEnv)
+	if !cfg.Gemini.TemporaryChat {
+		t.Fatal("GEMINI_TEMPORARY_CHAT=1 must enable TemporaryChat")
+	}
+	s := newTestServer(t, cfg)
+	rr := httptest.NewRecorder()
+	s.handler().ServeHTTP(rr, newReq(http.MethodGet, "/_status", nil))
+	var st struct {
+		Temp *bool `json:"temporary_chat"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &st); err != nil || st.Temp == nil || !*st.Temp {
+		t.Fatalf("/_status temporary_chat = %v (err=%v)", st.Temp, err)
+	}
+}

@@ -148,6 +148,7 @@ func loadConfig(envFile string) *Config {
 			TraceMaxFiles:      getEnvInt("GEMINI_TRACE_MAX_FILES", 0),
 			TraceRaw:           getEnvBool("GEMINI_TRACE_RAW", false),
 			RotateSuspendAfter: rotateSuspendEnv(),
+			TemporaryChat:      getEnvBool("GEMINI_TEMPORARY_CHAT", false),
 		},
 	}
 

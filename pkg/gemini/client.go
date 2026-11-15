@@ -236,6 +236,9 @@ func (c *Client) buildBody(p GenParams, images []uploadedImage) (body, reqUUID s
 		inner[bc.Index] = bc.Value
 	}
 	inner[59] = reqUUID
+	if c.cfg.TemporaryChat {
+		inner[45] = 1
+	}
 	if p.Level > 0 || p.Mode > 0 {
 		inner = append(inner, make([]any, 81-len(inner))...)
 		if p.Mode > 0 {

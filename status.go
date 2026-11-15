@@ -35,6 +35,7 @@ type statusResponse struct {
 	ThinkingLevel      string                `json:"thinking_level_default"`     // GEMINI_THINKING_LEVEL ("" = not sent)
 	MaxPromptBytes     int                   `json:"max_prompt_bytes"`           // GEMINI_MAX_PROMPT_BYTES (0 = no limit)
 	TraceEnabled       bool                  `json:"content_trace_enabled"`      // GEMINI_TRACE_DIR set (files hold conversation content)
+	TemporaryChat      bool                  `json:"temporary_chat"`             // GEMINI_TEMPORARY_CHAT
 	IgnoredFields      ignoredFields         `json:"ignored_request_fields"`
 	SessionState       sessionState          `json:"session_state"`
 }
@@ -233,6 +234,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	resp.StreamProgress, resp.StreamThoughts = s.cfg.StreamToolsProgress, s.cfg.StreamThoughts
 	resp.ThinkingLevel, resp.MaxPromptBytes = s.cfg.DefaultThinkingLevel, s.cfg.MaxPromptBytes
 	resp.TraceEnabled = s.client.TraceEnabled()
+	resp.TemporaryChat = s.cfg.Gemini.TemporaryChat
 	resp.IgnoredFields = ignoredFields{
 		Note:   "top-level fields received from clients that the proxy parses or forwards nowhere (e.g. temperature, reasoning_effort); counted since start",
 		Counts: s.ignored.snapshot(),

@@ -215,4 +215,7 @@ func TestUISessionDegradedExposedAndCleared(t *testing.T) {
 	if !strings.Contains(wHTML.Body.String(), "Rotation suspendue") {
 		t.Error("ui.html missing suspended rotation badge")
 	}
+	if !strings.Contains(wHTML.Body.String(), "Conversations temporaires") {
+		t.Error("ui.html missing temporary_chat tile")
+	}
 }

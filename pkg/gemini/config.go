@@ -72,6 +72,10 @@ type Config struct {
 	// no_new_token responses until the cookie changes (R&D-14 R6).
 	// Zero uses DefaultRotateSuspendAfter (3); negative disables suspension.
 	RotateSuspendAfter int
+
+	// TemporaryChat sets inner[45] = 1 in StreamGenerate payloads when true
+	// (GEMINI_TEMPORARY_CHAT, default false; R&D-14 R2).
+	TemporaryChat bool
 }
 
 // DefaultRotateSuspendAfter is the default consecutive no_new_token threshold.

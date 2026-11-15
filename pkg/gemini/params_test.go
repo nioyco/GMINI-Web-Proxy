@@ -114,3 +114,42 @@ func TestUpstreamParamsNotLoggedByDefault(t *testing.T) {
 		t.Errorf("logged by default:\n%s", logs.String())
 	}
 }
+
+// TestBodyTemporaryChatFlag proves R&D-14 R2 (C5): inner[45] == 1 when
+// TemporaryChat is enabled, and untouched (nil) by default.
+func TestBodyTemporaryChatFlag(t *testing.T) {
+	decodeInner := func(temporary bool) ([]any, *Client) {
+		c, _ := New(Config{GeminiBL: "bl", TemporaryChat: temporary}, nil)
+		body, _, err := c.buildBody(GenParams{Prompt: "PROMPT"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		vals, _ := url.ParseQuery(body)
+		var outer []any
+		if err := json.Unmarshal([]byte(vals.Get("f.req")), &outer); err != nil {
+			t.Fatal(err)
+		}
+		var inner []any
+		if err := json.Unmarshal([]byte(outer[1].(string)), &inner); err != nil {
+			t.Fatal(err)
+		}
+		return inner, c
+	}
+
+	offInner, offClient := decodeInner(false)
+	if offInner[45] != nil {
+		t.Errorf("default TemporaryChat=false: inner[45] = %#v, want nil", offInner[45])
+	}
+	if offClient.UpstreamParams().TemporaryChat {
+		t.Error("default UpstreamParams.TemporaryChat must be false")
+	}
+
+	onInner, onClient := decodeInner(true)
+	if onInner[45] != float64(1) {
+		t.Errorf("TemporaryChat=true: inner[45] = %#v, want 1", onInner[45])
+	}
+	up := onClient.UpstreamParams()
+	if !up.TemporaryChat || up.DynamicSlots["45"] == "" {
+		t.Errorf("UpstreamParams when TemporaryChat=true = %+v", up)
+	}
+}
