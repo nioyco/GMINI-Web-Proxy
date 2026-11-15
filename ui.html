@@ -125,8 +125,12 @@ async function load(){
     $("idwarn").innerHTML=mm.map(x=>`<div>⚠ Identité non garantie sur ${esc(labelOf(x.model))} depuis ${hmShort(x.mismatch_since)} — actualiser le cookie (raccourci 7)</div>`).join("");
     $("idwarn").style.display="block";
   }else{$("idwarn").style.display="none";$("idwarn").innerHTML="";}
+  const ar=s.cookie_auto_refresh||{};
+  const arNext=ar.running?"en cours…":ar.paused?"arrêtée (2 échecs — changer cookie.txt)":!ar.configured?"commande non réglée":!ar.enabled?"désactivée":ar.next_refresh_in_sec!=null?`dans ${age(ar.next_refresh_in_sec)} (${hmShort(ar.next_refresh_at)})`:"—";
+  const arLast=ar.last_ok==null?"aucun":`${ar.last_ok?"OK":"échec (code "+ar.last_exit_code+")"} · ${dur(ar.last_duration_ms)}`;
+  const arBtn=ar.configured?` <button id="ar-toggle" style="padding:2px 8px;font-size:12px">${ar.enabled?"Désactiver":"Activer"}</button>`:"";
   const t=[
-    ["Session Google",!s.authenticated?badge("bad","Non connectée"):ss.session_degraded?badge("warn","Session affaiblie : actualiser le cookie"):badge("ok","Connectée")],
+    ["Session Google",(!s.authenticated?badge("bad","Non connectée"):ss.session_degraded?badge("warn","Session affaiblie : actualiser le cookie"):badge("ok","Connectée"))+`<div class="sub">Âge du jeton : ${age(s.cookie_rotation.token_age_sec)}</div><div class="sub">Actualisation auto : ${esc(arNext)}${arBtn}</div>`+(ar.configured?`<div class="sub">Dernier lancement : ${esc(arLast)}</div>`:"")],
     ["Blocage anti-robot",g.active?badge("bad","Actif, niveau "+g.level):badge("ok","Aucun")+` <span class="sub">${g.total} au total</span>`],
     ["Catalogue",`${s.models_count} modèles <span class="sub">${esc(s.models_source)}, ${age(ss.catalog_age_sec)}</span>`+(ss.session_degraded?" "+badge("warn","1 modèle ignoré"):"")],
     ["Dernière rotation du cookie",(s.cookie_rotation.suspended?badge("warn","Rotation suspendue")+" ":"")+age(s.cookie_rotation.last_success_age_sec)+` <span class="sub">${esc(s.cookie_rotation.last_result||"")}</span>`+(s.cookie_rotation.suspended?`<div class="sub">Âge du jeton (__Secure-1PSIDTS) : ${age(s.cookie_rotation.token_age_sec)} — Le renouvellement automatique est arrêté : relancer le raccourci 7 (choix 2) pour garder la session</div>`:"")],
@@ -138,6 +142,8 @@ async function load(){
     ["Arrêts anticipés",(s.counters?.early_stop?badge("warn",String(s.counters.early_stop)):badge("none","0"))+`<div class="sub">marqueur : ${s.counters?.early_stop_marker||0} · taille : ${s.counters?.early_stop_size||0} · durée : ${s.counters?.early_stop_duration||0}</div>`]
   ];
   $("tiles").innerHTML=t.map(([k,v])=>`<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+  const arToggle=$("ar-toggle");
+  if(arToggle){arToggle.onclick=async()=>{arToggle.disabled=true;try{await fetch("/_ui/api/cookie-refresh/toggle",{method:"POST",headers:{"X-GMINI-UI":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({enabled:!ar.enabled})});}finally{load();}};}
   $("models").innerHTML="<tr><th>Nom chez Google</th><th>Nom à utiliser (proxy)</th><th>Identifiant stable</th><th>Qui répond (dernier appel)</th><th class=num>Demandes sur 5 h</th><th class=num>Avec pensées</th><th class=num>1er texte (médiane)</th><th>Dernier appel</th></tr>"+
     d.models.map(m=>`<tr><td><b>${esc(m.description||m.display_name||"—")}</b>${m.default?' <span class="sub">défaut</span>':""}<div class="sub">${esc([m.menu_label,m.family].filter(Boolean).join(" · "))}</div></td><td><code>${esc(m.name)}</code></td><td><code>${esc(m.model_id||"—")}</code></td><td>${m.withdrawn_since?badge("warn","Absent du dernier catalogue depuis "+hm(m.withdrawn_since))+'<div class="sub">la demande est quand même envoyée ; si cela dure, se reconnecter à Google (session affaiblie) ou vérifier la limite d\'utilisation</div>':who(m.last_time?m.last_identity:"",m.last_suspect,m.last_seen_models,m.last_served)}</td><td class=num>${m.calls_5h||0}</td><td class=num>${m.calls?m.with_thoughts+" / "+m.calls:"—"}</td><td class=num>${dur(m.median_first_text_ms)}</td><td>${hm(m.last_time)}</td></tr>`).join("");
   const apps=d.apps||[],anyRun=apps.some(x=>x.running);

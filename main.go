@@ -75,6 +75,9 @@ func main() {
 	if refresh {
 		go client.CookieRefreshLoop(ctx, time.Duration(cfg.CookieRefresh)*time.Minute)
 	}
+	if srv.autoRefresh != nil {
+		go srv.autoRefresh.Loop(ctx)
+	}
 	// The catalog is refreshed at most once per GEMINI_MODELS_REFRESH_HOURS, on its
 	// own timer (never chained to a rotation tick).
 	go client.CatalogRefreshLoop(ctx, time.Duration(cfg.ModelsRefreshHours)*time.Hour)

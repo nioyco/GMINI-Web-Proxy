@@ -383,6 +383,27 @@ func (c *Client) tokenAge() (time.Duration, string) {
 	return 0, "unknown"
 }
 
+// ReloadCookieFromDisk reloads cookie.txt and its persisted state from disk.
+func (c *Client) ReloadCookieFromDisk() {
+	_, _ = c.loadCookie()
+}
+
+// UnsuspendRotation lifts any rotation suspension and resets the no-new-token
+// streak (e.g. after an external session refresh succeeded).
+func (c *Client) UnsuspendRotation() {
+	c.cookieMu.Lock()
+	c.rot.suspended = false
+	c.rot.noNewTokenStreak = 0
+	c.cookieMu.Unlock()
+}
+
+// CookieGeneration reloads cookie.txt if modified and returns the current
+// cookie generation counter.
+func (c *Client) CookieGeneration() uint64 {
+	_, _ = c.loadCookie()
+	return c.cookieGeneration()
+}
+
 // RotationStatus returns a snapshot of the rotation state. It exposes no secret.
 func (c *Client) RotationStatus() RotationStatus {
 	cookie, _ := c.loadCookie()

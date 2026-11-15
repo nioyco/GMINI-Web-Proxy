@@ -22,11 +22,16 @@ const defaultListen = "127.0.0.1:8081"
 // The upstream Gemini settings live in the embedded gemini.Config; the rest are
 // the proxy's own network/CLI concerns.
 type Config struct {
-	Listen        string   // bind address, e.g. 127.0.0.1:8081 or :8081
-	LogRequests   bool     // log each request at Info level
-	LogFormat     string   // "text" (default) or "json" (GEMINI_LOG_FORMAT)
-	CookieRefresh int      // minutes between __Secure-1PSIDTS rotations (0 = off)
-	APIKeys       []string // allowed client keys; empty means open access
+	Listen        string // bind address, e.g. 127.0.0.1:8081 or :8081
+	LogRequests   bool   // log each request at Info level
+	LogFormat     string // "text" (default) or "json" (GEMINI_LOG_FORMAT)
+	CookieRefresh int    // minutes between __Secure-1PSIDTS rotations (0 = off)
+	// CookieAutoRefreshMin and CookieRefreshCmd drive external session refresh
+	// (e.g. headless Chrome script) when the token ages (GEMINI_COOKIE_AUTO_REFRESH_MIN,
+	// default 0 = off; GEMINI_COOKIE_REFRESH_CMD, no shell interpretation).
+	CookieAutoRefreshMin int
+	CookieRefreshCmd     string
+	APIKeys              []string // allowed client keys; empty means open access
 	// SSEKeepaliveSec is the interval (seconds) between ": keepalive" SSE comments
 	// sent while a stream+tools request waits for the blocking generation (0 = off,
 	// which restores the legacy "single chunk after generation" behaviour).
@@ -116,11 +121,13 @@ func loadConfig(envFile string) *Config {
 	loadDotenv(envFile)
 
 	cfg := &Config{
-		Listen:        normalizeListen(getEnv("GEMINI_LISTEN", defaultListen)),
-		LogRequests:   getEnvBool("GEMINI_LOG_REQUESTS", false),
-		LogFormat:     strings.ToLower(strings.TrimSpace(getEnv("GEMINI_LOG_FORMAT", "text"))),
-		CookieRefresh: getEnvInt("GEMINI_COOKIE_REFRESH_MIN", 9),
-		APIKeys:       splitKeys(getEnv("GEMINI_API_KEYS", "")),
+		Listen:               normalizeListen(getEnv("GEMINI_LISTEN", defaultListen)),
+		LogRequests:          getEnvBool("GEMINI_LOG_REQUESTS", false),
+		LogFormat:            strings.ToLower(strings.TrimSpace(getEnv("GEMINI_LOG_FORMAT", "text"))),
+		CookieRefresh:        getEnvInt("GEMINI_COOKIE_REFRESH_MIN", 9),
+		CookieAutoRefreshMin: nonNegative(getEnvInt("GEMINI_COOKIE_AUTO_REFRESH_MIN", 0), 0),
+		CookieRefreshCmd:     strings.TrimSpace(getEnv("GEMINI_COOKIE_REFRESH_CMD", "")),
+		APIKeys:              splitKeys(getEnv("GEMINI_API_KEYS", "")),
 
 		SSEKeepaliveSec:             getEnvInt("GEMINI_SSE_KEEPALIVE_SEC", 15),
 		ShutdownGraceSec:            shutdownGrace(getEnvInt("GEMINI_SHUTDOWN_GRACE_SEC", defaultShutdownGraceSec)),

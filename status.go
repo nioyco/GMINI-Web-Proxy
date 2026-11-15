@@ -11,36 +11,37 @@ import (
 // statusResponse is the read-only diagnostic payload of GET /_status. It never
 // contains secrets: no cookie, key, token or prompt content.
 type statusResponse struct {
-	Version            string                `json:"version"`
-	Commit             string                `json:"commit"`
-	Dirty              bool                  `json:"dirty"`
-	GoVersion          string                `json:"go_version"`
-	UptimeSec          int64                 `json:"uptime_sec"`
-	Authenticated      bool                  `json:"authenticated"`
-	CookieRotationAgeS *int64                `json:"cookie_last_rotation_age_sec"` // null: no rotation yet in this process
-	ModelsSource       string                `json:"models_source"`                // dynamic | fallback | static | persisted
-	ModelsCount        int                   `json:"models_count"`
-	DefaultModel       string                `json:"default_model"`
-	ActiveRequests     int                   `json:"active_requests"` // includes this /_status request
-	SSEKeepaliveSec    int                   `json:"sse_keepalive_sec"`
-	ShutdownGraceSec   int                   `json:"shutdown_grace_sec"`
-	Counters           map[string]int64      `json:"counters"`
-	CookieRotation     rotationStatus        `json:"cookie_rotation"`
-	GoogleBlock        googleBlock           `json:"google_block"`
-	UpstreamParams     gemini.UpstreamParams `json:"upstream_params"`
-	ToolPromptRules    bool                  `json:"tool_prompt_noecho_rules"`   // GEMINI_TOOL_PROMPT_NOECHO_RULES
-	MarkerNeutralized  bool                  `json:"neutralize_history_markers"` // GEMINI_NEUTRALIZE_HISTORY_MARKERS
-	StreamProgress     bool                  `json:"stream_tools_progress"`      // GEMINI_STREAM_TOOLS_PROGRESS
-	StreamThoughts     bool                  `json:"stream_thoughts"`            // GEMINI_STREAM_THOUGHTS
-	ThinkingLevel      string                `json:"thinking_level_default"`     // GEMINI_THINKING_LEVEL ("" = not sent)
-	MaxPromptBytes     int                   `json:"max_prompt_bytes"`           // GEMINI_MAX_PROMPT_BYTES (0 = no limit)
-	MaxHeldBytes       int                   `json:"max_held_bytes"`             // GEMINI_MAX_HELD_BYTES (0 = no limit)
-	MaxHeldSec         int                   `json:"max_held_sec"`               // GEMINI_MAX_HELD_SEC (0 = no limit)
-	TraceEnabled       bool                  `json:"content_trace_enabled"`      // GEMINI_TRACE_DIR set (files hold conversation content)
-	TemporaryChat      bool                  `json:"temporary_chat"`             // GEMINI_TEMPORARY_CHAT
-	IgnoredFields      ignoredFields         `json:"ignored_request_fields"`
-	SessionState       sessionState          `json:"session_state"`
-	ModelIdentities    []modelIdentity       `json:"model_identities"`
+	Version            string                  `json:"version"`
+	Commit             string                  `json:"commit"`
+	Dirty              bool                    `json:"dirty"`
+	GoVersion          string                  `json:"go_version"`
+	UptimeSec          int64                   `json:"uptime_sec"`
+	Authenticated      bool                    `json:"authenticated"`
+	CookieRotationAgeS *int64                  `json:"cookie_last_rotation_age_sec"` // null: no rotation yet in this process
+	ModelsSource       string                  `json:"models_source"`                // dynamic | fallback | static | persisted
+	ModelsCount        int                     `json:"models_count"`
+	DefaultModel       string                  `json:"default_model"`
+	ActiveRequests     int                     `json:"active_requests"` // includes this /_status request
+	SSEKeepaliveSec    int                     `json:"sse_keepalive_sec"`
+	ShutdownGraceSec   int                     `json:"shutdown_grace_sec"`
+	Counters           map[string]int64        `json:"counters"`
+	CookieRotation     rotationStatus          `json:"cookie_rotation"`
+	CookieAutoRefresh  cookieAutoRefreshStatus `json:"cookie_auto_refresh"`
+	GoogleBlock        googleBlock             `json:"google_block"`
+	UpstreamParams     gemini.UpstreamParams   `json:"upstream_params"`
+	ToolPromptRules    bool                    `json:"tool_prompt_noecho_rules"`   // GEMINI_TOOL_PROMPT_NOECHO_RULES
+	MarkerNeutralized  bool                    `json:"neutralize_history_markers"` // GEMINI_NEUTRALIZE_HISTORY_MARKERS
+	StreamProgress     bool                    `json:"stream_tools_progress"`      // GEMINI_STREAM_TOOLS_PROGRESS
+	StreamThoughts     bool                    `json:"stream_thoughts"`            // GEMINI_STREAM_THOUGHTS
+	ThinkingLevel      string                  `json:"thinking_level_default"`     // GEMINI_THINKING_LEVEL ("" = not sent)
+	MaxPromptBytes     int                     `json:"max_prompt_bytes"`           // GEMINI_MAX_PROMPT_BYTES (0 = no limit)
+	MaxHeldBytes       int                     `json:"max_held_bytes"`             // GEMINI_MAX_HELD_BYTES (0 = no limit)
+	MaxHeldSec         int                     `json:"max_held_sec"`               // GEMINI_MAX_HELD_SEC (0 = no limit)
+	TraceEnabled       bool                    `json:"content_trace_enabled"`      // GEMINI_TRACE_DIR set (files hold conversation content)
+	TemporaryChat      bool                    `json:"temporary_chat"`             // GEMINI_TEMPORARY_CHAT
+	IgnoredFields      ignoredFields           `json:"ignored_request_fields"`
+	SessionState       sessionState            `json:"session_state"`
+	ModelIdentities    []modelIdentity         `json:"model_identities"`
 }
 
 // modelIdentity summarizes the latest served-model verdict for one model and
@@ -225,6 +226,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	if rs.TokenAgeSource != "unknown" {
 		a := int64(rs.TokenAge.Seconds())
 		resp.CookieRotation.TokenAgeSec = &a
+	}
+	if s.autoRefresh != nil {
+		resp.CookieAutoRefresh = s.autoRefresh.Status()
 	}
 	bs := s.client.GoogleBlockStatus()
 	resp.GoogleBlock = googleBlock{Active: bs.Active, Since: rfc3339Ptr(bs.Since), LastSeen: rfc3339Ptr(bs.LastSeen),

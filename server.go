@@ -55,6 +55,8 @@ type Server struct {
 	suspectWarnMu sync.Mutex
 	suspectWarn   map[string]suspectWarnState
 	warnNow       func() time.Time
+
+	autoRefresh *cookieAutoRefresher
 }
 
 type suspectWarnState struct {
@@ -99,6 +101,7 @@ func newServer(cfg *Config, client *gemini.Client, logger *slog.Logger) *Server 
 	apiconv.SetMarkerNeutralization(!cfg.DisableMarkerNeutralization)
 	apiconv.SetDropTextAfterToolCall(!cfg.KeepTextAfterToolCall)
 	srv := &Server{cfg: cfg, client: client, log: logger, generate: client.Generate, started: time.Now()}
+	srv.autoRefresh = newCookieAutoRefresher(cfg, client, logger)
 	if cfg.UIEnabled {
 		srv.uiToken = newUIToken()
 	}
@@ -125,6 +128,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /_ui", s.handleUI)
 	mux.HandleFunc("GET /_ui/api/state", s.handleUIState)
 	mux.HandleFunc("POST /_ui/api/models/refresh", s.handleUIRefresh)
+	mux.HandleFunc("POST /_ui/api/cookie-refresh/toggle", s.handleUICookieRefreshToggle)
 	mux.HandleFunc("POST /_ui/api/antigravity/launch", s.handleUILaunch)
 	mux.HandleFunc("/", s.handleNotFound)
 	return s.withTracking(s.withHostCheck(s.withCORS(mux)))
@@ -276,6 +280,19 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	cid := apiconv.ID("chatcmpl-", 12)
 	p := m.Params(prompt)
 	p.Images = images
+	if s.autoRefresh != nil {
+		s.autoRefresh.PrepareRequest(r.Context(), func() {
+			if req.Stream {
+				if sse, ok := openSSE(w); ok {
+					if s.cfg.StreamThoughts {
+						_ = sse.data(apiconv.ChatChunkReasoning(cid, time.Now().Unix(), m.Name, "GMINI : actualisation de la session…\n"))
+					} else {
+						_ = sse.comment("GMINI : actualisation de la session…")
+					}
+				}
+			}
+		})
+	}
 	s.applyEffort(&p, m, effort, req.ReasoningEffort)
 
 	// True streaming path (no active tools): forward deltas as they arrive.
@@ -736,6 +753,9 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			if ri != nil {
 				ri.setServed(e.servedID, e.servedName, verdict)
 			}
+			if verdict == "other_model" && s.autoRefresh != nil {
+				s.autoRefresh.TriggerEarly()
+			}
 			if hooks != nil && hooks.progressive && !res.warnEmitted && (verdict == "other_model" || verdict == "name_only") {
 				if note := s.maybeSuspectWarningFor(ctx, hooks.model, verdict, e.servedID); note != "" {
 					res.warnEmitted = true
@@ -1195,6 +1215,9 @@ func (s *Server) maybeSuspectWarning(ctx context.Context, model string) string {
 		return ""
 	}
 	verdict := rec.Identity
+	if verdict == "other_model" && s.autoRefresh != nil {
+		s.autoRefresh.TriggerEarly()
+	}
 	if verdict == "not_stated" && rec.Suspect != "" {
 		verdict = "suspect:" + rec.Suspect
 	}
@@ -1316,6 +1339,15 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	p.Images = images
 	rid := apiconv.ID("resp_", 16)
 	mid := apiconv.ID("msg_", 12)
+	if s.autoRefresh != nil {
+		s.autoRefresh.PrepareRequest(r.Context(), func() {
+			if req.Stream {
+				if sse, ok := openSSE(w); ok {
+					_ = sse.comment("GMINI : actualisation de la session…")
+				}
+			}
+		})
+	}
 
 	// Stream + tools: same keepalive behaviour as chat completions.
 	if interval := s.keepaliveInterval(); req.Stream && toolsActive && interval > 0 {
@@ -1419,6 +1451,15 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 	setReqMeta(r.Context(), m.Name, stream)
 	p := m.Params(prompt)
 	p.Images = images
+	if s.autoRefresh != nil {
+		s.autoRefresh.PrepareRequest(r.Context(), func() {
+			if stream {
+				if sse, ok := openSSE(w); ok {
+					_ = sse.comment("GMINI : actualisation de la session…")
+				}
+			}
+		})
+	}
 
 	// Incremental streaming (no tools): emit a chunk per delta, then a final
 	// chunk with finishReason and usage.
@@ -1559,6 +1600,15 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	p := m.Params(prompt)
 	p.Images = images
 	msgID := apiconv.ID("msg_", 24)
+	if s.autoRefresh != nil {
+		s.autoRefresh.PrepareRequest(r.Context(), func() {
+			if req.Stream {
+				if sse, ok := openSSE(w); ok {
+					_ = sse.comment("GMINI : actualisation de la session…")
+				}
+			}
+		})
+	}
 
 	// True streaming (no active tools): forward text deltas as they arrive.
 	if req.Stream && !toolsActive {

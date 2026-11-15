@@ -146,6 +146,24 @@ func (s *Server) handleUIRefresh(w http.ResponseWriter, r *http.Request) {
 	s.handleModelsRefresh(w, r)
 }
 
+func (s *Server) handleUICookieRefreshToggle(w http.ResponseWriter, r *http.Request) {
+	if !s.uiAllowed(w, r, true) {
+		return
+	}
+	if s.autoRefresh == nil {
+		sendError(w, http.StatusServiceUnavailable, "cookie auto-refresh unavailable")
+		return
+	}
+	var req struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	st := s.autoRefresh.Toggle(req.Enabled)
+	sendJSON(w, http.StatusOK, st)
+}
+
 func (s *Server) uiModels() []uiModel {
 	all := s.client.RecentCalls() // newest first
 	byID := map[string]string{}
