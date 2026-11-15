@@ -183,3 +183,47 @@ func TestAppProbeOncePerStep(t *testing.T) {
 		t.Fatal("next window: one probe")
 	}
 }
+
+// TestGenerateContinuesDuringAppBlockAndLeavesBlockIntact proves R&D-12 R4/R5 (C2d):
+// when /app is blocked by /sorry, Generate continues using cached at/bl without
+// hitting /app, and a successful StreamGenerate does not clear the /app block.
+func TestGenerateContinuesDuringAppBlockAndLeavesBlockIntact(t *testing.T) {
+	fixedBlockTiming(t)
+	var appCalls atomic.Int32
+	c, _ := blockClient(t, rtFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/app") {
+			appCalls.Add(1)
+			return sorryResp(r), nil
+		}
+		if strings.Contains(r.URL.Path, "StreamGenerate") {
+			return resp200(r, makeWrbLine(t, genText)), nil
+		}
+		return resp200(r, ""), nil
+	}))
+	c.setAt("CACHED_AT")
+	c.blMu.Lock()
+	c.bl = "boq_cached_2026"
+	c.blMu.Unlock()
+
+	// Trigger /sorry block on /app
+	if _, err := c.fetchAppPage(context.Background()); !errors.Is(err, ErrGoogleBlocked) {
+		t.Fatalf("expected block on /app, got %v", err)
+	}
+	if !c.GoogleBlockStatus().Families[FamilyApp].Active {
+		t.Fatal("/app block should be active")
+	}
+
+	got, err := c.Generate(context.Background(), GenParams{Prompt: "ping"})
+	if err != nil {
+		t.Fatalf("Generate failed during /app block: %v", err)
+	}
+	if got != strings.TrimSpace(genText) {
+		t.Fatalf("Generate = %q, want %q", got, strings.TrimSpace(genText))
+	}
+	if appCalls.Load() != 1 {
+		t.Errorf("/app called %d times, want 1", appCalls.Load())
+	}
+	if bs := c.GoogleBlockStatus(); !bs.Active || !bs.Families[FamilyApp].Active {
+		t.Errorf("StreamGenerate success must not clear /app block: %+v", bs)
+	}
+}

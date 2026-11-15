@@ -104,6 +104,8 @@ type Client struct {
 	cookieLoaded bool
 	cookieGen    uint64    // bumped whenever the cookie jar changes (rotation, capture, file rewrite)
 	rotatedAt    time.Time // last successful __Secure-1PSIDTS rotation (guarded by cookieMu)
+	psidtsAt     time.Time // last real change of __Secure-1PSIDTS (persisted; guarded by cookieMu)
+	psidtsHash   string    // truncated SHA-256 of __Secure-1PSIDTS matching psidtsAt
 	rot          rotState  // rotation attempt tracking (guarded by cookieMu)
 	block        blockState
 	captureMu    sync.Mutex // serialises Set-Cookie capture (read-modify-write of the jar)
@@ -1293,8 +1295,20 @@ func (c *Client) loadCookieFile() (cookie, sapisid string) {
 	}
 	cookie = strings.TrimSpace(string(data))
 	sapisid = cookieValue(cookie, cookieSAPISID)
+	newHash := psidtsHash(cookie)
 	if c.cookieLoaded && cookie != c.cookieStr {
 		c.cookieGen++ // the file was rewritten (e.g. a re-exported cookie)
+		if newHash != c.psidtsHash {
+			c.psidtsHash = newHash
+			c.rotatedAt = time.Time{}
+			if newHash != "" {
+				c.psidtsAt = time.Now()
+			} else {
+				c.psidtsAt = time.Time{}
+			}
+		}
+	} else if !c.cookieLoaded && c.psidtsHash == "" && newHash != "" {
+		c.psidtsHash = newHash
 	}
 	c.cookieStr, c.cookieSAPI = cookie, sapisid
 	c.cookieMtime, c.cookieLoaded = info.ModTime(), true

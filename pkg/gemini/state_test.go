@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -245,5 +246,75 @@ func TestRestoreStateFromBrowserScriptFormat(t *testing.T) {
 	c.ResolveBuildLabel(context.Background())
 	if got := log.count("/app"); got != 0 {
 		t.Errorf("expected 0 /app calls after browser script state restore, got %d", got)
+	}
+}
+
+// TestCheckAuthBlockedOrErrorPreservesPersistedTokenAndBL proves R&D-14 R4 (C2a):
+// a /sorry refusal or network failure during verification must never clear the cached
+// at/bl in memory or in .state.json; only a 200 response proving logout (no SNlM0e) clears at.
+func TestCheckAuthBlockedOrErrorPreservesPersistedTokenAndBL(t *testing.T) {
+	dir := t.TempDir()
+	cookiePath := filepath.Join(dir, "cookie.txt")
+	if err := os.WriteFile(cookiePath, []byte("SAPISID=s; __Secure-1PSIDTS=ts"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	statePath := cookiePath + ".state.json"
+
+	var mode string // "auth" | "sorry" | "neterr" | "logout"
+	rt := rtFunc(func(r *http.Request) (*http.Response, error) {
+		switch mode {
+		case "sorry":
+			h := http.Header{}
+			h.Set("Location", "https://www.google.com/sorry/index?continue=x")
+			return &http.Response{StatusCode: 302, Header: h, Body: http.NoBody, Request: r}, nil
+		case "neterr":
+			return nil, errors.New("dial tcp: connection refused")
+		case "logout":
+			return resp200(r, appPageAnon), nil
+		default:
+			return resp200(r, appPageAuth), nil
+		}
+	})
+
+	var logs bytes.Buffer
+	c, err := New(Config{CookieFile: cookiePath, StateFile: statePath, GeminiBLAuto: true}, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetTransport(rt)
+	mode = "auth"
+	if got := c.CheckAuth(context.Background()); got != "authenticated" {
+		t.Fatalf("initial CheckAuth = %q", got)
+	}
+	wantBL := c.CurrentBL()
+
+	for _, failMode := range []string{"sorry", "neterr"} {
+		mode = failMode
+		c.invalidateAppPage()
+		got := c.CheckAuth(context.Background())
+		if !strings.HasPrefix(got, "unknown") {
+			t.Fatalf("mode=%s CheckAuth=%q, want unknown", failMode, got)
+		}
+		if c.currentAt() != "AT_TOKEN_1" || c.CurrentBL() != wantBL || !c.Authenticated() {
+			t.Fatalf("mode=%s cleared cached session: at=%q bl=%q", failMode, c.currentAt(), c.CurrentBL())
+		}
+		raw, err := os.ReadFile(statePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(raw), "AT_TOKEN_1") || !strings.Contains(string(raw), wantBL) {
+			t.Fatalf("mode=%s wiped persisted state on disk", failMode)
+		}
+	}
+
+	// Clear the simulated /app block cleanly via recordGoogleOK, then verify explicit signed-out 200 clears at.
+	c.recordGoogleOK(FamilyApp)
+	mode = "logout"
+	c.invalidateAppPage()
+	if got := c.CheckAuth(context.Background()); got != "NOT authenticated" {
+		t.Fatalf("logout CheckAuth = %q", got)
+	}
+	if c.Authenticated() || c.currentAt() != "" {
+		t.Fatal("signed-out /app page must clear at")
 	}
 }

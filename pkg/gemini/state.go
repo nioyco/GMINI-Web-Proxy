@@ -11,10 +11,10 @@ import (
 )
 
 // DefaultStateMaxAge is how recent a persisted session token must be for a
-// restart to skip the /app page (AUDIT-13 A5). The real lifetime of the "at"
-// token is unknown; a stale token costs one generation error, one /app reload
-// and one new attempt (A6).
-const DefaultStateMaxAge = 6 * time.Hour
+// restart to skip the /app page (AUDIT-13 A5, R&D-14 R4). The real lifetime of
+// the "at" token is unknown; a stale token costs one generation error, one
+// /app reload and one new attempt (A6).
+const DefaultStateMaxAge = 24 * time.Hour
 
 // stateVersion is the format version of the state file.
 const stateVersion = 1
@@ -30,10 +30,21 @@ type persistedState struct {
 	AtAt        time.Time         `json:"at_at,omitempty"`
 	BL          string            `json:"bl,omitempty"`
 	BLAt        time.Time         `json:"bl_at,omitempty"`
+	PSIDTSAt    time.Time         `json:"psidts_at,omitempty"`   // last real __Secure-1PSIDTS change (R&D-14 R4)
+	PSIDTSHash  string            `json:"psidts_hash,omitempty"` // truncated SHA-256 of __Secure-1PSIDTS
 	Models      []*AvailableModel `json:"models,omitempty"`
 	ModelsAt    time.Time         `json:"models_at,omitempty"`
 	ModelsSaved string            `json:"models_source,omitempty"`
 	Withdrawn   []WithdrawnModel  `json:"withdrawn,omitempty"` // models a later catalogue dropped
+}
+
+func psidtsHash(cookie string) string {
+	v := cookieValue(cookie, cookiePSIDTS)
+	if v == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(v))
+	return hex.EncodeToString(sum[:8])
 }
 
 // stateEnabled reports whether the session state is persisted: a state file is
@@ -74,6 +85,17 @@ func (c *Client) saveState() {
 		st.BL, st.BLAt = c.bl, c.blAt
 	}
 	c.blMu.Unlock()
+	if curHash := psidtsHash(cookie); curHash != "" {
+		c.cookieMu.Lock()
+		if c.psidtsHash != "" && c.psidtsHash != curHash {
+			c.psidtsAt = time.Now()
+		}
+		c.psidtsHash = curHash
+		if !c.psidtsAt.IsZero() {
+			st.PSIDTSAt, st.PSIDTSHash = c.psidtsAt, c.psidtsHash
+		}
+		c.cookieMu.Unlock()
+	}
 	c.modelMu.Lock()
 	if !c.catalogAt.IsZero() && (c.modelsSource == "dynamic" || c.modelsSource == "persisted") {
 		for _, n := range c.modelOrder {
@@ -160,6 +182,11 @@ func (c *Client) RestoreState() StateRestore {
 		c.blMu.Lock()
 		c.bl, c.blAt = st.BL, st.BLAt
 		c.blMu.Unlock()
+	}
+	if curHash := psidtsHash(cookie); curHash != "" && !st.PSIDTSAt.IsZero() && (st.PSIDTSHash == "" || st.PSIDTSHash == curHash) {
+		c.cookieMu.Lock()
+		c.psidtsAt, c.psidtsHash = st.PSIDTSAt, curHash
+		c.cookieMu.Unlock()
 	}
 	if st.At != "" && !st.AtAt.IsZero() && time.Since(st.AtAt) < maxAge {
 		c.atMu.Lock()

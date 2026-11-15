@@ -297,7 +297,7 @@ func TestLot1SessionSettings(t *testing.T) {
 	}
 	t.Setenv("GEMINI_COOKIE_FILE", "/d/cookie.txt")
 	cfg := loadConfig(filepath.Join(t.TempDir(), "none.env"))
-	if cfg.Gemini.BlockMaxBackoff != time.Hour || cfg.Gemini.StateMaxAge != 6*time.Hour || cfg.ModelsRefreshHours != 24 ||
+	if cfg.Gemini.BlockMaxBackoff != time.Hour || cfg.Gemini.StateMaxAge != 24*time.Hour || cfg.ModelsRefreshHours != 24 ||
 		cfg.Gemini.StateFile != "/d/cookie.txt.state.json" {
 		t.Errorf("defaults: backoff=%v stateAge=%v refresh=%d state=%q", cfg.Gemini.BlockMaxBackoff, cfg.Gemini.StateMaxAge, cfg.ModelsRefreshHours, cfg.Gemini.StateFile)
 	}
@@ -306,7 +306,7 @@ func TestLot1SessionSettings(t *testing.T) {
 	t.Setenv("GEMINI_MODELS_REFRESH_HOURS", "0")
 	t.Setenv("GEMINI_STATE_FILE", "off")
 	cfg = loadConfig(filepath.Join(t.TempDir(), "none.env"))
-	if cfg.Gemini.BlockMaxBackoff != 30*time.Minute || cfg.Gemini.StateMaxAge != 6*time.Hour || cfg.ModelsRefreshHours != 0 || cfg.Gemini.StateFile != "" {
+	if cfg.Gemini.BlockMaxBackoff != 30*time.Minute || cfg.Gemini.StateMaxAge != 24*time.Hour || cfg.ModelsRefreshHours != 0 || cfg.Gemini.StateFile != "" {
 		t.Errorf("overrides: backoff=%v stateAge=%v refresh=%d state=%q", cfg.Gemini.BlockMaxBackoff, cfg.Gemini.StateMaxAge, cfg.ModelsRefreshHours, cfg.Gemini.StateFile)
 	}
 }

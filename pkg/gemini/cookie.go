@@ -198,15 +198,20 @@ func (c *Client) RotateCookie(ctx context.Context) {
 	if cur == "" {
 		cur = cookie
 	}
-	if newCookie := replaceCookieValue(cur, cookiePSIDTS, newTS); newCookie != cur {
+	newCookie := replaceCookieValue(cur, cookiePSIDTS, newTS)
+	if newCookie != cur {
 		if err := c.storeCookie(newCookie); err != nil {
 			c.log.Warn("cookie rotation persist failed", "err", err)
 			return
 		}
 	}
+	now := time.Now()
 	c.cookieMu.Lock()
-	c.rotatedAt = time.Now()
+	c.rotatedAt = now
+	c.psidtsAt = now
+	c.psidtsHash = psidtsHash(newCookie)
 	c.cookieMu.Unlock()
+	c.saveState()
 	c.recordRotation(rotRenewed, nil, info)
 	c.log.Info("rotated __Secure-1PSIDTS cookie")
 	// The /app page is NOT reloaded after a rotation any more (AUDIT-13 A6): the
@@ -226,6 +231,9 @@ func (c *Client) storeCookie(newCookie string) error {
 		c.cookieGen++
 	}
 	c.cookieStr, c.cookieSAPI, c.cookieLoaded = newCookie, cookieValue(newCookie, cookieSAPISID), true
+	if newHash := psidtsHash(newCookie); newHash != c.psidtsHash {
+		c.psidtsHash = newHash
+	}
 	if c.cfg.CookieFile != "" {
 		if info, err := os.Stat(c.cfg.CookieFile); err == nil {
 			c.cookieMtime = info.ModTime()
@@ -318,15 +326,17 @@ func (c *Client) recordRotation(result string, err error, info rotateInfo) {
 }
 
 // tokenAge returns the age of the current __Secure-1PSIDTS: since the last
-// successful rotation, else since the cookie file's mtime, else unknown.
+// successful rotation in this process, else since the last real change
+// persisted in the state file (ignoring cookie.txt mtime rewrites like
+// __Secure-1PSIDCC), else unknown (R&D-14 R4).
 func (c *Client) tokenAge() (time.Duration, string) {
 	c.cookieMu.Lock()
 	defer c.cookieMu.Unlock()
 	switch {
 	case !c.rotatedAt.IsZero():
 		return time.Since(c.rotatedAt), "rotation"
-	case !c.cookieMtime.IsZero():
-		return time.Since(c.cookieMtime), "file_mtime"
+	case !c.psidtsAt.IsZero():
+		return time.Since(c.psidtsAt), "state"
 	}
 	return 0, "unknown"
 }

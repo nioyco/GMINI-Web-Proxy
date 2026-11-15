@@ -55,27 +55,72 @@ func TestStartupBuildLabelAndAuthShareOnePageFetch(t *testing.T) {
 func TestStartupRotateSkippedWhenTokenRecent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cookie.txt")
-	if err := os.WriteFile(path, []byte("SAPISID=s; __Secure-1PSIDTS=ts"), 0o600); err != nil {
+	statePath := path + ".state.json"
+	if err := os.WriteFile(path, []byte("SAPISID=s; __Secure-1PSIDTS=ts; __Secure-1PSIDCC=cc1"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var calls atomic.Int32
-	c, logs := newAutoBLClient(t, Config{CookieFile: path}, rtFunc(func(r *http.Request) (*http.Response, error) {
+	c, logs := newAutoBLClient(t, Config{CookieFile: path, StateFile: statePath}, rtFunc(func(r *http.Request) (*http.Response, error) {
 		calls.Add(1)
 		return resp200(r, ""), nil
 	}))
-	c.loadCookie() // primes the mtime used as token age
-	c.StartupRotate(context.Background())
-	if calls.Load() != 0 || !strings.Contains(logs.String(), "rotation skipped") {
-		t.Errorf("recent token: calls=%d log=%s", calls.Load(), logs)
+	// Persist a recent __Secure-1PSIDTS timestamp (< startupRotateMinAge = 5m) in state.
+	c.cookieMu.Lock()
+	c.psidtsAt = time.Now().Add(-2 * time.Minute)
+	c.psidtsHash = psidtsHash("SAPISID=s; __Secure-1PSIDTS=ts; __Secure-1PSIDCC=cc1")
+	c.cookieMu.Unlock()
+	c.saveState()
+
+	c2, logs2 := newAutoBLClient(t, Config{CookieFile: path, StateFile: statePath}, rtFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return resp200(r, ""), nil
+	}))
+	c2.RestoreState()
+	c2.StartupRotate(context.Background())
+	if calls.Load() != 0 || !strings.Contains(logs2.String(), "rotation skipped") || !strings.Contains(logs2.String(), "token_age_source=state") {
+		t.Errorf("recent token: calls=%d log=%s", calls.Load(), logs2)
 	}
-	old := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(path, old, old); err != nil {
-		t.Fatal(err)
-	}
-	c.loadCookie()
-	c.StartupRotate(context.Background())
+	_ = logs
+
+	// Simulate an older __Secure-1PSIDTS in state -> startup must rotate.
+	c2.cookieMu.Lock()
+	c2.psidtsAt = time.Now().Add(-time.Hour)
+	c2.cookieMu.Unlock()
+	c2.StartupRotate(context.Background())
 	if calls.Load() == 0 {
 		t.Error("stale token must trigger a rotation")
+	}
+}
+
+// TestTokenAgeIgnores1PSIDCCRewrite proves R&D-14 R4 (C2b): rewriting cookie.txt
+// when only __Secure-1PSIDCC is captured must not reset the __Secure-1PSIDTS age
+// (which no longer falls back to cookie.txt mtime).
+func TestTokenAgeIgnores1PSIDCCRewrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookie.txt")
+	statePath := path + ".state.json"
+	if err := os.WriteFile(path, []byte("SAPISID=s; __Secure-1PSIDTS=ts1; __Secure-1PSIDCC=cc1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := newAutoBLClient(t, Config{CookieFile: path, StateFile: statePath}, rtFunc(func(r *http.Request) (*http.Response, error) {
+		return resp200(r, ""), nil
+	}))
+	oldTS := time.Now().Add(-40 * time.Minute)
+	c.cookieMu.Lock()
+	c.psidtsAt = oldTS
+	c.psidtsHash = psidtsHash("SAPISID=s; __Secure-1PSIDTS=ts1; __Secure-1PSIDCC=cc1")
+	c.cookieMu.Unlock()
+
+	resp := &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Set-Cookie": []string{"__Secure-1PSIDCC=cc2; Path=/; Secure; HttpOnly"}},
+		Body:       io.NopCloser(strings.NewReader("")),
+	}
+	c.captureSetCookies(resp)
+
+	age, src := c.tokenAge()
+	if src != "state" || age < 39*time.Minute {
+		t.Fatalf("after 1PSIDCC-only rewrite: age=%v src=%q, want state >= 39m", age, src)
 	}
 }
 

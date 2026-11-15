@@ -87,7 +87,7 @@ type Config struct {
 	BlockMaxBackoffMin int
 	// StateFile / StateMaxAgeMin: persisted session state (GEMINI_STATE_FILE,
 	// default "<cookie file>.state.json", "off" to disable; always off for an
-	// inline cookie) and its reuse threshold (GEMINI_STATE_MAX_AGE_MIN, default 360).
+	// inline cookie) and its reuse threshold (GEMINI_STATE_MAX_AGE_MIN, default 1440 = 24h).
 	StateMaxAgeMin int
 	Gemini         gemini.Config
 }
@@ -131,7 +131,7 @@ func loadConfig(envFile string) *Config {
 		AllowedHosts:                splitKeys(getEnv("GEMINI_ALLOWED_HOSTS", "")),
 		ModelsRefreshHours:          nonNegative(getEnvInt("GEMINI_MODELS_REFRESH_HOURS", 24), 24),
 		BlockMaxBackoffMin:          positive(getEnvInt("GEMINI_BLOCK_MAX_BACKOFF_MIN", 60), 60),
-		StateMaxAgeMin:              positive(getEnvInt("GEMINI_STATE_MAX_AGE_MIN", 360), 360),
+		StateMaxAgeMin:              positive(getEnvInt("GEMINI_STATE_MAX_AGE_MIN", 1440), 1440),
 		Gemini: gemini.Config{
 			LogParams:      getEnvBool("GEMINI_LOG_REQUESTS", false),
 			RetryAttempts:  getEnvInt("GEMINI_RETRY_ATTEMPTS", 3),

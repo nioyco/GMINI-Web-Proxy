@@ -64,7 +64,10 @@ func (c *Client) captureSetCookies(resp *http.Response) {
 	if psidts {
 		c.cookieMu.Lock()
 		c.rotatedAt = now
+		c.psidtsAt = now
+		c.psidtsHash = psidtsHash(updated)
 		c.cookieMu.Unlock()
+		c.saveState()
 	}
 	c.log.Info("captured rotated session cookies from a Google response", "names", strings.Join(names, ","))
 }

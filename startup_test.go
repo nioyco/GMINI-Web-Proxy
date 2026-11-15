@@ -21,8 +21,9 @@ import (
 // googleSim answers like Gemini (signed-in /app page, a listModels catalog,
 // RotateCookies without a new token) and counts calls by kind.
 type googleSim struct {
-	mu    sync.Mutex
-	calls map[string]int
+	mu       sync.Mutex
+	calls    map[string]int
+	rotateTS string // if non-empty, RotateCookies returns a fresh __Secure-1PSIDTS
 }
 
 func (g *googleSim) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -32,9 +33,13 @@ func (g *googleSim) RoundTrip(r *http.Request) (*http.Response, error) {
 		g.calls = map[string]int{}
 	}
 	body := ""
+	hdr := http.Header{}
 	switch {
 	case r.URL.Host == "accounts.google.com":
 		g.calls["rotate"]++
+		if g.rotateTS != "" {
+			hdr.Add("Set-Cookie", "__Secure-1PSIDTS="+g.rotateTS+"; Path=/; Secure; HttpOnly")
+		}
 	case strings.HasSuffix(r.URL.Path, "/app"):
 		g.calls["app"]++
 		body = appPage
@@ -44,7 +49,7 @@ func (g *googleSim) RoundTrip(r *http.Request) (*http.Response, error) {
 	default:
 		g.calls["other"]++
 	}
-	return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	return &http.Response{StatusCode: 200, Header: hdr, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 }
 
 func (g *googleSim) total() int {
@@ -102,19 +107,21 @@ func startupClient(t *testing.T, cfg *Config) (*gemini.Client, *googleSim) {
 	return c, sim
 }
 
-// AUDIT-13 A5: cold start = 1 /app + 1 listModels; restart with the recent state
-// = 0 Google calls; /_status shows ages only, never the token.
+// AUDIT-13 A5 + R&D-14 R4: cold start = 1 /app + 1 RotateCookies (psidts age
+// unknown without state) + 1 listModels; restart with the saved state = 0
+// Google calls; /_status shows ages only, never the token.
 func TestStartupColdThenWarmRestart(t *testing.T) {
 	dir := t.TempDir()
 	cfg := startupConfig(t, dir)
 
 	c1, sim1 := startupClient(t, cfg)
+	sim1.rotateTS = "ts_rotated"
 	auth, refresh := startSession(context.Background(), cfg, c1, testLogger())
 	if !strings.HasPrefix(auth, "authenticated") || !refresh {
 		t.Fatalf("cold: auth=%q refresh=%v", auth, refresh)
 	}
-	if sim1.get("app") != 1 || sim1.get("batch") != 1 || sim1.total() != 2 {
-		t.Errorf("cold start calls = %v, want 1 /app + 1 listModels (rotation skipped: fresh cookie file)", sim1.calls)
+	if sim1.get("app") != 1 || sim1.get("batch") != 1 || sim1.get("rotate") != 1 || sim1.total() != 3 {
+		t.Errorf("cold start calls = %v, want 1 /app + 1 rotate + 1 listModels", sim1.calls)
 	}
 	info, err := os.Stat(cfg.Gemini.StateFile)
 	if err != nil || info.Mode().Perm() != 0o600 {
