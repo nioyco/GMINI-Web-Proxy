@@ -757,11 +757,29 @@ func (c *Client) generateAttempts(ctx context.Context, p GenParams, images []upl
 					// A 200 without text is treated as a (retryable) failure rather than a
 					// silent empty answer; only this case carries the size-limit hint.
 					if text := extractResponseText(string(raw)); text != "" {
-						c.writeTrace(met, p, traceResult{Text: text, Start: t0, Raw: []string{string(raw)}})
 						scan := &idScan{}
-						scan.add(string(raw))
+						shape := newFrameShape()
+						elapsed := time.Since(t0)
+						var rawLines []string
+						for _, line := range strings.Split(string(raw), "\n") {
+							if line == "" {
+								continue
+							}
+							rawLines = append(rawLines, line)
+							scan.add(line)
+							if fr, ok := parseFrame(line); ok {
+								shape.add(fr, elapsed)
+							}
+						}
+						c.writeTrace(met, p, traceResult{
+							Text: text, Start: t0,
+							Frames: shape.frames, FirstTextMS: shape.firstTextMS, LastFrameMS: shape.lastFrameMS,
+							Raw: rawLines,
+						})
 						rec := newCallRecord(met, p, t0)
-						rec.TextBytes = len(text)
+						rec.Frames = shape.frames
+						rec.TextBytes, rec.ThoughtBytes = len(text), shape.thought
+						rec.FirstTextMS, rec.FirstThoughtMS = shape.firstTextMS, shape.firstThoughtMS
 						c.recordCall(rec, scan)
 						return text, nil
 					}

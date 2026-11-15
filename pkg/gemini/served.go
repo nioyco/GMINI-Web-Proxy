@@ -248,6 +248,10 @@ func (c *Client) recordCall(r CallRecord, scan *idScan) {
 				r.Identity = "name_only"
 			}
 		}
+	} else if r.Frames == 0 && r.Identity == "confirmed" {
+		// Without any parsed wrb.fr frame or position-39 id, seeing the requested
+		// hex id elsewhere in the raw payload must not claim "confirmed".
+		r.Identity = "not_stated"
 	}
 
 	c.calls.mu.Lock()

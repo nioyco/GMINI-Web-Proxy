@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -314,5 +315,56 @@ func TestDegradedCatalogRejectedAndRecovered(t *testing.T) {
 	h = c.CatalogHealth()
 	if h.SessionDegraded || h.AccountStatus != 0 || len(c.ModelNames()) != 4 || len(c.WithdrawnModels()) != 0 {
 		t.Errorf("not recovered cleanly: health=%+v models=%d withdrawn=%d", h, len(c.ModelNames()), len(c.WithdrawnModels()))
+	}
+}
+
+// K2: A call without a position-39 served id and frames==0 must never be marked
+// "confirmed" solely because the requested hex id appeared elsewhere in raw text.
+func TestNoPosition39WithZeroFramesNeverConfirmed(t *testing.T) {
+	c, _ := New(Config{}, nil)
+	pro := &AvailableModel{Name: "pro", ModelID: "e6fa609c3fa255c0", Description: "3.1 Pro"}
+	c.storeModels([]*AvailableModel{pro}, "dynamic")
+
+	scan := &idScan{}
+	scan.add(`{"echo":"e6fa609c3fa255c0"}`)
+	r := newCallRecord(&CallMetrics{ID: "z0"}, GenParams{Model: pro}, time.Now())
+	r.TextBytes = 50
+	c.recordCall(r, scan)
+
+	got := c.RecentCalls()[0]
+	if got.Identity != "not_stated" || got.ServedID != "" || got.Frames != 0 {
+		t.Fatalf("got=%+v, want Identity=not_stated ServedID='' Frames=0", got)
+	}
+}
+
+// K2: Non-progressive Generate must parse each line separately so position 39/42
+// and frame counts are recorded just like GenerateStreamEvents.
+func TestGenerateScansFramesPosition39(t *testing.T) {
+	c, _ := New(Config{RetryAttempts: 1, RequestTimeout: 5}, nil)
+	pro := &AvailableModel{Name: "pro", ModelID: "e6fa609c3fa255c0", Description: "3.1 Pro"}
+	c.storeModels([]*AvailableModel{pro, {Name: "lite", ModelID: "cf41b0e0dd7d53e5", Description: "3.5 Flash-Lite"}}, "dynamic")
+
+	var replyLine string
+	c.SetTransport(rtFunc(func(*http.Request) (*http.Response, error) {
+		body := ")]}'\n\n123\n" + replyLine + "\n"
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+	}))
+
+	replyLine = servedLine("e6fa609c3fa255c0", "3.1 Pro")
+	if _, err := c.Generate(context.Background(), GenParams{Prompt: "hi", Model: pro}); err != nil {
+		t.Fatalf("Generate 1: %v", err)
+	}
+	r1 := c.RecentCalls()[0]
+	if r1.Frames == 0 || r1.ServedID != "e6fa609c3fa255c0" || r1.ServedName != "3.1 Pro" || r1.Identity != "confirmed" {
+		t.Fatalf("r1=%+v", r1)
+	}
+
+	replyLine = servedLine("cf41b0e0dd7d53e5", "3.1 Pro")
+	if _, err := c.Generate(context.Background(), GenParams{Prompt: "hi", Model: pro}); err != nil {
+		t.Fatalf("Generate 2: %v", err)
+	}
+	r2 := c.RecentCalls()[0]
+	if r2.Frames == 0 || r2.ServedID != "cf41b0e0dd7d53e5" || r2.ServedName != "3.1 Pro" || r2.Identity != "name_only" {
+		t.Fatalf("r2=%+v", r2)
 	}
 }
