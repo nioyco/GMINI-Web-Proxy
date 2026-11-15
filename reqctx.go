@@ -61,6 +61,80 @@ type reqInfo struct {
 	echoFabricated atomic.Int64
 	refusal        atomic.Bool
 	met            gemini.CallMetrics // upstream timing/size, filled by the gemini client
+
+	// In-flight tracking (K7)
+	inFlightMu      sync.RWMutex
+	servedID        string
+	servedName      string
+	inFlightVerdict string
+	thoughtBytes    int
+	textBytes       int
+	lastFrameTime   time.Time
+}
+
+func (ri *reqInfo) setServed(id, name, verdict string) {
+	if ri == nil {
+		return
+	}
+	ri.inFlightMu.Lock()
+	ri.servedID = id
+	ri.servedName = name
+	ri.inFlightVerdict = verdict
+	ri.lastFrameTime = time.Now()
+	ri.inFlightMu.Unlock()
+}
+
+func (ri *reqInfo) setProgress(thoughtBytes, textBytes int) {
+	if ri == nil {
+		return
+	}
+	ri.inFlightMu.Lock()
+	ri.thoughtBytes = thoughtBytes
+	ri.textBytes = textBytes
+	ri.lastFrameTime = time.Now()
+	ri.inFlightMu.Unlock()
+}
+
+// InFlightRequest summarizes one request currently in progress (K7).
+type InFlightRequest struct {
+	ID              string  `json:"id"`
+	Model           string  `json:"model"`
+	ServedID        string  `json:"served_id,omitempty"`
+	ServedName      string  `json:"served_name,omitempty"`
+	Identity        string  `json:"identity,omitempty"`
+	StartTime       string  `json:"start_time"`
+	DurationMS      int64   `json:"duration_ms"`
+	ThoughtBytes    int     `json:"thought_bytes"`
+	TextBytes       int     `json:"text_bytes"`
+	LastFrameAgeSec float64 `json:"last_frame_age_sec"`
+}
+
+func (ri *reqInfo) inFlightSnapshot(now time.Time) InFlightRequest {
+	ri.inFlightMu.RLock()
+	defer ri.inFlightMu.RUnlock()
+	lastAge := 0.0
+	if !ri.lastFrameTime.IsZero() {
+		lastAge = now.Sub(ri.lastFrameTime).Seconds()
+		if lastAge < 0 {
+			lastAge = 0
+		}
+	}
+	durMS := now.Sub(ri.start).Milliseconds()
+	if durMS < 0 {
+		durMS = 0
+	}
+	return InFlightRequest{
+		ID:              ri.id,
+		Model:           ri.model,
+		ServedID:        ri.servedID,
+		ServedName:      ri.servedName,
+		Identity:        ri.inFlightVerdict,
+		StartTime:       ri.start.UTC().Format(time.RFC3339),
+		DurationMS:      durMS,
+		ThoughtBytes:    ri.thoughtBytes,
+		TextBytes:       ri.textBytes,
+		LastFrameAgeSec: lastAge,
+	}
 }
 
 type ctxKey struct{}
@@ -142,6 +216,18 @@ func (a *activeSet) snapshot() []*reqInfo {
 	out := make([]*reqInfo, 0, len(a.m))
 	for ri := range a.m {
 		out = append(out, ri)
+	}
+	return out
+}
+
+func (a *activeSet) inFlight() []InFlightRequest {
+	snap := a.snapshot()
+	now := time.Now()
+	out := make([]InFlightRequest, 0, len(snap))
+	for _, ri := range snap {
+		if ri.model != "" {
+			out = append(out, ri.inFlightSnapshot(now))
+		}
 	}
 	return out
 }

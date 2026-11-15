@@ -132,6 +132,7 @@ func (s *Server) handleUIState(w http.ResponseWriter, r *http.Request) {
 		"status":      json.RawMessage(st.buf.Bytes()),
 		"models":      models,
 		"calls":       calls,
+		"in_flight":   s.inFlightRequests(),
 		"antigravity": s.uiAntigravity(models),
 		"apps":        listAntigravity(),
 		"listen":      s.cfg.Listen,

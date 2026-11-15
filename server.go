@@ -437,7 +437,12 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 	genCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	type event struct{ text, thought string }
+	type event struct {
+		text       string
+		thought    string
+		servedID   string
+		servedName string
+	}
 	events := make(chan event, 256)
 	done := make(chan error, 1)
 	push := func(e event) {
@@ -446,7 +451,18 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 		case <-genCtx.Done():
 		}
 	}
-	h := gemini.StreamHandlers{Text: func(d string) { push(event{text: d}) }}
+	ri := reqFrom(ctx)
+	h := gemini.StreamHandlers{
+		Text: func(d string) { push(event{text: d}) },
+		Identity: func(servedID, servedName string) {
+			push(event{servedID: servedID, servedName: servedName})
+		},
+		Progress: func(textBytes, thoughtBytes int) {
+			if ri != nil {
+				ri.setProgress(thoughtBytes, textBytes)
+			}
+		},
+	}
 	if s.cfg.StreamThoughts {
 		h.Thought = func(d string) { push(event{thought: d}) }
 	}
@@ -465,6 +481,7 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 	const earlyHold = 400
 	var early strings.Builder
 	released := false
+	warnEmitted := false
 	write := func(err error) bool {
 		if err != nil {
 			s.rlog(ctx).Warn("sse write failed; aborting generation", "err", err)
@@ -475,6 +492,27 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 		return true
 	}
 	handle := func(e event) bool {
+		if e.servedID != "" {
+			verdict := "confirmed"
+			if p.Model != nil && p.Model.ModelID != "" && e.servedID != p.Model.ModelID {
+				verdict = "other_model"
+				if p.Model.Description != "" && e.servedName == p.Model.Description {
+					verdict = "name_only"
+				}
+			}
+			if ri != nil {
+				ri.setServed(e.servedID, e.servedName, verdict)
+			}
+			if !warnEmitted && (verdict == "other_model" || verdict == "name_only") {
+				if note := s.maybeSuspectWarningFor(ctx, model, verdict, e.servedID); note != "" {
+					warnEmitted = true
+					if !write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note))) {
+						return false
+					}
+				}
+			}
+			return true
+		}
 		if e.thought != "" {
 			forwarded = true
 			return write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, e.thought)))
@@ -646,9 +684,11 @@ loop:
 			}
 			s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
 		default:
-			if note := s.maybeSuspectWarning(ctx, model); note != "" {
-				if !write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note))) {
-					return
+			if !warnEmitted {
+				if note := s.maybeSuspectWarning(ctx, model); note != "" {
+					if !write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note))) {
+						return
+					}
 				}
 			}
 			text, toolCalls := s.finishText(ctx, res.text, true, declared)
@@ -672,9 +712,11 @@ loop:
 		}
 	}
 	// Say so when another model than the one asked for probably answered.
-	if note := s.maybeSuspectWarning(ctx, model); note != "" {
-		if !write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note))) {
-			return
+	if !warnEmitted {
+		if note := s.maybeSuspectWarning(ctx, model); note != "" {
+			if !write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note))) {
+				return
+			}
 		}
 	}
 	text, toolCalls := s.finishText(ctx, strings.TrimSpace(raw.String()), true, declared)
@@ -728,41 +770,27 @@ func (s *Server) warnCooldown() time.Duration {
 	return time.Duration(s.cfg.WarnSuspectCooldownMin) * time.Minute
 }
 
-// maybeSuspectWarning returns a reasoning warning note when the current call's
-// served model identity is doubtful (name_only, other_model or no_thoughts).
-// Warnings are rate-limited per model (default 10 min) unless the verdict changes.
-func (s *Server) maybeSuspectWarning(ctx context.Context, model string) string {
+// maybeSuspectWarningFor checks and emits a warning for a given verdict (in-flight
+// or finalized). Warnings are rate-limited per model (default 10 min) unless
+// the verdict changes.
+func (s *Server) maybeSuspectWarningFor(ctx context.Context, model, verdict, servedID string) string {
 	if !s.cfg.WarnSuspectFallback || !s.cfg.StreamThoughts {
 		return ""
 	}
-	ri := reqFrom(ctx)
-	if ri == nil {
-		return ""
-	}
-	rec, found := s.client.CallByRequest(ri.id)
-	if !found {
-		return ""
-	}
-	var verdict, note string
+	var note string
 	switch {
-	case rec.Identity == "name_only":
-		verdict = "name_only"
+	case verdict == "name_only":
 		note = "\n⚠ GMINI : Google annonce le nom du modèle demandé (" + model + ") sous un identifiant différent"
-		if rec.ServedID != "" {
-			note += " (" + rec.ServedID + ")"
+		if servedID != "" {
+			note += " (" + servedID + ")"
 		}
 		note += " : modèle réel non garanti ; actualiser le cookie via le raccourci 7 et vérifier GMINI Control.\n"
-	case rec.Identity == "other_model":
-		verdict = "other_model"
-		note = "\n⚠ GMINI : cette réponse ne vient probablement pas du modèle demandé (" + model +
-			"). Google sert un autre modèle quand la limite d'utilisation du site Gemini est atteinte. Vérifiez la page GMINI Control avant de vous fier au résultat.\n"
-	case rec.Suspect != "":
-		verdict = "suspect:" + rec.Suspect
+	case verdict == "other_model" || strings.HasPrefix(verdict, "suspect:"):
 		note = "\n⚠ GMINI : cette réponse ne vient probablement pas du modèle demandé (" + model +
 			"). Google sert un autre modèle quand la limite d'utilisation du site Gemini est atteinte. Vérifiez la page GMINI Control avant de vous fier au résultat.\n"
 	default:
 		s.suspectWarnMu.Lock()
-		if rec.Identity == "confirmed" && s.suspectWarn != nil {
+		if verdict == "confirmed" && s.suspectWarn != nil {
 			delete(s.suspectWarn, model)
 		}
 		s.suspectWarnMu.Unlock()
@@ -786,6 +814,29 @@ func (s *Server) maybeSuspectWarning(ctx context.Context, model string) string {
 	}
 	s.suspectWarn[model] = suspectWarnState{verdict: verdict, at: now}
 	return note
+}
+
+// maybeSuspectWarning returns a reasoning warning note when the current call's
+// served model identity is doubtful (name_only, other_model or no_thoughts).
+// Warnings are rate-limited per model (default 10 min) unless the verdict changes.
+func (s *Server) maybeSuspectWarning(ctx context.Context, model string) string {
+	ri := reqFrom(ctx)
+	if ri == nil {
+		return ""
+	}
+	rec, found := s.client.CallByRequest(ri.id)
+	if !found {
+		return ""
+	}
+	verdict := rec.Identity
+	if verdict == "not_stated" && rec.Suspect != "" {
+		verdict = "suspect:" + rec.Suspect
+	}
+	return s.maybeSuspectWarningFor(ctx, model, verdict, rec.ServedID)
+}
+
+func (s *Server) inFlightRequests() []InFlightRequest {
+	return s.active.inFlight()
 }
 
 // awaitGenerate runs the blocking generation (s.generate) while writing an SSE

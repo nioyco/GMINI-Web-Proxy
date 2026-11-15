@@ -172,3 +172,107 @@ func TestNameOnlyWarningRateLimitAndUIState(t *testing.T) {
 		t.Fatalf("mismatch_since not cleared after confirmed reply: %s", stRec2.Body.String())
 	}
 }
+
+// K7: The served identity is available during the request (in-flight state in /_ui/api/state)
+// and warnings for name_only / other_model are emitted as soon as position 39 arrives.
+func TestInFlightStateAndEarlyWarning(t *testing.T) {
+	cfg := testConfig()
+	cfg.UIEnabled = true
+	cfg.StreamToolsProgress, cfg.StreamThoughts, cfg.WarnSuspectFallback = true, true, true
+	cfg.SSEKeepaliveSec = 1
+	client, err := gemini.New(cfg.Gemini, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	models := []*gemini.AvailableModel{
+		{Name: "gemini-everyday-help", ModelID: "56fdd199312815e2", Description: "4 Hydrogen"},
+	}
+	client.SetModels(models)
+
+	frame1Received := make(chan struct{})
+	allowFrame2 := make(chan struct{})
+
+	// Two frames: frame 1 carries position 39 with name_only id + 10 bytes of thoughts;
+	// frame 2 carries the answer text.
+	f1 := fakeStreamServed("", "thinking...", "cf41b0e0dd7d53e5", "4 Hydrogen")
+	f2 := fakeStreamServed("Here is the answer.", "thinking...", "cf41b0e0dd7d53e5", "4 Hydrogen")
+
+	pr, pw := io.Pipe()
+	go func() {
+		pw.Write([]byte(f1))
+		close(frame1Received)
+		<-allowFrame2
+		pw.Write([]byte(f2))
+		pw.Close()
+	}()
+
+	client.SetTransport(rtFn(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: pr}, nil
+	}))
+
+	s := newServer(cfg, client, testLogger())
+	s.keepaliveOverride = 100 * time.Millisecond
+	h := s.handler()
+
+	type clientRes struct {
+		body string
+		code int
+	}
+	resChan := make(chan clientRes, 1)
+	go func() {
+		b := `{"model":"gemini-everyday-help","stream":true,"messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"run","parameters":{"type":"object"}}}]}`
+		rec := post(s, "/v1/chat/completions", b)
+		resChan <- clientRes{body: rec.Body.String(), code: rec.Code}
+	}()
+
+	// Wait until frame 1 has been sent to client
+	<-frame1Received
+	// Give the server 30ms to process frame 1
+	time.Sleep(30 * time.Millisecond)
+
+	// Check /_ui/api/state during generation
+	uiRec := uiDo(h, "GET", "/_ui/api/state", "127.0.0.1:5000", s.uiToken)
+	var stateMap map[string]any
+	if err := json.Unmarshal(uiRec.Body.Bytes(), &stateMap); err != nil {
+		t.Fatalf("json unmarshal ui state failed: %v", err)
+	}
+	inFlightRaw, ok := stateMap["in_flight"].([]any)
+	if !ok || len(inFlightRaw) == 0 {
+		t.Fatalf("expected in_flight entry during generation, got: %v", stateMap["in_flight"])
+	}
+	entry := inFlightRaw[0].(map[string]any)
+	if entry["model"] != "gemini-everyday-help" {
+		t.Errorf("in_flight model = %v, want gemini-everyday-help", entry["model"])
+	}
+	if entry["served_id"] != "cf41b0e0dd7d53e5" {
+		t.Errorf("in_flight served_id = %v, want cf41b0e0dd7d53e5", entry["served_id"])
+	}
+	if entry["identity"] != "name_only" {
+		t.Errorf("in_flight identity = %v, want name_only", entry["identity"])
+	}
+
+	// Now allow frame 2 to complete generation
+	close(allowFrame2)
+	res := <-resChan
+	if res.code != 200 {
+		t.Fatalf("call failed: %d %s", res.code, res.body)
+	}
+
+	// Warning must have been emitted in reasoning content
+	if !strings.Contains(res.body, "identifiant différent") {
+		t.Fatalf("warning missing from stream output: %s", res.body)
+	}
+
+	// Warning must not be duplicated twice
+	if strings.Count(res.body, "identifiant différent") > 1 {
+		t.Fatalf("warning duplicated in stream output: %s", res.body)
+	}
+
+	// After generation completes, in_flight must be empty
+	uiRecAfter := uiDo(h, "GET", "/_ui/api/state", "127.0.0.1:5000", s.uiToken)
+	var afterMap map[string]any
+	json.Unmarshal(uiRecAfter.Body.Bytes(), &afterMap)
+	if inFlightAfter, _ := afterMap["in_flight"].([]any); len(inFlightAfter) != 0 {
+		t.Fatalf("in_flight should be empty after request completion, got: %v", inFlightAfter)
+	}
+}

@@ -843,8 +843,10 @@ func (c *Client) clientCancelled(ctx context.Context, met *CallMetrics, start ti
 // StreamHandlers receives the incremental output of a streamed generation. Either
 // handler may be nil.
 type StreamHandlers struct {
-	Text    func(delta string) // answer text
-	Thought func(delta string) // model "thinking" text, when the backend streams it
+	Text     func(delta string)                // answer text
+	Thought  func(delta string)                // model "thinking" text, when the backend streams it
+	Identity func(servedID, servedName string) // reported as soon as position 39 is read
+	Progress func(textBytes, thoughtBytes int) // incremental bytes received and heartbeat
 }
 
 // GenerateStream sends a prompt and invokes emit for each incremental text delta.
@@ -936,12 +938,19 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 	// batchexecute lines routinely exceed that.
 	reader := bufio.NewReader(resp.Body)
 	emitted, thoughtEmitted := false, false
+	identEmitted := false
 	for {
 		line, readErr := reader.ReadString('\n')
 		if line != "" {
 			respBytes += len(line)
 			met.firstByte(t0)
 			scan.add(line)
+			if scan.servedID != "" && !identEmitted {
+				identEmitted = true
+				if h.Identity != nil {
+					h.Identity(scan.servedID, scan.servedName)
+				}
+			}
 			if c.cfg.TraceRaw && c.cfg.TraceDir != "" && rawBytes < traceRawMax {
 				rawBytes += len(line)
 				rawLines = append(rawLines, line)
@@ -949,6 +958,9 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 			fr, ok := parseFrame(line)
 			if ok {
 				shape.add(fr, time.Since(t0))
+				if h.Progress != nil {
+					h.Progress(len(prevText), len(prevThought))
+				}
 			}
 			if ok && len(fr.thought) > len(prevThought) {
 				delta := runeDelta(prevThought, fr.thought)

@@ -63,6 +63,12 @@ button:disabled{opacity:.5;cursor:not-allowed}
 </section>
 
 <section class="card">
+<h2>Demandes en cours</h2>
+<table id="inflight"></table>
+<p class="note">État en direct pendant le traitement de la demande (dès la position 39 lue chez Google). Aucun contenu de conversation n'est affiché ici.</p>
+</section>
+
+<section class="card">
 <h2>Derniers appels</h2>
 <table id="calls"></table>
 <p class="note">Tailles et délais uniquement : aucun contenu de conversation n'est affiché ici.</p>
@@ -154,6 +160,9 @@ async function load(){
       a.missing.map(n=>`<tr><td>${badge("warn","Aucune entrée")}</td><td><code>${esc(n)}</code></td><td colspan=3 class="sub">Modèle détecté mais pas encore proposé dans Antigravity</td></tr>`).join("");
     $("agcmd").innerHTML=`<p class="note">Pour créer ou renommer les entrées (Antigravity fermé), lancer dans le dossier <code>SUIVI_PROJET/5_Outils_et_diagnostics</code> :</p><code class="cmd">python3 synchroniser_modeles_gmini.py --rename --apply</code><p class="note">Variantes par niveau de réflexion :</p><code class="cmd">python3 synchroniser_modeles_gmini.py --efforts low,high --apply</code>`;
   }
+  const inflight = d.in_flight || [];
+  $("inflight").innerHTML = "<tr><th>Heure début</th><th>Modèle demandé</th><th>Qui répond (en cours)</th><th class=num>Pensées</th><th class=num>Texte</th><th class=num>Dernière trame</th><th class=num>Durée</th><th>Requête</th></tr>" +
+    (inflight.length ? inflight.map(c => `<tr><td>${hm(c.start_time)}</td><td><code>${esc(c.model)}</code></td><td>${c.identity ? who(c.identity, "", "", c.served_name) : badge("info", "En attente d'identification…")}</td><td class=num>${ko(c.thought_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${c.last_frame_age_sec > 0 ? age(c.last_frame_age_sec) : "à l'instant"}</td><td class=num>${dur(c.duration_ms)}</td><td><code>${esc((c.id||"").slice(0,8))}</code></td></tr>`).join("") : "<tr><td colspan=8 class=sub>Aucune demande en cours d'exécution.</td></tr>");
   $("calls").innerHTML="<tr><th>Heure</th><th>Modèle demandé</th><th>Qui répond</th><th class=num>Niveau</th><th class=num>Durée</th><th class=num>1er texte</th><th class=num>Prompt</th><th class=num>Réponse</th><th class=num>Pensées</th><th>Erreur</th><th>Requête</th></tr>"+
     (d.calls.length?d.calls.map(c=>`<tr><td>${hm(c.time)}</td><td><code>${esc(c.model)}</code></td><td>${who(c.identity,c.suspect,(c.seen_model_ids||[]).join(", "),c.served_name)}</td><td class=num>${c.thinking_level||"—"}</td><td class=num>${dur(c.duration_ms)}</td><td class=num>${dur(c.first_text_ms)}</td><td class=num>${ko(c.prompt_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${ko(c.thought_bytes)}</td><td>${c.error?badge("bad",c.error):""}</td><td><code>${esc((c.request_id||"").slice(0,8))}</code></td></tr>`).join(""):"<tr><td colspan=11 class=sub>Aucun appel enregistré pour l'instant.</td></tr>");
 }
