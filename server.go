@@ -593,7 +593,7 @@ loop:
 				return
 			}
 		}
-		res := s.awaitGenerate(ctx, sse, p, interval)
+		res := s.awaitGenerate(ctx, sse, glitchRetryParams(p), interval)
 		switch {
 		case res.out == kaGone:
 		case res.out == kaShutdown:
@@ -662,6 +662,15 @@ type kaResult struct {
 	text string
 	err  error
 	out  kaOutcome
+}
+
+// glitchRetryNote is appended to the prompt on the single retry after a canned
+// upstream non-answer so Google does not receive an identical second request.
+const glitchRetryNote = "\n\n[Retry instruction: Do not use Google Drive, Gmail, Workspace, or any built-in Google extension or widget. All workspace files are local on the user's machine and can only be accessed using the listed tools. Reply now either with a ```tool_call block or plain text.]"
+
+func glitchRetryParams(p gemini.GenParams) gemini.GenParams {
+	p.Prompt += glitchRetryNote
+	return p
 }
 
 // awaitGenerate runs the blocking generation (s.generate) while writing an SSE
