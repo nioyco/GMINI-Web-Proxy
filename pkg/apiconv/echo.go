@@ -240,3 +240,22 @@ func IsUpstreamGlitch(text string) bool {
 	}
 	return refusalRe.MatchString(t) || glitchRe.MatchString(t) || widgetOnlyRe.MatchString(t)
 }
+
+var (
+	toolRefusalEN = regexp.MustCompile(`(?i)(none of (those|these|the)\b[^.\n]*(tools|commands)\b[^.\n]*(declared|available)|lack local (file|shell|filesystem|command) access|do not have access to (your|the|any) local (filesystem|files|folders|directory)|no (local )?tools are declared or available)`)
+	toolRefusalFR = regexp.MustCompile(`(?i)(aucun\b[^.\n]*(outil|des outils)\b[^.\n]*(n['’]est|ne sont)\s*(déclaré|disponible)|n['’]existent? pas dans mes outils actifs|n['’]ai pas accès (à ces|aux|à vos|aux dossiers|aux fichiers)\s*(dossiers|fichiers)?\s*locaux|aucun outil local n['’]est disponible)`)
+)
+
+// IsUpstreamToolRefusal reports whether text is an upstream non-answer claiming
+// that local tools are undeclared or local files/commands are inaccessible,
+// without emitting any tool call block.
+func IsUpstreamToolRefusal(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" || len(t) > 2000 {
+		return false
+	}
+	if strings.Contains(t, "```tool_call") || strings.Contains(t, "```function_call") {
+		return false
+	}
+	return toolRefusalEN.MatchString(t) || toolRefusalFR.MatchString(t)
+}

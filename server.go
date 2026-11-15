@@ -605,22 +605,38 @@ loop:
 		return
 	}
 
-	if !released && apiconv.IsUpstreamGlitch(raw.String()) {
+	isGlitch := !released && apiconv.IsUpstreamGlitch(raw.String())
+	isToolRefusal := !released && len(declared) > 0 && apiconv.IsUpstreamToolRefusal(raw.String())
+	if isGlitch || isToolRefusal {
 		// Gemini sent a canned non-answer (generic refusal, "can't use Workspace",
-		// a bare widget placeholder). Nothing of it reached the client: try once more.
-		s.rlog(ctx).Warn("upstream_glitch", "bytes", raw.Len(), "action", "retry_once")
+		// a bare widget placeholder, or claimed local tools are not declared/accessible).
+		// Nothing of it reached the client: try once more.
+		s.rlog(ctx).Warn("upstream_glitch", "bytes", raw.Len(), "tool_refusal", isToolRefusal, "action", "retry_once")
 		if s.cfg.StreamThoughts {
-			if !write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, "\nGemini a renvoyé un message de service au lieu de traiter la demande : nouvelle tentative…\n"))) {
+			retryMsg := "\nGemini a renvoyé un message de service au lieu de traiter la demande : nouvelle tentative…\n"
+			if isToolRefusal {
+				retryMsg = "\nGemini affirme ne pas avoir d'outils locaux : nouvelle tentative avec consigne corrective…\n"
+			}
+			if !write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, retryMsg))) {
 				return
 			}
 		}
-		res := s.awaitGenerate(ctx, sse, glitchRetryParams(p), interval)
+		retryParams := glitchRetryParams(p)
+		if isToolRefusal {
+			retryParams = toolRefusalRetryParams(p)
+		}
+		res := s.awaitGenerate(ctx, sse, retryParams, interval)
 		switch {
 		case res.out == kaGone:
 		case res.out == kaShutdown:
 			s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
 		case res.err != nil:
 			s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+res.err.Error())), sse.done())
+		case isToolRefusal && apiconv.IsUpstreamToolRefusal(res.text):
+			s.rlog(ctx).Warn("upstream_tool_refusal", "bytes", len(res.text), "action", "reported")
+			msg := "GMINI : Gemini a affirmé deux fois qu'aucun outil local n'est déclaré ou disponible (« " +
+				strings.TrimSpace(res.text) + " »). Relancez la demande ou ouvrez une nouvelle conversation."
+			s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
 		case apiconv.IsUpstreamGlitch(res.text):
 			s.rlog(ctx).Warn("upstream_glitch", "bytes", len(res.text), "action", "reported")
 			msg := "GMINI : Gemini a répondu deux fois par un message de service au lieu de traiter la demande (« " +
@@ -692,6 +708,13 @@ const glitchRetryNote = "\n\n[Retry instruction: Do not use Google Drive, Gmail,
 
 func glitchRetryParams(p gemini.GenParams) gemini.GenParams {
 	p.Prompt += glitchRetryNote
+	return p
+}
+
+const toolRefusalRetryNote = "\n\n[Retry instruction: The listed tools are NOT built-in model features. You invoke them by outputting a ```tool_call block in your reply; the user's system executes it locally and returns the result. Never reply that tools are not declared or that you lack local access: output a ```tool_call block now or reply in plain text.]"
+
+func toolRefusalRetryParams(p gemini.GenParams) gemini.GenParams {
+	p.Prompt += toolRefusalRetryNote
 	return p
 }
 

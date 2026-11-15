@@ -138,3 +138,85 @@ func TestGlitchRetryAddsInstructionWithFakeTransport(t *testing.T) {
 		t.Fatalf("unexpected client output: %s", all)
 	}
 }
+
+func TestIsUpstreamToolRefusal(t *testing.T) {
+	trace1 := "However, in my actual execution environment, none of those local file or command tools are declared or available. I do not have access to your local filesystem."
+	trace2 := "Non, je ne peux pas le confirmer — au contraire, je n'ai pas accès à ces dossiers locaux dans cette session.\nread_file, write_file, run_command n'existent pas dans mes outils actifs."
+	yes := []string{
+		trace1,
+		trace2,
+		"In this environment, none of the tools are declared or available.",
+		"I lack local file access in this session.",
+		"I do not have access to your local filesystem.",
+		"aucun des outils locaux n'est déclaré ni disponible dans mon environnement d'exécution.",
+		"je n'ai pas accès aux fichiers locaux.",
+	}
+	no := []string{
+		"",
+		"Voici le contenu du fichier local demandé.",
+		"Pour avoir accès aux fichiers locaux, voici un exemple de code.",
+		"```tool_call\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"foo\"}}\n```",
+		trace1 + "\n```tool_call\n{\"name\":\"read_file\",\"arguments\":{}}\n```",
+	}
+	for _, s := range yes {
+		if !apiconv.IsUpstreamToolRefusal(s) {
+			t.Errorf("expected refusal detection for: %q", s)
+		}
+	}
+	for _, s := range no {
+		if apiconv.IsUpstreamToolRefusal(s) {
+			t.Errorf("false positive refusal detection for: %q", s)
+		}
+	}
+}
+
+// K6: When Gemini answers that local tools/files are not declared/accessible,
+// the server retries once with toolRefusalRetryNote and provides the clean reply.
+func TestToolRefusalRetriedWithInstruction(t *testing.T) {
+	const refusal = "In my actual execution environment, none of those local file or command tools are declared or available."
+	cfg := testConfig()
+	cfg.SSEKeepaliveSec = 1
+	cfg.StreamToolsProgress, cfg.StreamThoughts = true, true
+	client, err := gemini.New(cfg.Gemini, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.SetModels(testModels())
+
+	var mu sync.Mutex
+	var fReqs []string
+	client.SetTransport(rtFn(func(r *http.Request) (*http.Response, error) {
+		rawBody, _ := io.ReadAll(r.Body)
+		vals, _ := url.ParseQuery(string(rawBody))
+		mu.Lock()
+		n := len(fReqs)
+		fReqs = append(fReqs, vals.Get("f.req"))
+		mu.Unlock()
+		reply := "```tool_call\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"ok.txt\"}}\n```"
+		if n == 0 {
+			reply = refusal
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(wrbFake(reply)))}, nil
+	}))
+
+	srv := newServer(cfg, client, testLogger())
+	srv.keepaliveOverride = 50 * time.Millisecond
+	ts := httptest.NewServer(srv.handler())
+	t.Cleanup(ts.Close)
+
+	c := readSSE(t, context.Background(), ts.URL, body(""))
+	assertProgressStream(t, c)
+	if len(fReqs) != 2 {
+		t.Fatalf("upstream calls=%d, want 2", len(fReqs))
+	}
+	if strings.Contains(fReqs[0], "NOT built-in model features") {
+		t.Fatalf("attempt 1 unexpectedly contained retry instruction")
+	}
+	if !strings.Contains(fReqs[1], "NOT built-in model features") {
+		t.Fatalf("attempt 2 missing retry instruction: %q", fReqs[1])
+	}
+	all := strings.Join(c.dataFrames, "\n")
+	if strings.Contains(all, "declared or available") || !strings.Contains(all, "read_file") {
+		t.Fatalf("unexpected client output: %s", all)
+	}
+}
