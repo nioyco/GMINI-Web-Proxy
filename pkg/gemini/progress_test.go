@@ -147,3 +147,65 @@ func TestContentTrace(t *testing.T) {
 		}
 	}
 }
+
+func wrbStatusLine(body2 any) string {
+	inner := []any{nil, []any{"c_1", "r_1"}, body2}
+	ib, _ := json.Marshal(inner)
+	line, _ := json.Marshal([]any{[]any{"wrb.fr", nil, string(ib)}})
+	return string(line) + "\n"
+}
+
+func TestParseFrameBody2StatusAndTolerant(t *testing.T) {
+	// Observed structure: <200 bytes, body[2]["7"] = [null,...,["Analyzing user requests"]]
+	line := wrbStatusLine(map[string]any{
+		"7":  []any{nil, nil, nil, nil, nil, []any{"Analyzing user requests"}},
+		"44": true,
+	})
+	if len(line) >= 200 {
+		t.Fatalf("expected short status line <200 bytes, got %d", len(line))
+	}
+	fr, ok := parseFrame(line)
+	if !ok || fr.status != "Analyzing user requests" {
+		t.Fatalf("parseFrame status = (%+v, %v), want status='Analyzing user requests'", fr, ok)
+	}
+
+	// Unexpected shapes must be ignored without error.
+	for _, bad := range []any{
+		nil,
+		123,
+		"plain string",
+		map[string]any{"7": 42},
+		map[string]any{"7": map[string]any{"x": "y"}},
+		map[string]any{"7": []any{nil, nil}},
+		map[string]any{"18": "r_1"},
+	} {
+		if fr, ok := parseFrame(wrbStatusLine(bad)); ok && fr.status != "" {
+			t.Errorf("bad body[2]=%#v should not produce status, got %q", bad, fr.status)
+		}
+	}
+}
+
+func TestGenerateStreamEventsEmitsStatus(t *testing.T) {
+	c, _ := New(Config{GeminiBL: "bl", RetryAttempts: 1}, nil)
+	body := wrbStatusLine(map[string]any{"7": []any{nil, nil, nil, nil, nil, []any{"Analyzing user requests"}}}) +
+		wrbStatusLine(map[string]any{"7": []any{nil, nil, nil, nil, nil, []any{"Fulfilling request"}}}) +
+		wrbLine("Done.", "Thinking...")
+	c.SetTransport(rtFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	}))
+	var statuses []string
+	var gotText strings.Builder
+	err := c.GenerateStreamEvents(context.Background(), GenParams{Prompt: "h"}, StreamHandlers{
+		Status: func(s string) { statuses = append(statuses, s) },
+		Text:   func(d string) { gotText.WriteString(d) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(statuses) != 2 || statuses[0] != "Analyzing user requests" || statuses[1] != "Fulfilling request" {
+		t.Fatalf("statuses = %v", statuses)
+	}
+	if gotText.String() != "Done." {
+		t.Fatalf("text = %q", gotText.String())
+	}
+}

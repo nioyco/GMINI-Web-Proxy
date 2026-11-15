@@ -853,6 +853,7 @@ func (c *Client) clientCancelled(ctx context.Context, met *CallMetrics, start ti
 type StreamHandlers struct {
 	Text     func(delta string)                // answer text
 	Thought  func(delta string)                // model "thinking" text, when the backend streams it
+	Status   func(text string)                 // Google progress status from body[2]["7"] (K11)
 	Identity func(servedID, servedName string) // reported as soon as position 39 is read
 	Progress func(textBytes, thoughtBytes int) // incremental bytes received and heartbeat
 }
@@ -1000,6 +1001,9 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 					h.Progress(len(prevText), len(prevThought))
 				}
 			}
+			if ok && fr.status != "" && h.Status != nil {
+				h.Status(fr.status)
+			}
 			if ok && len(fr.thought) > len(prevThought) {
 				delta := runeDelta(prevThought, fr.thought)
 				prevThought = fr.thought
@@ -1093,11 +1097,11 @@ func latestText(line string) (string, bool) {
 	return best, best != ""
 }
 
-// wrbCandidates decodes a batchexecute "wrb.fr" response line and returns its
-// candidate list. The line is JSON like [["wrb.fr", _, "<inner-json>", ...], ...];
-// the inner JSON carries the candidates at inner2[4].
-func wrbCandidates(line string) []any {
-	if !strings.Contains(line, `"wrb.fr"`) || len(line) < 200 {
+// wrbInner2 decodes a batchexecute "wrb.fr" response line and returns its
+// parsed inner JSON array (body). Status frames in body[2] can be shorter than
+// 200 bytes, so only a minimal length guard is applied.
+func wrbInner2(line string) []any {
+	if !strings.Contains(line, `"wrb.fr"`) || len(line) < 40 {
 		return nil
 	}
 	var arr []any
@@ -1109,15 +1113,22 @@ func wrbCandidates(line string) []any {
 		return nil
 	}
 	innerStr, ok := indexString(first, 2)
-	if !ok || len(innerStr) < 50 {
+	if !ok || len(innerStr) < 2 {
 		return nil
 	}
 	var inner2 any
 	if err := json.Unmarshal([]byte(innerStr), &inner2); err != nil {
 		return nil
 	}
-	inner2Slice, ok := inner2.([]any)
-	if !ok || len(inner2Slice) <= 4 {
+	inner2Slice, _ := inner2.([]any)
+	return inner2Slice
+}
+
+// wrbCandidates decodes a batchexecute "wrb.fr" response line and returns its
+// candidate list at inner2[4].
+func wrbCandidates(line string) []any {
+	inner2Slice := wrbInner2(line)
+	if len(inner2Slice) <= 4 {
 		return nil
 	}
 	parts, _ := inner2Slice[4].([]any)
@@ -1157,18 +1168,74 @@ const thoughtIndex = 37
 type frame struct {
 	text     string
 	thought  string
+	status   string      // Google progress status from body[2]["7"] (K11)
 	sizes    map[int]int // first candidate: index → string bytes in that subtree
 	thoughts []int       // sizes of the strings found under the thinking slot, in order
 }
 
-// parseFrame extracts the answer text, the thinking text and the size profile of
-// the first candidate of a streamed line.
+// parseBody2Status extracts Google's internal tool progress text from body[2]["7"]
+// (e.g. {"7":[null,null,null,null,null,["Analyzing user requests"]]}). Any
+// unexpected shape is ignored without error.
+func parseBody2Status(inner2 []any) string {
+	if len(inner2) <= 2 {
+		return ""
+	}
+	m, ok := inner2[2].(map[string]any)
+	if !ok {
+		return ""
+	}
+	raw7, ok := m["7"]
+	if !ok || raw7 == nil {
+		return ""
+	}
+	strs := collectStatusStrings(raw7, 0, nil)
+	if len(strs) == 0 {
+		return ""
+	}
+	joined := strings.Join(strs, " — ")
+	if len(joined) > 240 {
+		joined = joined[:240]
+	}
+	return joined
+}
+
+func collectStatusStrings(v any, depth int, out []string) []string {
+	if depth > 4 || len(out) >= 4 {
+		return out
+	}
+	switch x := v.(type) {
+	case string:
+		if s := strings.TrimSpace(x); s != "" {
+			out = append(out, s)
+		}
+	case []any:
+		for _, e := range x {
+			out = collectStatusStrings(e, depth+1, out)
+			if len(out) >= 4 {
+				break
+			}
+		}
+	}
+	return out
+}
+
+// parseFrame extracts the answer text, the thinking text, any body[2] progress
+// status, and the size profile of the first candidate of a streamed line.
 func parseFrame(line string) (frame, bool) {
-	cands := wrbCandidates(line)
-	if len(cands) == 0 {
+	inner2 := wrbInner2(line)
+	if len(inner2) == 0 {
+		return frame{}, false
+	}
+	status := parseBody2Status(inner2)
+	var cands []any
+	if len(inner2) > 4 {
+		cands, _ = inner2[4].([]any)
+	}
+	if len(cands) == 0 && status == "" {
 		return frame{}, false
 	}
 	var fr frame
+	fr.status = status
 	for _, part := range cands {
 		ps, ok := part.([]any)
 		if !ok {

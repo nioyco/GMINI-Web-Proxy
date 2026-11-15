@@ -43,6 +43,7 @@ type Server struct {
 	// and 30 s progress note period in tests. Never set in production.
 	heldDurationOverride time.Duration
 	heldNoteOverride     time.Duration
+	statusNoteOverride   time.Duration
 	// uiToken protects the API of the local management page (ui.go); empty: page off.
 	uiToken string
 
@@ -620,6 +621,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	type event struct {
 		text       string
 		thought    string
+		status     string
 		servedID   string
 		servedName string
 	}
@@ -633,7 +635,8 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	}
 	ri := reqFrom(ctx)
 	h := gemini.StreamHandlers{
-		Text: func(d string) { push(event{text: d}) },
+		Text:   func(d string) { push(event{text: d}) },
+		Status: func(st string) { push(event{status: st}) },
 		Identity: func(servedID, servedName string) {
 			push(event{servedID: servedID, servedName: servedName})
 		},
@@ -665,9 +668,11 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	maxHeldBytes := s.maxHeldBytes()
 	maxHeldDur := s.maxHeldDuration()
 	heldNoteEvery := s.heldNoteInterval()
+	statusNoteEvery := s.statusNoteInterval()
 
 	rawAtLastUsefulTx := 0
-	var heldSince, lastHeldNoteAt time.Time
+	var heldSince, lastHeldNoteAt, lastStatusAt time.Time
+	var lastStatusText string
 	completeToolCalls, lastCompleteEnd := 0, 0
 	lastHeldNoteBytes := 0
 
@@ -738,6 +743,21 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 						return false
 					}
 				}
+			}
+			return true
+		}
+		if e.status != "" {
+			lastFrameTime = time.Now()
+			silenceWarned = false
+			if ri != nil {
+				ri.setStatusNote("Google : " + e.status)
+			}
+			if e.status != lastStatusText && hooks != nil && hooks.progressive && s.cfg.StreamThoughts &&
+				(lastStatusAt.IsZero() || time.Since(lastStatusAt) >= statusNoteEvery) {
+				lastStatusText = e.status
+				lastStatusAt = time.Now()
+				res.forwarded = true
+				return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, "\nGoogle : "+e.status+"\n")))
 			}
 			return true
 		}
@@ -1076,6 +1096,13 @@ func (s *Server) heldNoteInterval() time.Duration {
 		return s.heldNoteOverride
 	}
 	return 30 * time.Second
+}
+
+func (s *Server) statusNoteInterval() time.Duration {
+	if s.statusNoteOverride > 0 {
+		return s.statusNoteOverride
+	}
+	return 5 * time.Second
 }
 
 func koCount(bytes int) int {
