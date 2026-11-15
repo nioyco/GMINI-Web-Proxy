@@ -2,7 +2,6 @@ package gemini
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"os"
 	"regexp"
@@ -48,7 +47,7 @@ type CallRecord struct {
 	ServedName   string   `json:"served_name,omitempty"`
 	SeenModelIDs []string `json:"seen_model_ids"`  // catalogue ids present in the raw reply
 	OtherHexIDs  int      `json:"other_hex_ids"`   // 16-hex tokens that are not catalogue ids
-	Identity     string   `json:"identity"`        // confirmed | other_model | not_stated
+	Identity     string   `json:"identity"`        // confirmed | other_model | name_only | not_stated
 	Suspect      string   `json:"suspect"`         // "" | no_thoughts
 	Error        string   `json:"error,omitempty"` // error kind, never content
 }
@@ -222,9 +221,18 @@ func (l *callJournal) thinksUsually(model string) bool {
 // recordCall finalises and stores one record, and logs it.
 func (c *Client) recordCall(r CallRecord, scan *idScan) {
 	catalogue := map[string]struct{}{}
+	askedName := ""
 	for _, m := range c.ListModels() {
 		if m.ModelID != "" {
 			catalogue[m.ModelID] = struct{}{}
+		}
+		if m.Name == r.Model {
+			askedName = m.Description
+		}
+	}
+	for _, w := range c.WithdrawnModels() {
+		if w.Model.Name == r.Model {
+			askedName = w.Model.Description
 		}
 	}
 	r.SeenModelIDs, r.OtherHexIDs, r.Identity = scan.classify(r.ModelID, catalogue)
@@ -234,6 +242,11 @@ func (c *Client) recordCall(r CallRecord, scan *idScan) {
 		r.Identity = "confirmed"
 		if r.ModelID != "" && r.ServedID != r.ModelID {
 			r.Identity = "other_model"
+			// Seen 2026-11-15 on "4 Carbon": Google's reply carried the asked
+			// model's name with another id. Which of the two is right is unknown.
+			if askedName != "" && r.ServedName == askedName {
+				r.Identity = "name_only"
+			}
 		}
 	}
 
@@ -250,10 +263,10 @@ func (c *Client) recordCall(r CallRecord, scan *idScan) {
 	c.appendCallLocked(r)
 	c.calls.mu.Unlock()
 
-	if r.Suspect != "" || r.Identity == "other_model" {
-		go c.checkCatalogueAfterSuspect()
-	}
-	if r.Suspect != "" || r.Identity == "other_model" {
+	// No catalogue check here any more: on 2026-11-15 that extra call returned a
+	// one-model catalogue while every model was still offered on the web page,
+	// and it made the proxy refuse the others.
+	if r.Suspect != "" || r.Identity == "other_model" || r.Identity == "name_only" {
 		c.log.Warn("served_model_doubt", "request_id", r.RequestID, "model", r.Model, "model_id", r.ModelID,
 			"identity", r.Identity, "served_id", r.ServedID, "served_name", r.ServedName,
 			"seen_model_ids", strings.Join(r.SeenModelIDs, ","), "suspect", r.Suspect,
@@ -313,33 +326,6 @@ func newCallRecord(met *CallMetrics, p GenParams, start time.Time) CallRecord {
 		r.Model, r.ModelID = p.Model.Name, p.Model.ModelID
 	}
 	return r
-}
-
-// suspectCheckEvery bounds the catalogue checks triggered by suspect replies.
-const suspectCheckEvery = 30 * time.Minute
-
-// checkCatalogueAfterSuspect asks Google for the catalogue once (at most every
-// suspectCheckEvery, and subject to the usual refusals: no session, block in
-// force, recent attempt). When the usage limit is reached the catalogue no
-// longer lists the model, which turns a suspicion into a withdrawal: the next
-// requests are then refused instead of being answered by another model.
-func (c *Client) checkCatalogueAfterSuspect() {
-	c.modelMu.Lock()
-	due := time.Since(c.suspectCheckAt) >= suspectCheckEvery
-	if due {
-		c.suspectCheckAt = time.Now()
-	}
-	c.modelMu.Unlock()
-	if !due {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := c.RefreshModels(ctx); err != nil {
-		c.log.Info("catalogue check after a suspect reply not done", "err", cleanErr(err))
-		return
-	}
-	c.log.Info("catalogue checked after a suspect reply", "models", len(c.ModelNames()), "withdrawn", len(c.WithdrawnModels()))
 }
 
 // CallByRequest returns the newest journal record of a proxy request id.

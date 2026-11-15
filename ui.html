@@ -83,6 +83,7 @@ const hm=t=>t?new Date(t).toLocaleTimeString("fr-FR"):"—";
 const badge=(c,t)=>`<span class="b ${c}">${esc(t)}</span>`;
 function who(identity,suspect,seen,served){
   if(identity==="other_model")return badge("bad","Autre modèle : "+(served||seen||"?"));
+  if(identity==="name_only")return badge("warn","Nom indiqué : "+(served||"?")+", identifiant différent");
   if(suspect==="no_thoughts")return badge("warn","Repli probable");
   if(identity==="confirmed")return badge("ok","Indiqué par Google"+(served?" : "+served:""));
   if(identity==="not_stated")return badge("none","Non indiqué par Google");
@@ -117,7 +118,7 @@ async function load(){
   ];
   $("tiles").innerHTML=t.map(([k,v])=>`<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
   $("models").innerHTML="<tr><th>Nom chez Google</th><th>Nom à utiliser (proxy)</th><th>Identifiant stable</th><th>Qui répond (dernier appel)</th><th class=num>Demandes sur 5 h</th><th class=num>Avec pensées</th><th class=num>1er texte (médiane)</th><th>Dernier appel</th></tr>"+
-    d.models.map(m=>`<tr><td><b>${esc(m.description||m.display_name||"—")}</b>${m.default?' <span class="sub">défaut</span>':""}<div class="sub">${esc([m.menu_label,m.family].filter(Boolean).join(" · "))}</div></td><td><code>${esc(m.name)}</code></td><td><code>${esc(m.model_id||"—")}</code></td><td>${m.withdrawn_since?badge("bad","Retiré par Google depuis "+hm(m.withdrawn_since))+'<div class="sub">limite d\'utilisation atteinte ou accès retiré : les demandes sont refusées</div>':who(m.last_time?m.last_identity:"",m.last_suspect,m.last_seen_models,m.last_served)}</td><td class=num>${m.calls_5h||0}</td><td class=num>${m.calls?m.with_thoughts+" / "+m.calls:"—"}</td><td class=num>${dur(m.median_first_text_ms)}</td><td>${hm(m.last_time)}</td></tr>`).join("");
+    d.models.map(m=>`<tr><td><b>${esc(m.description||m.display_name||"—")}</b>${m.default?' <span class="sub">défaut</span>':""}<div class="sub">${esc([m.menu_label,m.family].filter(Boolean).join(" · "))}</div></td><td><code>${esc(m.name)}</code></td><td><code>${esc(m.model_id||"—")}</code></td><td>${m.withdrawn_since?badge("warn","Absent du dernier catalogue depuis "+hm(m.withdrawn_since))+'<div class="sub">la demande est quand même envoyée ; si cela dure, se reconnecter à Google (session affaiblie) ou vérifier la limite d\'utilisation</div>':who(m.last_time?m.last_identity:"",m.last_suspect,m.last_seen_models,m.last_served)}</td><td class=num>${m.calls_5h||0}</td><td class=num>${m.calls?m.with_thoughts+" / "+m.calls:"—"}</td><td class=num>${dur(m.median_first_text_ms)}</td><td>${hm(m.last_time)}</td></tr>`).join("");
   const apps=d.apps||[],anyRun=apps.some(x=>x.running);
   $("apps").innerHTML=apps.length?"<tr><th>Copie</th><th>Version</th><th>Modèles du proxy</th><th>Relais anti-coupure</th><th>État</th><th></th></tr>"+
     apps.map((x,i)=>`<tr><td><b>${esc(x.name)}</b></td><td>${esc(x.version||"—")}</td><td>${x.custom_models?badge("ok","Oui"):badge("none","Non (officielle)")}</td><td>${x.relay?badge("ok","Oui"):x.custom_models?badge("warn","Non : coupure à 300 s"):"—"}</td><td>${x.running?badge("info","Ouverte"):badge("none","Fermée")}</td><td>${anyRun?"":`<button data-app="${i}">Ouvrir</button>`}</td></tr>`).join(""):"<tr><td class=sub>Aucune copie d'Antigravity trouvée.</td></tr>";

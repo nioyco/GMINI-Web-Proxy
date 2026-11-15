@@ -101,8 +101,14 @@ func (c *Client) ResolveModel(name string) (*AvailableModel, error) {
 		wd, was := c.withdrawn[name]
 		c.modelMu.Unlock()
 		if was {
-			return nil, fmt.Errorf("model %q (%s) is no longer in the catalogue Google returns for this account since %s: usage limit reached or access removed; nothing was sent to Gemini",
-				name, wd.Model.Description, wd.Since.Format("15:04"))
+			// The catalogue Google returns can shrink without the model being
+			// refused (2026-11-15: one model listed while the web page offered
+			// four and the usage was at 1 %). The request is sent with the last
+			// known id; the reply itself says which model answered.
+			c.log.Warn("model absent from the last catalogue; sending the request with its last known id",
+				"model", name, "model_id", wd.Model.ModelID, "absent_since", wd.Since.Format("15:04"))
+			m := wd.Model
+			return &m, nil
 		}
 		return nil, fmt.Errorf("unknown model: %q", name)
 	}

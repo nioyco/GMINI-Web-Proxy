@@ -102,7 +102,7 @@ func TestParseModelsCatalogueExtras(t *testing.T) {
 }
 
 // A model dropped by a newer catalogue (web usage limit reached, 2026-11-14) is
-// remembered, refused with an explicit message, and forgotten when it returns.
+// remembered, stays callable with its last known id, and is forgotten when it returns.
 func TestWithdrawnModels(t *testing.T) {
 	c, _ := New(Config{}, nil)
 	pro := &AvailableModel{Name: "gemini-detailed-research", ModelID: "e6fa609c3fa255c0", Description: "3.1 Pro"}
@@ -112,9 +112,11 @@ func TestWithdrawnModels(t *testing.T) {
 	if w := c.WithdrawnModels(); len(w) != 1 || w[0].Model.Name != pro.Name {
 		t.Fatalf("withdrawn=%+v", w)
 	}
-	_, err := c.ResolveModel(pro.Name)
-	if err == nil || !containsStr(err.Error(), "no longer in the catalogue") || !containsStr(err.Error(), "3.1 Pro") {
-		t.Fatalf("err=%v", err)
+	// Still callable with its last known id: the catalogue shrank on 2026-11-15
+	// while the web page still offered every model.
+	got, err := c.ResolveModel(pro.Name)
+	if err != nil || got == nil || got.ModelID != pro.ModelID {
+		t.Fatalf("withdrawn model must stay callable: got=%+v err=%v", got, err)
 	}
 	if _, err := c.ResolveModel("never-seen"); err == nil || containsStr(err.Error(), "no longer") {
 		t.Fatalf("err=%v", err)
@@ -153,7 +155,7 @@ func servedLine(id, name string) string {
 
 func TestServedModelFromReply(t *testing.T) {
 	c, _ := New(Config{}, nil)
-	pro := &AvailableModel{Name: "pro", ModelID: "e6fa609c3fa255c0"}
+	pro := &AvailableModel{Name: "pro", ModelID: "e6fa609c3fa255c0", Description: "3.1 Pro"}
 	c.storeModels([]*AvailableModel{pro, {Name: "lite", ModelID: "8c46e95b1a07cecc"}}, "dynamic")
 	rec := func(line string, thought int) CallRecord {
 		s := &idScan{}
@@ -171,6 +173,10 @@ func TestServedModelFromReply(t *testing.T) {
 	}
 	// Another model named by Google.
 	if r := rec(servedLine("8c46e95b1a07cecc", "3.5 Flash-Lite"), 0); r.Identity != "other_model" || r.ServedName != "3.5 Flash-Lite" {
+		t.Fatalf("r=%+v", r)
+	}
+	// The asked model's name with another id (seen on 4 Carbon, 2026-11-15).
+	if r := rec(servedLine("cf41b0e0dd7d53e5", "3.1 Pro"), 200); r.Identity != "name_only" {
 		t.Fatalf("r=%+v", r)
 	}
 	// Nothing stated and no thoughts: suspect.
