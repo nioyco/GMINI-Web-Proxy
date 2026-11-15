@@ -39,6 +39,11 @@ func (c *Client) CookieRefreshLoop(ctx context.Context, interval time.Duration) 
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			_, _ = c.loadCookie()
+			if c.rotationSuspended() {
+				c.log.Debug("cookie refresh skipped: rotation suspended until cookie changes")
+				continue
+			}
 			// While accounts.google.com blocks us, rotation is suspended (one probe
 			// per window once the backoff elapsed).
 			if !c.acquireBackground(FamilyAccounts) {
@@ -171,6 +176,10 @@ func (c *Client) RotateCookie(ctx context.Context) {
 		c.recordRotation(rotSkipped, nil, rotateInfo{})
 		return
 	}
+	if c.rotationSuspended() {
+		c.log.Debug("cookie rotation skipped: suspended after consecutive no_new_token")
+		return
+	}
 	newTS, info, err := c.fetchRotatedTS(ctx, cookie)
 	if err != nil {
 		if errors.Is(err, ErrGoogleBlocked) {
@@ -233,6 +242,8 @@ func (c *Client) storeCookie(newCookie string) error {
 	c.cookieStr, c.cookieSAPI, c.cookieLoaded = newCookie, cookieValue(newCookie, cookieSAPISID), true
 	if newHash := psidtsHash(newCookie); newHash != c.psidtsHash {
 		c.psidtsHash = newHash
+		c.rot.noNewTokenStreak = 0
+		c.rot.suspended = false
 	}
 	if c.cfg.CookieFile != "" {
 		if info, err := os.Stat(c.cfg.CookieFile); err == nil {
@@ -258,14 +269,22 @@ var rotateWarnEvery = 10 * time.Minute
 
 // rotState tracks rotation attempts (guarded by cookieMu).
 type rotState struct {
-	lastAttempt time.Time
-	lastResult  string
-	attempts    int64
-	renewed     int64
-	notRenewed  int64 // attempts that did not renew the token (total)
-	streak      int64 // consecutive attempts without renewal
-	lastWarn    time.Time
-	lastInfo    rotateInfo // HTTP-level details of the last attempt (no values)
+	lastAttempt      time.Time
+	lastResult       string
+	attempts         int64
+	renewed          int64
+	notRenewed       int64 // attempts that did not renew the token (total)
+	streak           int64 // consecutive attempts without renewal
+	noNewTokenStreak int64 // consecutive no_new_token responses (R&D-14 R6)
+	suspended        bool  // rotation suspended until cookie.txt or 1PSIDTS changes
+	lastWarn         time.Time
+	lastInfo         rotateInfo // HTTP-level details of the last attempt (no values)
+}
+
+func (c *Client) rotationSuspended() bool {
+	c.cookieMu.Lock()
+	defer c.cookieMu.Unlock()
+	return c.rot.suspended
 }
 
 // rotateInfo describes the RotateCookies exchange without any cookie value.
@@ -290,6 +309,9 @@ type RotationStatus struct {
 	LastHTTPStatus     int      // HTTP status of the last RotateCookies call (0: none/transport error)
 	LastSetCookieNames []string // names (never values) of the Set-Cookie headers of the last call
 	LastRedirected     bool
+	Suspended          bool
+	SuspendAfter       int
+	NoNewTokenStreak   int64
 }
 
 // recordRotation updates the rotation state and, when the token was not renewed,
@@ -303,17 +325,37 @@ func (c *Client) recordRotation(result string, err error, info rotateInfo) {
 	if result == rotRenewed {
 		r.renewed++
 		r.streak = 0
+		r.noNewTokenStreak = 0
+		r.suspended = false
 		c.cookieMu.Unlock()
 		return
 	}
 	r.notRenewed++
 	r.streak++
 	streak := r.streak
+	var suspendNow bool
+	var noNewStreak int64
+	limit := c.cfg.RotateSuspendAfter
+	if result == rotNoNewToken {
+		r.noNewTokenStreak++
+		noNewStreak = r.noNewTokenStreak
+		if limit > 0 && r.noNewTokenStreak >= int64(limit) && !r.suspended {
+			r.suspended = true
+			suspendNow = true
+		}
+	} else {
+		r.noNewTokenStreak = 0
+	}
 	warn := r.lastWarn.IsZero() || time.Since(r.lastWarn) >= rotateWarnEvery
 	if warn {
 		r.lastWarn = time.Now()
 	}
 	c.cookieMu.Unlock()
+	if suspendNow {
+		c.log.Warn("suspending cookie rotation after consecutive no_new_token responses",
+			"consecutive_no_new_token", noNewStreak, "suspend_after", limit,
+			"hint", "refresh cookie.txt to resume rotation")
+	}
 	if !warn {
 		return
 	}
@@ -353,7 +395,10 @@ func (c *Client) RotationStatus() RotationStatus {
 		ConsecutiveFailure: c.rot.streak, TokenAge: age, TokenAgeSource: src,
 		PSIDTSPresent:  cookieValue(cookie, cookiePSIDTS) != "",
 		LastHTTPStatus: c.rot.lastInfo.Status, LastSetCookieNames: append([]string(nil), c.rot.lastInfo.CookieNames...),
-		LastRedirected: c.rot.lastInfo.Redirected,
+		LastRedirected:   c.rot.lastInfo.Redirected,
+		Suspended:        c.rot.suspended,
+		SuspendAfter:     c.cfg.RotateSuspendAfter,
+		NoNewTokenStreak: c.rot.noNewTokenStreak,
 	}
 }
 

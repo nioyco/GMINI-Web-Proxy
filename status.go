@@ -113,6 +113,9 @@ type rotationStatus struct {
 	LastHTTPStatus       int      `json:"last_http_status"`      // RotateCookies HTTP status (0: none)
 	LastSetCookieNames   []string `json:"last_set_cookie_names"` // names only, never values
 	LastRedirected       bool     `json:"last_redirected"`
+	Suspended            bool     `json:"suspended"`
+	SuspendAfter         int      `json:"suspend_after"`
+	ConsecutiveNoNewTok  int64    `json:"consecutive_no_new_token"`
 }
 
 func ageSec(t time.Time) *int64 {
@@ -188,6 +191,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		LastResult: rs.LastResult, Attempts: rs.Attempts, Renewed: rs.Renewed, NotRenewed: rs.NotRenewed,
 		ConsecutiveNoRenewal: rs.ConsecutiveFailure, TokenAgeSource: rs.TokenAgeSource,
 		LastHTTPStatus: rs.LastHTTPStatus, LastSetCookieNames: rs.LastSetCookieNames, LastRedirected: rs.LastRedirected,
+		Suspended: rs.Suspended, SuspendAfter: rs.SuspendAfter, ConsecutiveNoNewTok: rs.NoNewTokenStreak,
 	}
 	if resp.CookieRotation.LastSetCookieNames == nil {
 		resp.CookieRotation.LastSetCookieNames = []string{}

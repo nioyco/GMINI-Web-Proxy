@@ -7,7 +7,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -31,6 +34,7 @@ func TestRotationNoNewTokenLoggedAndCounted(t *testing.T) {
 	c, logs := rotClient(t, rtFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}, nil
 	}))
+	c.cfg.RotateSuspendAfter = -1 // exercise 4th call WARN without suspension threshold
 	for i := 0; i < 3; i++ {
 		c.RotateCookie(context.Background())
 	}
@@ -141,5 +145,82 @@ func TestRotationClassification(t *testing.T) {
 		if c.result == rotNoNewToken && len(c.names) > 0 && !strings.Contains(logs.String(), "set_cookie_names=AEC,NID") {
 			t.Errorf("%s: names missing in log: %s", c.name, logs)
 		}
+	}
+}
+
+// TestRotationSuspendedAfterThreeNoNewTokenAndResumes proves R&D-14 R6 (C4):
+//   - after 3 consecutive no_new_token responses, RotateCookie stops calling Google;
+//   - a 1PSIDCC-only Set-Cookie capture does NOT lift suspension;
+//   - an external cookie.txt rewrite or a captured __Secure-1PSIDTS resumes rotation.
+func TestRotationSuspendedAfterThreeNoNewTokenAndResumes(t *testing.T) {
+	dir := t.TempDir()
+	cookiePath := filepath.Join(dir, "cookie.txt")
+	if err := os.WriteFile(cookiePath, []byte("SAPISID=s; __Secure-1PSIDTS=ts1; __Secure-1PSIDCC=cc1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	var logs bytes.Buffer
+	c, err := New(Config{CookieFile: cookiePath, GeminiBL: "bl"}, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetTransport(rtFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}, nil
+	}))
+	ctx := context.Background()
+
+	// 5 attempts -> only 3 HTTP calls (default RotateSuspendAfter = 3).
+	for i := 0; i < 5; i++ {
+		c.RotateCookie(ctx)
+	}
+	rs := c.RotationStatus()
+	if calls.Load() != 3 || !rs.Suspended || rs.SuspendAfter != 3 || rs.NoNewTokenStreak != 3 {
+		t.Fatalf("after 5 calls: calls=%d status=%+v", calls.Load(), rs)
+	}
+	if !strings.Contains(logs.String(), "suspending cookie rotation") {
+		t.Errorf("expected suspension WARN in log:\n%s", logs.String())
+	}
+
+	// Internal 1PSIDCC capture rewrites cookie.txt, must NOT resume suspended rotation.
+	c.captureSetCookies(&http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Set-Cookie": []string{"__Secure-1PSIDCC=cc2; Path=/; Secure"}},
+		Body:       io.NopCloser(strings.NewReader("")),
+	})
+	c.RotateCookie(ctx)
+	if calls.Load() != 3 || !c.RotationStatus().Suspended {
+		t.Fatalf("1PSIDCC capture unexpectedly resumed rotation: calls=%d", calls.Load())
+	}
+
+	// External cookie.txt update (new mtime + content) resumes rotation cleanly.
+	if err := os.WriteFile(cookiePath, []byte("SAPISID=s; __Secure-1PSIDTS=ts2; __Secure-1PSIDCC=cc2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(cookiePath, future, future)
+	c.RotateCookie(ctx) // call #4
+	if calls.Load() != 4 {
+		t.Fatalf("expected rotation to resume after cookie.txt change: calls=%d", calls.Load())
+	}
+
+	// Suspend again after 3 calls (#4, #5, #6), then resume via captured __Secure-1PSIDTS.
+	c.RotateCookie(ctx) // #5
+	c.RotateCookie(ctx) // #6 -> suspends again
+	c.RotateCookie(ctx) // skipped
+	if calls.Load() != 6 || !c.RotationStatus().Suspended {
+		t.Fatalf("expected re-suspension at 6 calls: calls=%d status=%+v", calls.Load(), c.RotationStatus())
+	}
+	c.captureSetCookies(&http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Set-Cookie": []string{"__Secure-1PSIDTS=ts3; Path=/; Secure"}},
+		Body:       io.NopCloser(strings.NewReader("")),
+	})
+	if c.RotationStatus().Suspended {
+		t.Fatal("captured __Secure-1PSIDTS must clear rotation suspension")
+	}
+	c.RotateCookie(ctx) // #7
+	if calls.Load() != 7 {
+		t.Fatalf("expected call #7 after 1PSIDTS capture, got %d", calls.Load())
 	}
 }

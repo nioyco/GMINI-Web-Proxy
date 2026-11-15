@@ -66,6 +66,8 @@ func (c *Client) captureSetCookies(resp *http.Response) {
 		c.rotatedAt = now
 		c.psidtsAt = now
 		c.psidtsHash = psidtsHash(updated)
+		c.rot.noNewTokenStreak = 0
+		c.rot.suspended = false
 		c.cookieMu.Unlock()
 		c.saveState()
 	}

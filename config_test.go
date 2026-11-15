@@ -324,3 +324,20 @@ func TestMarkerNeutralizationSwitch(t *testing.T) {
 		t.Fatal("GEMINI_NEUTRALIZE_HISTORY_MARKERS=0 must disable neutralization")
 	}
 }
+
+func TestRotateSuspendThresholdEnv(t *testing.T) {
+	noEnv := filepath.Join(t.TempDir(), "none.env")
+	t.Setenv("GEMINI_COOKIE_ROTATE_SUSPEND_AFTER", "")
+	os.Unsetenv("GEMINI_COOKIE_ROTATE_SUSPEND_AFTER")
+	if got := loadConfig(noEnv).Gemini.RotateSuspendAfter; got != 3 {
+		t.Fatalf("default RotateSuspendAfter = %d, want 3", got)
+	}
+	t.Setenv("GEMINI_COOKIE_ROTATE_SUSPEND_AFTER", "5")
+	if got := loadConfig(noEnv).Gemini.RotateSuspendAfter; got != 5 {
+		t.Fatalf("RotateSuspendAfter = %d, want 5", got)
+	}
+	t.Setenv("GEMINI_COOKIE_ROTATE_SUSPEND_AFTER", "0")
+	if got := loadConfig(noEnv).Gemini.RotateSuspendAfter; got != -1 {
+		t.Fatalf("RotateSuspendAfter(0) = %d, want -1", got)
+	}
+}

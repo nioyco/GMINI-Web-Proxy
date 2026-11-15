@@ -67,7 +67,15 @@ type Config struct {
 	// StateMaxAge is how recent a persisted token must be to be reused at startup
 	// (default DefaultStateMaxAge).
 	StateMaxAge time.Duration
+
+	// RotateSuspendAfter suspends RotateCookies calls after N consecutive
+	// no_new_token responses until the cookie changes (R&D-14 R6).
+	// Zero uses DefaultRotateSuspendAfter (3); negative disables suspension.
+	RotateSuspendAfter int
 }
+
+// DefaultRotateSuspendAfter is the default consecutive no_new_token threshold.
+const DefaultRotateSuspendAfter = 3
 
 // applyDefaults fills any field left at its zero value with the corresponding
 // Default* constant, so gemini.Config{} produces a usable client. When no explicit
@@ -98,5 +106,8 @@ func (c *Config) applyDefaults() {
 	}
 	if c.StateMaxAge <= 0 {
 		c.StateMaxAge = DefaultStateMaxAge
+	}
+	if c.RotateSuspendAfter == 0 {
+		c.RotateSuspendAfter = DefaultRotateSuspendAfter
 	}
 }

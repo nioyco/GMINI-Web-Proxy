@@ -212,4 +212,7 @@ func TestUISessionDegradedExposedAndCleared(t *testing.T) {
 	if !strings.Contains(wHTML.Body.String(), "Session affaiblie : actualiser le cookie") {
 		t.Error("ui.html missing degraded session message")
 	}
+	if !strings.Contains(wHTML.Body.String(), "Rotation suspendue") {
+		t.Error("ui.html missing suspended rotation badge")
+	}
 }

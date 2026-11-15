@@ -1302,6 +1302,8 @@ func (c *Client) loadCookieFile() (cookie, sapisid string) {
 	newHash := psidtsHash(cookie)
 	if c.cookieLoaded && cookie != c.cookieStr {
 		c.cookieGen++ // the file was rewritten (e.g. a re-exported cookie)
+		c.rot.noNewTokenStreak = 0
+		c.rot.suspended = false
 		if newHash != c.psidtsHash {
 			c.psidtsHash = newHash
 			c.rotatedAt = time.Time{}

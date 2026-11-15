@@ -143,10 +143,11 @@ func loadConfig(envFile string) *Config {
 			CookieFile:     getEnv("GEMINI_COOKIE_FILE", ""),
 			Proxy:          getEnv("GEMINI_PROXY", ""),
 
-			AllowRemoteImages: getEnvBool("GEMINI_ALLOW_REMOTE_IMAGES", false),
-			TraceDir:          strings.TrimSpace(getEnv("GEMINI_TRACE_DIR", "")),
-			TraceMaxFiles:     getEnvInt("GEMINI_TRACE_MAX_FILES", 0),
-			TraceRaw:          getEnvBool("GEMINI_TRACE_RAW", false),
+			AllowRemoteImages:  getEnvBool("GEMINI_ALLOW_REMOTE_IMAGES", false),
+			TraceDir:           strings.TrimSpace(getEnv("GEMINI_TRACE_DIR", "")),
+			TraceMaxFiles:      getEnvInt("GEMINI_TRACE_MAX_FILES", 0),
+			TraceRaw:           getEnvBool("GEMINI_TRACE_RAW", false),
+			RotateSuspendAfter: rotateSuspendEnv(),
 		},
 	}
 
@@ -362,4 +363,12 @@ func callsFilePath(explicit, stateFile string) string {
 		return strings.TrimSuffix(stateFile, ".state.json") + ".calls.jsonl"
 	}
 	return ""
+}
+
+func rotateSuspendEnv() int {
+	v := getEnvInt("GEMINI_COOKIE_ROTATE_SUSPEND_AFTER", gemini.DefaultRotateSuspendAfter)
+	if v <= 0 {
+		return -1 // 0 explicitly disables rotation suspension
+	}
+	return v
 }
