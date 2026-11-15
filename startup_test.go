@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
 )
@@ -192,6 +195,43 @@ func TestRotationEnabledWhenStartingUnauthenticated(t *testing.T) {
 	c2.SetTransport(&googleSim{})
 	if _, refresh := startSession(context.Background(), cfg, c2, testLogger()); refresh {
 		t.Error("no rotation without __Secure-1PSIDTS")
+	}
+}
+
+// TestStartupWithBrowserScriptStateSkipsApp proves that when recuperer_cookie_gemini.mjs
+// writes <cookie>.state.json with at/bl from Chrome, proxy startup makes 0 calls to /app.
+func TestStartupWithBrowserScriptStateSkipsApp(t *testing.T) {
+	dir := t.TempDir()
+	cfg := startupConfig(t, dir)
+	sum := sha256.Sum256([]byte("s"))
+	fp := hex.EncodeToString(sum[:])[:16]
+	now := time.Now().UTC().Format(time.RFC3339)
+	raw, err := json.Marshal(map[string]any{
+		"version":             1,
+		"saved_at":            now,
+		"session_fingerprint": fp,
+		"at":                  "SCRIPT_AT_1",
+		"at_at":               now,
+		"bl":                  "boq_script_bl",
+		"bl_at":               now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.Gemini.StateFile, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, sim := startupClient(t, cfg)
+	auth, _ := startSession(context.Background(), cfg, c, testLogger())
+	if !strings.HasPrefix(auth, "authenticated") || !c.Authenticated() {
+		t.Fatalf("auth = %q authenticated=%v", auth, c.Authenticated())
+	}
+	if sim.get("app") != 0 {
+		t.Errorf("startup /app calls = %d, want 0", sim.get("app"))
+	}
+	if sim.get("batch") != 1 {
+		t.Errorf("startup listModels calls = %d, want 1 (catalog was absent)", sim.get("batch"))
 	}
 }
 

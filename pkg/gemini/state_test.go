@@ -3,6 +3,8 @@ package gemini
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -184,5 +186,64 @@ func TestDeadSessionDropsPersistedToken(t *testing.T) {
 	data, _ := os.ReadFile(c1.cfg.StateFile)
 	if strings.Contains(string(data), "AT_TOKEN_1") {
 		t.Error("a dropped token stays on disk")
+	}
+}
+
+// TestRestoreStateFromBrowserScriptFormat verifies that a .state.json emitted by
+// recuperer_cookie_gemini.mjs (with SNlM0e/cfb2h and SAPISID fingerprint, even
+// before any catalog has been fetched) is accepted by RestoreState and skips /app.
+func TestRestoreStateFromBrowserScriptFormat(t *testing.T) {
+	dir := t.TempDir()
+	cookiePath := filepath.Join(dir, "cookie.txt")
+	if err := os.WriteFile(cookiePath, []byte("__Secure-1PSID=p1; __Secure-1PSIDTS=ts1; SAPISID=sapi-browser-1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte("sapi-browser-1"))
+	fp := hex.EncodeToString(sum[:])[:16]
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Exact schema written by recuperer_cookie_gemini.mjs writeSessionStateFromPage.
+	payload := map[string]any{
+		"version":             1,
+		"saved_at":            now,
+		"session_fingerprint": fp,
+		"at":                  "SCRIPT_AT_TOKEN",
+		"at_at":               now,
+		"bl":                  "boq_script_20261115",
+		"bl_at":               now,
+		"psidts_at":           now,
+		"psidts_hash":         fp,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := cookiePath + ".state.json"
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var log callLog
+	var logs bytes.Buffer
+	c, err := New(Config{
+		CookieFile:   cookiePath,
+		StateFile:    statePath,
+		GeminiBLAuto: true,
+	}, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetTransport(sessionRT(t, &log))
+
+	r := c.RestoreState()
+	if !r.SessionFresh || r.CatalogRestored || !c.Authenticated() {
+		t.Fatalf("RestoreState = %+v auth=%v logs=%s", r, c.Authenticated(), logs.String())
+	}
+	if c.CurrentBL() != "boq_script_20261115" {
+		t.Errorf("CurrentBL = %q, want boq_script_20261115", c.CurrentBL())
+	}
+	c.ResolveBuildLabel(context.Background())
+	if got := log.count("/app"); got != 0 {
+		t.Errorf("expected 0 /app calls after browser script state restore, got %d", got)
 	}
 }
