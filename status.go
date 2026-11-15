@@ -38,6 +38,19 @@ type statusResponse struct {
 	TemporaryChat      bool                  `json:"temporary_chat"`             // GEMINI_TEMPORARY_CHAT
 	IgnoredFields      ignoredFields         `json:"ignored_request_fields"`
 	SessionState       sessionState          `json:"session_state"`
+	ModelIdentities    []modelIdentity       `json:"model_identities"`
+}
+
+// modelIdentity summarizes the latest served-model verdict for one model and
+// since when Google has returned a different id for it (empty when confirmed).
+type modelIdentity struct {
+	Model         string  `json:"model"`
+	ModelID       string  `json:"model_id,omitempty"`
+	LastVerdict   string  `json:"last_verdict"`
+	MismatchSince *string `json:"mismatch_since,omitempty"`
+	ServedID      string  `json:"served_id,omitempty"`
+	ServedName    string  `json:"served_name,omitempty"`
+	LastTime      *string `json:"last_time,omitempty"`
 }
 
 // sessionState describes the persisted session state by ages only: never the
@@ -227,6 +240,19 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	if ch.SessionDegraded {
 		resp.SessionState.SessionStatusLabel = "session affaiblie : actualiser le cookie"
+	}
+	ids := s.client.ModelIdentities()
+	resp.ModelIdentities = make([]modelIdentity, 0, len(ids))
+	for _, mi := range ids {
+		resp.ModelIdentities = append(resp.ModelIdentities, modelIdentity{
+			Model:         mi.Model,
+			ModelID:       mi.ModelID,
+			LastVerdict:   mi.LastVerdict,
+			MismatchSince: rfc3339Ptr(mi.MismatchSince),
+			ServedID:      mi.ServedID,
+			ServedName:    mi.ServedName,
+			LastTime:      rfc3339Ptr(mi.LastTime),
+		})
 	}
 	resp.UpstreamParams = s.client.UpstreamParams()
 	resp.ToolPromptRules = apiconv.ToolPromptRules()

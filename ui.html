@@ -39,6 +39,7 @@ button:hover{border-color:var(--mute)}
 <header><h1>GMINI Control</h1><span class="sub" id="ver"></span><span class="sub" id="upd"></span></header>
 <main>
 <div class="card bad" id="err"></div>
+<div class="card warn" id="idwarn" style="display:none"></div>
 <div class="tiles" id="tiles"></div>
 
 <section class="card">
@@ -80,6 +81,7 @@ const dur=ms=>ms==null||ms<0?"—":ms<1000?ms+" ms":(ms/1000).toFixed(ms<10000?1
 const ko=n=>n==null?"—":n<1024?n+" o":(n/1024).toFixed(1)+" Ko";
 const age=s=>s==null?"—":s<90?s+" s":s<5400?Math.round(s/60)+" min":(s/3600).toFixed(1)+" h";
 const hm=t=>t?new Date(t).toLocaleTimeString("fr-FR"):"—";
+const hmShort=t=>t?new Date(t).toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"}):"—";
 const badge=(c,t)=>`<span class="b ${c}">${esc(t)}</span>`;
 function who(identity,suspect,seen,served){
   if(identity==="other_model")return badge("bad","Autre modèle : "+(served||seen||"?"));
@@ -107,6 +109,12 @@ async function load(){
   const s=d.status,g=s.google_block,ss=s.session_state||{};
   $("ver").textContent=`version ${s.version} · ${String(s.commit).slice(0,7)}${s.dirty?" (modifié)":""} · ${d.listen}`;
   $("upd").textContent="mis à jour à "+new Date().toLocaleTimeString("fr-FR");
+  const mm=(s.model_identities||[]).filter(x=>x.mismatch_since);
+  if(mm.length){
+    const labelOf=name=>{const m=(d.models||[]).find(x=>x.name===name);return (m&&(m.description||m.display_name))||name;};
+    $("idwarn").innerHTML=mm.map(x=>`<div>⚠ Identité non garantie sur ${esc(labelOf(x.model))} depuis ${hmShort(x.mismatch_since)} — actualiser le cookie (raccourci 7)</div>`).join("");
+    $("idwarn").style.display="block";
+  }else{$("idwarn").style.display="none";$("idwarn").innerHTML="";}
   const t=[
     ["Session Google",!s.authenticated?badge("bad","Non connectée"):ss.session_degraded?badge("warn","Session affaiblie : actualiser le cookie"):badge("ok","Connectée")],
     ["Blocage anti-robot",g.active?badge("bad","Actif, niveau "+g.level):badge("ok","Aucun")+` <span class="sub">${g.total} au total</span>`],

@@ -153,12 +153,25 @@ const (
 	callFileCompact = 1000
 )
 
+// ModelIdentityStatus tracks the latest identity verdict for one model and
+// since when the served id has differed (cleared upon a confirmed reply).
+type ModelIdentityStatus struct {
+	Model         string
+	ModelID       string
+	LastVerdict   string
+	MismatchSince time.Time
+	ServedID      string
+	ServedName    string
+	LastTime      time.Time
+}
+
 // callJournal is the in-memory journal, optionally mirrored to a JSONL file.
 type callJournal struct {
-	mu    sync.Mutex
-	recs  []CallRecord
-	path  string
-	lines int
+	mu      sync.Mutex
+	recs    []CallRecord
+	byModel map[string]ModelIdentityStatus
+	path    string
+	lines   int
 }
 
 // loadCalls reads the journal file (if any). Called once at startup.
@@ -182,6 +195,8 @@ func (c *Client) loadCalls() {
 		if json.Unmarshal(sc.Bytes(), &r) == nil && r.Model != "" {
 			c.calls.recs = append(c.calls.recs, r)
 			c.calls.lines++
+			t, _ := time.Parse(time.RFC3339, r.Time)
+			c.calls.updateModelIdentity(r, t)
 			if len(c.calls.recs) > callFileCompact {
 				c.calls.recs = c.calls.recs[len(c.calls.recs)-callLogKeep:]
 			}
@@ -264,6 +279,7 @@ func (c *Client) recordCall(r CallRecord, scan *idScan) {
 	if len(c.calls.recs) > callLogKeep {
 		c.calls.recs = c.calls.recs[len(c.calls.recs)-callLogKeep:]
 	}
+	c.calls.updateModelIdentity(r, time.Now())
 	c.appendCallLocked(r)
 	c.calls.mu.Unlock()
 
@@ -330,6 +346,57 @@ func newCallRecord(met *CallMetrics, p GenParams, start time.Time) CallRecord {
 		r.Model, r.ModelID = p.Model.Name, p.Model.ModelID
 	}
 	return r
+}
+
+// ModelIdentities returns the per-model identity verdict summary, sorted by
+// model name (no Google call).
+func (c *Client) ModelIdentities() []ModelIdentityStatus {
+	c.calls.mu.Lock()
+	defer c.calls.mu.Unlock()
+	if len(c.calls.byModel) == 0 {
+		return nil
+	}
+	out := make([]ModelIdentityStatus, 0, len(c.calls.byModel))
+	for _, st := range c.calls.byModel {
+		out = append(out, st)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })
+	return out
+}
+
+// updateModelIdentity updates per-model identity mismatch tracking. Caller holds mu.
+func (l *callJournal) updateModelIdentity(r CallRecord, at time.Time) {
+	if r.Model == "" || r.Error != "" {
+		return
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	if l.byModel == nil {
+		l.byModel = map[string]ModelIdentityStatus{}
+	}
+	prev := l.byModel[r.Model]
+	st := ModelIdentityStatus{
+		Model:       r.Model,
+		ModelID:     r.ModelID,
+		LastVerdict: r.Identity,
+		ServedID:    r.ServedID,
+		ServedName:  r.ServedName,
+		LastTime:    at,
+	}
+	switch r.Identity {
+	case "confirmed":
+		st.MismatchSince = time.Time{}
+	case "name_only", "other_model":
+		if !prev.MismatchSince.IsZero() {
+			st.MismatchSince = prev.MismatchSince
+		} else {
+			st.MismatchSince = at
+		}
+	default:
+		st.MismatchSince = prev.MismatchSince
+	}
+	l.byModel[r.Model] = st
 }
 
 // CallByRequest returns the newest journal record of a proxy request id.

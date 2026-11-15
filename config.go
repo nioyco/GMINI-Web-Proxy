@@ -56,9 +56,12 @@ type Config struct {
 	// models file shown there (GEMINI_ANTIGRAVITY_MODELS_FILE; "off" hides it).
 	UIEnabled bool
 	// WarnSuspectFallback adds a note (as reasoning text) to a streamed reply that
-	// probably came from another model (GEMINI_WARN_SUSPECT_FALLBACK, default on).
-	WarnSuspectFallback   bool
-	AntigravityModelsFile string
+	// probably came from another model (GEMINI_WARN_SUSPECT_FALLBACK, default on),
+	// at most once per WarnSuspectCooldownMin minutes per model unless the verdict
+	// changes (GEMINI_WARN_SUSPECT_COOLDOWN_MIN, default 10; <0 disables rate limit).
+	WarnSuspectFallback    bool
+	WarnSuspectCooldownMin int
+	AntigravityModelsFile  string
 	// StreamToolsProgress forwards text and thoughts as they arrive on the
 	// stream+tools chat path instead of one final chunk (GEMINI_STREAM_TOOLS_PROGRESS,
 	// default on; 0 restores the buffered behaviour).
@@ -120,6 +123,7 @@ func loadConfig(envFile string) *Config {
 		KeepTextAfterToolCall:       !getEnvBool("GEMINI_DROP_TEXT_AFTER_TOOL_CALL", true),
 		UIEnabled:                   getEnvBool("GEMINI_UI", true),
 		WarnSuspectFallback:         getEnvBool("GEMINI_WARN_SUSPECT_FALLBACK", true),
+		WarnSuspectCooldownMin:      getEnvInt("GEMINI_WARN_SUSPECT_COOLDOWN_MIN", 10),
 		AntigravityModelsFile:       getEnv("GEMINI_ANTIGRAVITY_MODELS_FILE", ""),
 		StreamToolsProgress:         getEnvBool("GEMINI_STREAM_TOOLS_PROGRESS", true),
 		StreamThoughts:              getEnvBool("GEMINI_STREAM_THOUGHTS", true),

@@ -218,4 +218,7 @@ func TestUISessionDegradedExposedAndCleared(t *testing.T) {
 	if !strings.Contains(wHTML.Body.String(), "Conversations temporaires") {
 		t.Error("ui.html missing temporary_chat tile")
 	}
+	if !strings.Contains(wHTML.Body.String(), "Identité non garantie sur ") || !strings.Contains(wHTML.Body.String(), "actualiser le cookie (raccourci 7)") {
+		t.Error("ui.html missing name_only / model identity warning banner")
+	}
 }

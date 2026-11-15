@@ -100,6 +100,7 @@ type uiModel struct {
 	LastSeenModels string `json:"last_seen_models"` // display names of catalogue ids found in the last reply
 	LastServed     string `json:"last_served"`      // model name stated by Google in the last reply
 	Calls5h        int    `json:"calls_5h"`         // generations sent to Gemini in the last 5 hours
+	MismatchSince  string `json:"mismatch_since,omitempty"`
 }
 
 type uiAntigravity struct {
@@ -157,10 +158,17 @@ func (s *Server) uiModels() []uiModel {
 		}
 	}
 	def := s.client.DefaultModelName()
+	identByModel := map[string]string{}
+	for _, mi := range s.client.ModelIdentities() {
+		if !mi.MismatchSince.IsZero() {
+			identByModel[mi.Model] = mi.MismatchSince.UTC().Format(time.RFC3339)
+		}
+	}
 	out := make([]uiModel, 0, len(list))
 	for _, m := range list {
 		u := uiModel{Name: m.Name, ModelID: m.ModelID, DisplayName: m.DisplayName, Description: m.Description,
-			Default: m.Name == def, MedianFirstMS: -1, MenuLabel: m.MenuLabel, Family: m.Family}
+			Default: m.Name == def, MedianFirstMS: -1, MenuLabel: m.MenuLabel, Family: m.Family,
+			MismatchSince: identByModel[m.Name]}
 		var firsts []int64
 		for _, c := range all {
 			if c.Model != m.Name {

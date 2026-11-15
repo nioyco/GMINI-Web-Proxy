@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
@@ -45,6 +46,15 @@ type Server struct {
 	active  activeSet
 	stats   statsCounters
 	ignored ignoredStats
+
+	suspectWarnMu sync.Mutex
+	suspectWarn   map[string]suspectWarnState
+	warnNow       func() time.Time
+}
+
+type suspectWarnState struct {
+	verdict string
+	at      time.Time
 }
 
 // remoteImagesMsg is the 400 message for http(s) image URLs while they are disabled.
@@ -571,6 +581,11 @@ loop:
 			case res.err != nil:
 				s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+res.err.Error())), sse.done())
 			default:
+				if note := s.maybeSuspectWarning(ctx, model); note != "" {
+					if !write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note))) {
+						return
+					}
+				}
 				text, toolCalls := s.finishText(ctx, res.text, true, declared)
 				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
 			}
@@ -609,6 +624,11 @@ loop:
 			}
 			s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
 		default:
+			if note := s.maybeSuspectWarning(ctx, model); note != "" {
+				if !write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note))) {
+					return
+				}
+			}
 			text, toolCalls := s.finishText(ctx, res.text, true, declared)
 			s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
 		}
@@ -630,13 +650,9 @@ loop:
 		}
 	}
 	// Say so when another model than the one asked for probably answered.
-	if ri := reqFrom(ctx); ri != nil && s.cfg.WarnSuspectFallback && s.cfg.StreamThoughts {
-		if rec, found := s.client.CallByRequest(ri.id); found && (rec.Suspect != "" || rec.Identity == "other_model") {
-			note := "\n⚠ GMINI : cette réponse ne vient probablement pas du modèle demandé (" + model +
-				"). Google sert un autre modèle quand la limite d'utilisation du site Gemini est atteinte. Vérifiez la page GMINI Control avant de vous fier au résultat.\n"
-			if !write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note))) {
-				return
-			}
+	if note := s.maybeSuspectWarning(ctx, model); note != "" {
+		if !write(sse.data(apiconv.ChatChunkReasoning(cid, created, model, note))) {
+			return
 		}
 	}
 	text, toolCalls := s.finishText(ctx, strings.TrimSpace(raw.String()), true, declared)
@@ -671,6 +687,76 @@ const glitchRetryNote = "\n\n[Retry instruction: Do not use Google Drive, Gmail,
 func glitchRetryParams(p gemini.GenParams) gemini.GenParams {
 	p.Prompt += glitchRetryNote
 	return p
+}
+
+func (s *Server) warnCooldown() time.Duration {
+	if s.cfg.WarnSuspectCooldownMin < 0 {
+		return 0
+	}
+	if s.cfg.WarnSuspectCooldownMin == 0 {
+		return 10 * time.Minute
+	}
+	return time.Duration(s.cfg.WarnSuspectCooldownMin) * time.Minute
+}
+
+// maybeSuspectWarning returns a reasoning warning note when the current call's
+// served model identity is doubtful (name_only, other_model or no_thoughts).
+// Warnings are rate-limited per model (default 10 min) unless the verdict changes.
+func (s *Server) maybeSuspectWarning(ctx context.Context, model string) string {
+	if !s.cfg.WarnSuspectFallback || !s.cfg.StreamThoughts {
+		return ""
+	}
+	ri := reqFrom(ctx)
+	if ri == nil {
+		return ""
+	}
+	rec, found := s.client.CallByRequest(ri.id)
+	if !found {
+		return ""
+	}
+	var verdict, note string
+	switch {
+	case rec.Identity == "name_only":
+		verdict = "name_only"
+		note = "\n⚠ GMINI : Google annonce le nom du modèle demandé (" + model + ") sous un identifiant différent"
+		if rec.ServedID != "" {
+			note += " (" + rec.ServedID + ")"
+		}
+		note += " : modèle réel non garanti ; actualiser le cookie via le raccourci 7 et vérifier GMINI Control.\n"
+	case rec.Identity == "other_model":
+		verdict = "other_model"
+		note = "\n⚠ GMINI : cette réponse ne vient probablement pas du modèle demandé (" + model +
+			"). Google sert un autre modèle quand la limite d'utilisation du site Gemini est atteinte. Vérifiez la page GMINI Control avant de vous fier au résultat.\n"
+	case rec.Suspect != "":
+		verdict = "suspect:" + rec.Suspect
+		note = "\n⚠ GMINI : cette réponse ne vient probablement pas du modèle demandé (" + model +
+			"). Google sert un autre modèle quand la limite d'utilisation du site Gemini est atteinte. Vérifiez la page GMINI Control avant de vous fier au résultat.\n"
+	default:
+		s.suspectWarnMu.Lock()
+		if rec.Identity == "confirmed" && s.suspectWarn != nil {
+			delete(s.suspectWarn, model)
+		}
+		s.suspectWarnMu.Unlock()
+		return ""
+	}
+
+	nowFn := time.Now
+	if s.warnNow != nil {
+		nowFn = s.warnNow
+	}
+	now := nowFn()
+	cooldown := s.warnCooldown()
+
+	s.suspectWarnMu.Lock()
+	defer s.suspectWarnMu.Unlock()
+	if s.suspectWarn == nil {
+		s.suspectWarn = map[string]suspectWarnState{}
+	}
+	if prev, ok := s.suspectWarn[model]; ok && prev.verdict == verdict && cooldown > 0 && now.Sub(prev.at) < cooldown {
+		return ""
+	}
+	s.suspectWarn[model] = suspectWarnState{verdict: verdict, at: now}
+	return note
 }
 
 // awaitGenerate runs the blocking generation (s.generate) while writing an SSE
