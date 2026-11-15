@@ -171,10 +171,13 @@ func (s *Server) handleModelsRefresh(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	err := s.client.RefreshModels(ctx)
 	resp := map[string]any{"refreshed": err == nil, "models_count": len(s.client.ModelNames()),
-		"models_source": s.client.ModelsSourceLabel()}
+		"models_source": s.client.ModelsSourceLabel(), "session_degraded": s.client.CatalogHealth().SessionDegraded}
 	status := http.StatusOK
 	switch {
 	case errors.Is(err, gemini.ErrCatalogRefreshRefused):
+		status = http.StatusConflict
+		resp["error"] = err.Error()
+	case errors.Is(err, gemini.ErrCatalogDegraded):
 		status = http.StatusConflict
 		resp["error"] = err.Error()
 	case err != nil:

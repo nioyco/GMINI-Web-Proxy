@@ -234,6 +234,30 @@ func (c *Client) markCatalogTried() {
 // attempted (no session, block in force, or a request made too recently).
 var ErrCatalogRefreshRefused = errors.New("catalog refresh not attempted")
 
+// ErrCatalogDegraded is returned when listModels shrinks to <=1 model while at
+// least 2 real models are already known: the previous good catalog is kept and
+// the session is marked weakened until a full catalog is received again.
+var ErrCatalogDegraded = errors.New("degraded catalog rejected: session weakened (refresh cookie)")
+
+// CatalogHealthStatus summarizes whether listModels recently returned a
+// degraded (single-model) catalog indicating a weakened Google session.
+type CatalogHealthStatus struct {
+	SessionDegraded bool
+	Since           time.Time
+	AccountStatus   int
+}
+
+// CatalogHealth reports the current catalog degradation state (no Google call).
+func (c *Client) CatalogHealth() CatalogHealthStatus {
+	c.modelMu.Lock()
+	defer c.modelMu.Unlock()
+	return CatalogHealthStatus{
+		SessionDegraded: c.sessionDegraded,
+		Since:           c.sessionDegradedAt,
+		AccountStatus:   c.sessionAccountStatus,
+	}
+}
+
 // RefreshModels refreshes the model catalog on explicit request (one listModels
 // call). It refuses — without any Google call — when the session is not
 // authenticated, when a gemini.google.com block is in force, or when the last
@@ -341,14 +365,42 @@ func (c *Client) ResolveModels(ctx context.Context) {
 // refreshes log at Debug; the one-time startup summary is logged by ResolveModels.
 func (c *Client) fetchModels(ctx context.Context) error {
 	c.markCatalogTried()
-	models, err := c.dynamicModels(ctx)
+	models, accountStatus, err := c.dynamicModelsWithMeta(ctx)
 	if err == nil {
+		c.modelMu.Lock()
+		prevCount := len(c.modelOrder)
+		prevSource := c.modelsSource
+		c.modelMu.Unlock()
+		if len(models) <= 1 && prevCount >= 2 && (prevSource == "dynamic" || prevSource == "persisted") {
+			c.modelMu.Lock()
+			c.sessionDegraded = true
+			c.sessionDegradedAt = time.Now()
+			c.sessionAccountStatus = accountStatus
+			c.modelMu.Unlock()
+			if c.catalogWarnDue() {
+				c.log.Warn("degraded model catalog rejected; session weakened (refresh cookie)",
+					"received", len(models), "kept", prevCount, "account_status", accountStatus)
+			}
+			return ErrCatalogDegraded
+		}
+		c.modelMu.Lock()
+		wasDegraded := c.sessionDegraded && len(models) >= 2
+		if len(models) >= 2 {
+			c.sessionDegraded = false
+			c.sessionDegradedAt = time.Time{}
+			c.sessionAccountStatus = 0
+		}
+		c.modelMu.Unlock()
 		c.storeModels(models, "dynamic")
 		c.modelMu.Lock()
 		c.catalogAt = time.Now()
 		c.modelMu.Unlock()
 		c.saveState()
-		c.log.Debug("refreshed gemini model list", "count", len(models), "source", "dynamic")
+		if wasDegraded {
+			c.log.Info("full model catalog restored; session weakened state cleared", "count", len(models))
+		} else {
+			c.log.Debug("refreshed gemini model list", "count", len(models), "source", "dynamic")
+		}
 		return nil
 	}
 
@@ -390,18 +442,23 @@ func (c *Client) catalogWarnDue() bool {
 // dynamicModels fetches and parses the account's model catalog via the
 // listModels RPC. It requires an authenticated session.
 func (c *Client) dynamicModels(ctx context.Context) ([]*AvailableModel, error) {
+	models, _, err := c.dynamicModelsWithMeta(ctx)
+	return models, err
+}
+
+func (c *Client) dynamicModelsWithMeta(ctx context.Context) ([]*AvailableModel, int, error) {
 	if c.currentAt() == "" {
-		return nil, errors.New("session is not authenticated")
+		return nil, 0, errors.New("session is not authenticated")
 	}
 	raw, err := c.batchExecute(ctx, listModelsRPC, "[]")
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	inner, ok := parseBatchResponse(raw, listModelsRPC)
 	if !ok {
-		return nil, fmt.Errorf("%s: wrb.fr entry not found in response", listModelsRPC)
+		return nil, 0, fmt.Errorf("%s: wrb.fr entry not found in response", listModelsRPC)
 	}
-	return parseModels(inner)
+	return parseModelsWithMeta(inner)
 }
 
 // fallbackModels returns the model set used when the dynamic list cannot be
@@ -532,10 +589,16 @@ func searchWrb(v any, rpcid string) (string, bool) {
 // model list. body[15] is the model array; body[16]/body[17] are the tier and
 // capability flags fed to computeCapacity.
 func parseModels(innerJSON string) ([]*AvailableModel, error) {
+	out, _, err := parseModelsWithMeta(innerJSON)
+	return out, err
+}
+
+func parseModelsWithMeta(innerJSON string) ([]*AvailableModel, int, error) {
 	var body []any
 	if err := json.Unmarshal([]byte(innerJSON), &body); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	accountStatus := accountStatusAt(body)
 	tier := floatList(body, 16)
 	capFlags := floatList(body, 17)
 	capacity, capField := computeCapacity(tier, capFlags)
@@ -570,9 +633,9 @@ func parseModels(innerJSON string) ([]*AvailableModel, error) {
 		})
 	}
 	if len(out) == 0 {
-		return nil, errors.New("no models in listModels response")
+		return nil, accountStatus, errors.New("no models in listModels response")
 	}
-	return out, nil
+	return out, accountStatus, nil
 }
 
 // computeCapacity maps the account tier/capability flags onto Gemini's
@@ -655,6 +718,15 @@ func indexAny(arr []any, i int) any {
 func intAt(arr []any, i int) int {
 	f, ok := indexAny(arr, i).(float64)
 	if !ok || f < 0 || f > 1000 || f != float64(int(f)) {
+		return 0
+	}
+	return int(f)
+}
+
+// accountStatusAt reads body[14] from listModels without intAt's <=1000 cap.
+func accountStatusAt(arr []any) int {
+	f, ok := indexAny(arr, 14).(float64)
+	if !ok || f < 0 || f > 1_000_000 || f != float64(int(f)) {
 		return 0
 	}
 	return int(f)

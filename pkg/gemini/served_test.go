@@ -1,9 +1,15 @@
 package gemini
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -182,5 +188,131 @@ func TestServedModelFromReply(t *testing.T) {
 	// Nothing stated and no thoughts: suspect.
 	if r := rec(servedLine("", ""), 0); r.Identity != "not_stated" || r.Suspect != "no_thoughts" {
 		t.Fatalf("r=%+v", r)
+	}
+}
+
+func catalogWithStatusAndNames(t *testing.T, status int, names ...string) string {
+	t.Helper()
+	raw := make([]any, 0, len(names))
+	for i, n := range names {
+		ml := make([]any, 12)
+		ml[0] = "id_" + n
+		ml[1] = n
+		ml[11] = n
+		_ = i
+		raw = append(raw, ml)
+	}
+	body := make([]any, 18)
+	if status > 0 {
+		body[14] = status
+	}
+	body[15] = raw
+	ib, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer, err := json.Marshal([]any{[]any{"wrb.fr", listModelsRPC, string(ib)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ")]}'\n" + string(outer)
+}
+
+// TestDegradedCatalogRejectedAndRecovered proves R&D-14 R3 (C3):
+//   - a 1-model listModels reply must NOT replace a >=2-model catalog in memory or on disk;
+//   - rejection holds with body[14]=1016 AND when body[14] is absent;
+//   - sessionDegraded stays active (without polluting withdrawn) until >=2 models return.
+func TestDegradedCatalogRejectedAndRecovered(t *testing.T) {
+	dir := t.TempDir()
+	cookiePath := filepath.Join(dir, "cookie.txt")
+	if err := os.WriteFile(cookiePath, []byte("SAPISID=s; __Secure-1PSIDTS=ts"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	statePath := cookiePath + ".state.json"
+
+	var reply string
+	var logs bytes.Buffer
+	c, err := New(Config{CookieFile: cookiePath, StateFile: statePath}, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetTransport(rtFunc(func(r *http.Request) (*http.Response, error) {
+		return resp200(r, reply), nil
+	}))
+	c.setAt("tok")
+	ctx := context.Background()
+
+	// 1. Seed a 4-model dynamic catalog -> persisted on disk.
+	reply = catalogWithStatusAndNames(t, 0, "3.5 Flash", "3.5 Flash-Lite", "3.1 Pro", "4 Carbon")
+	if err := c.fetchModels(ctx); err != nil {
+		t.Fatalf("initial fetchModels: %v", err)
+	}
+	if len(c.ModelNames()) != 4 {
+		t.Fatalf("got %d models, want 4", len(c.ModelNames()))
+	}
+	diskBefore, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Partial drop (4 -> 3) still updates and tracks withdrawn model (5bf479e).
+	reply = catalogWithStatusAndNames(t, 0, "3.5 Flash", "3.5 Flash-Lite", "3.1 Pro")
+	if err := c.fetchModels(ctx); err != nil {
+		t.Fatalf("partial shrink fetchModels: %v", err)
+	}
+	if len(c.ModelNames()) != 3 || len(c.WithdrawnModels()) != 1 {
+		t.Fatalf("models=%d withdrawn=%d, want 3 / 1", len(c.ModelNames()), len(c.WithdrawnModels()))
+	}
+	if _, err := c.ResolveModel("gemini-4-carbon"); err != nil {
+		t.Fatalf("withdrawn model must stay callable: %v", err)
+	}
+
+	// 3. Degraded reply (1 model, body[14]=1016): rejected, catalog & state unchanged.
+	diskBefore, err = os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply = catalogWithStatusAndNames(t, 1016, "3.5 Flash")
+	if err := c.fetchModels(ctx); !errors.Is(err, ErrCatalogDegraded) {
+		t.Fatalf("err = %v, want ErrCatalogDegraded", err)
+	}
+	if len(c.ModelNames()) != 3 {
+		t.Fatalf("catalog overwritten: got %v, want 3 models", c.ModelNames())
+	}
+	if len(c.WithdrawnModels()) != 1 {
+		t.Fatalf("withdrawn polluted by rejected 1-model catalog: %+v", c.WithdrawnModels())
+	}
+	diskAfter, _ := os.ReadFile(statePath)
+	if string(diskAfter) != string(diskBefore) {
+		t.Error("on-disk state was modified by rejected degraded catalog")
+	}
+	h := c.CatalogHealth()
+	if !h.SessionDegraded || h.AccountStatus != 1016 {
+		t.Errorf("CatalogHealth = %+v", h)
+	}
+	if !strings.Contains(logs.String(), "account_status=1016") {
+		t.Errorf("expected account_status=1016 in WARN log:\n%s", logs.String())
+	}
+
+	// 4. Even without body[14], a 1-model reply must STILL be rejected.
+	oldWarn := catalogWarnEvery
+	catalogWarnEvery = 0
+	t.Cleanup(func() { catalogWarnEvery = oldWarn })
+	reply = catalogWithStatusAndNames(t, 0, "3.5 Flash")
+	if err := c.fetchModels(ctx); !errors.Is(err, ErrCatalogDegraded) {
+		t.Fatalf("err without body[14] = %v, want ErrCatalogDegraded", err)
+	}
+	if len(c.ModelNames()) != 3 || !c.CatalogHealth().SessionDegraded {
+		t.Fatal("must reject 1-model catalog regardless of body[14]")
+	}
+
+	// 5. Receiving a full catalog again clears SessionDegraded.
+	reply = catalogWithStatusAndNames(t, 0, "3.5 Flash", "3.5 Flash-Lite", "3.1 Pro", "4 Carbon")
+	if err := c.fetchModels(ctx); err != nil {
+		t.Fatalf("recovery fetchModels: %v", err)
+	}
+	h = c.CatalogHealth()
+	if h.SessionDegraded || h.AccountStatus != 0 || len(c.ModelNames()) != 4 || len(c.WithdrawnModels()) != 0 {
+		t.Errorf("not recovered cleanly: health=%+v models=%d withdrawn=%d", h, len(c.ModelNames()), len(c.WithdrawnModels()))
 	}
 }

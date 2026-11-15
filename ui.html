@@ -93,6 +93,7 @@ function why(e){
   if(/not authenticated/.test(e))return "la session Google n'est pas connectée (cookie expiré : raccourci 7). Aucun appel n'a été fait.";
   if(/less than/.test(e))return "dernière tentative trop récente : attendre 5 minutes. Aucun appel n'a été fait.";
   if(/backoff in force/.test(e))return "un blocage anti-robot de Google est en cours : attendre sa levée. Aucun appel n'a été fait.";
+  if(/degraded catalog|session weakened/.test(e))return "catalogue réduit à un seul modèle (session affaiblie : actualiser le cookie avec le raccourci 7). L'ancien catalogue est conservé.";
   if(/google blocked/.test(e))return "Google a refusé cet appel (page anti-robot). Le catalogue déjà connu reste utilisé ; ne pas réessayer tout de suite.";
   return e;
 }
@@ -107,9 +108,9 @@ async function load(){
   $("ver").textContent=`version ${s.version} · ${String(s.commit).slice(0,7)}${s.dirty?" (modifié)":""} · ${d.listen}`;
   $("upd").textContent="mis à jour à "+new Date().toLocaleTimeString("fr-FR");
   const t=[
-    ["Session Google",s.authenticated?badge("ok","Connectée"):badge("bad","Non connectée")],
+    ["Session Google",!s.authenticated?badge("bad","Non connectée"):ss.session_degraded?badge("warn","Session affaiblie : actualiser le cookie"):badge("ok","Connectée")],
     ["Blocage anti-robot",g.active?badge("bad","Actif, niveau "+g.level):badge("ok","Aucun")+` <span class="sub">${g.total} au total</span>`],
-    ["Catalogue",`${s.models_count} modèles <span class="sub">${esc(s.models_source)}, ${age(ss.catalog_age_sec)}</span>`],
+    ["Catalogue",`${s.models_count} modèles <span class="sub">${esc(s.models_source)}, ${age(ss.catalog_age_sec)}</span>`+(ss.session_degraded?" "+badge("warn","1 modèle ignoré"):"")],
     ["Dernière rotation du cookie",age(s.cookie_rotation.last_success_age_sec)+` <span class="sub">${esc(s.cookie_rotation.last_result||"")}</span>`],
     ["Requêtes en cours",String(Math.max(0,s.active_requests-1))],
     ["Proxy démarré depuis",age(s.uptime_sec)],

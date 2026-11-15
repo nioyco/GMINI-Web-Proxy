@@ -147,6 +147,10 @@ type Client struct {
 	withdrawn map[string]WithdrawnModel
 	// suspectCheckAt is the last catalogue check triggered by a suspect reply.
 	suspectCheckAt time.Time
+	// sessionDegraded is set when listModels shrinks to <=1 model while >=2 were known.
+	sessionDegraded      bool
+	sessionDegradedAt    time.Time
+	sessionAccountStatus int // body[14] from degraded listModels response (0 = absent)
 
 	// Session state file (AUDIT-13 A5).
 	stateMu      sync.Mutex
