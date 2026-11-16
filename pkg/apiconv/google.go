@@ -130,6 +130,7 @@ func googleContentsToPrompt(req *GenerateContentRequest) string {
 		parts = append(parts, buildGoogleToolPrompt(toolDefs)+googleToolChoiceInstruction(req))
 	}
 
+	lastUserIdx := -1
 	for _, content := range req.Contents {
 		var msgParts []string
 		for _, p := range content.Parts {
@@ -154,8 +155,15 @@ func googleContentsToPrompt(req *GenerateContentRequest) string {
 		if content.Role == "model" {
 			parts = append(parts, "[Assistant]: "+text)
 		} else {
+			if text != "" {
+				lastUserIdx = len(parts)
+			}
 			parts = append(parts, text)
 		}
+	}
+
+	if len(toolDefs) > 0 {
+		parts = insertToolPromptReminder(parts, lastUserIdx)
 	}
 
 	return joinNonEmpty(parts, "\n\n")

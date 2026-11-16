@@ -50,6 +50,9 @@ type Config struct {
 	// DisableToolPromptRules removes the extra tool-prompt rules added in P6/P10
 	// (GEMINI_TOOL_PROMPT_NOECHO_RULES=0|false|off), restoring the original prompt.
 	DisableToolPromptRules bool
+	// ToolPromptReminder appends a short 3-line reminder just before the last
+	// user request when tools are active (GEMINI_TOOL_PROMPT_REMINDER, default true).
+	ToolPromptReminder bool
 	// DisableMarkerNeutralization stops escaping history markers ([User]:, ...) found
 	// in input contents (GEMINI_NEUTRALIZE_HISTORY_MARKERS=0|false|off; default: on).
 	DisableMarkerNeutralization bool
@@ -134,6 +137,7 @@ func loadConfig(envFile string) *Config {
 		AllowNoAuth:                 getEnvBool("GEMINI_ALLOW_NO_AUTH", false),
 		DisableEchoFilter:           !getEnvBool("GEMINI_STRIP_HISTORY_ECHO", true),
 		DisableToolPromptRules:      !getEnvBool("GEMINI_TOOL_PROMPT_NOECHO_RULES", true),
+		ToolPromptReminder:          getEnvBool("GEMINI_TOOL_PROMPT_REMINDER", true),
 		DisableMarkerNeutralization: !getEnvBool("GEMINI_NEUTRALIZE_HISTORY_MARKERS", true),
 		KeepTextAfterToolCall:       !getEnvBool("GEMINI_DROP_TEXT_AFTER_TOOL_CALL", true),
 		UIEnabled:                   getEnvBool("GEMINI_UI", true),

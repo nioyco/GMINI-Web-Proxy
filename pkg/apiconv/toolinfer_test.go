@@ -234,3 +234,29 @@ func TestToolPromptRulesOffRestoresOriginalPrompt(t *testing.T) {
 		t.Errorf("default must keep the rules: %s", on)
 	}
 }
+
+func TestToolPromptReminderPlacementAndToggle(t *testing.T) {
+	defer SetToolPromptReminder(true)
+	tools := []Tool{{Type: "function", Function: &ToolFunction{Name: "read_file", Description: "d", Parameters: json.RawMessage(`{"type":"object"}`)}}}
+	msgs := []Message{
+		{Role: "system", Content: jsonString("sys")},
+		{Role: "user", Content: jsonString("ctx\n<USER_REQUEST>\nwhat time is it?\n</USER_REQUEST>")},
+	}
+
+	SetToolPromptReminder(true)
+	pOn := messagesToPrompt(msgs, tools, toolChoiceMode{})
+	idxRem := strings.Index(pOn, "NEVER trigger Gemini internal artifacts")
+	idxReq := strings.Index(pOn, "<USER_REQUEST>")
+	if idxRem < 0 || idxRem >= idxReq {
+		t.Fatalf("expected reminder just before <USER_REQUEST>, got idxRem=%d idxReq=%d", idxRem, idxReq)
+	}
+	if strings.Contains(shortToolPromptReminder, "[Assistant]:") || strings.Contains(shortToolPromptReminder, "[User]:") {
+		t.Fatalf("reminder must not contain echo markers")
+	}
+
+	SetToolPromptReminder(false)
+	pOff := messagesToPrompt(msgs, tools, toolChoiceMode{})
+	if strings.Contains(pOff, "NEVER trigger Gemini internal artifacts") {
+		t.Fatalf("reminder should be absent when disabled")
+	}
+}

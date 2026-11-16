@@ -250,6 +250,42 @@ func SetToolPromptRules(on bool) { toolPromptRules.Store(on) }
 // ToolPromptRules reports whether the extra tool-prompt rules are enabled.
 func ToolPromptRules() bool { return toolPromptRules.Load() }
 
+// toolPromptReminder switches the short end-of-prompt reminder (B3, default on).
+var toolPromptReminder atomic.Bool
+
+func init() { toolPromptReminder.Store(true) }
+
+// SetToolPromptReminder enables or disables the short end-of-prompt reminder (B3).
+func SetToolPromptReminder(on bool) { toolPromptReminder.Store(on) }
+
+// ToolPromptReminder reports whether the short end-of-prompt reminder is active.
+func ToolPromptReminder() bool { return toolPromptReminder.Load() }
+
+const shortToolPromptReminder = "Reminder: use ONLY the provided tools above.\n" +
+	"NEVER trigger Gemini internal artifacts, Canvas, widgets, web search, or Google extensions.\n" +
+	"Reply directly in plain text when no tool is needed."
+
+// insertToolPromptReminder places the short B3 reminder just before the last
+// user request (before <USER_REQUEST> if present, or before the last user part).
+func insertToolPromptReminder(parts []string, lastUserIdx int) []string {
+	if !toolPromptReminder.Load() || !toolPromptRules.Load() {
+		return parts
+	}
+	if lastUserIdx >= 0 && lastUserIdx < len(parts) {
+		if pos := strings.LastIndex(parts[lastUserIdx], "<USER_REQUEST>"); pos >= 0 {
+			u := parts[lastUserIdx]
+			parts[lastUserIdx] = u[:pos] + shortToolPromptReminder + "\n" + u[pos:]
+			return parts
+		}
+		out := make([]string, 0, len(parts)+1)
+		out = append(out, parts[:lastUserIdx]...)
+		out = append(out, shortToolPromptReminder)
+		out = append(out, parts[lastUserIdx:]...)
+		return out
+	}
+	return append(parts, shortToolPromptReminder)
+}
+
 // toolSpecificRules formats environment instructions for specific active tools (K8).
 func toolSpecificRules(hasWriteFile, hasSearchWeb bool) string {
 	var extra []string
@@ -339,6 +375,7 @@ func messagesToPrompt(messages []Message, tools []Tool, tc toolChoiceMode) strin
 	}
 
 	ids := toolNameIndex{}
+	lastUserIdx := -1
 	for _, msg := range messages {
 		// Contents supplied by the client cannot forge a history marker (T-04).
 		content := neutralizeMarkers(msg.contentText())
@@ -367,9 +404,14 @@ func messagesToPrompt(messages []Message, tools []Tool, tc toolChoiceMode) strin
 			parts = append(parts, "[Tool result for "+safeLabel(ids.toolResultLabel(msg))+"]: "+content)
 		default:
 			if content != "" {
+				lastUserIdx = len(parts)
 				parts = append(parts, content)
 			}
 		}
+	}
+
+	if len(tools) > 0 && tc.mode != "none" {
+		parts = insertToolPromptReminder(parts, lastUserIdx)
 	}
 
 	return joinNonEmpty(parts, "\n\n")
