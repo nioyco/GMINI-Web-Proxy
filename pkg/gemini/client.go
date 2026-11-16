@@ -851,11 +851,13 @@ func (c *Client) clientCancelled(ctx context.Context, met *CallMetrics, start ti
 // StreamHandlers receives the incremental output of a streamed generation. Either
 // handler may be nil.
 type StreamHandlers struct {
-	Text     func(delta string)                // answer text
-	Thought  func(delta string)                // model "thinking" text, when the backend streams it
-	Status   func(text string)                 // Google progress status from body[2]["7"] (K11)
-	Identity func(servedID, servedName string) // reported as soon as position 39 is read
-	Progress func(textBytes, thoughtBytes int) // incremental bytes received and heartbeat
+	Text         func(delta string)                // answer text
+	Thought      func(delta string)                // model "thinking" text, when the backend streams it
+	Status       func(text string)                 // Google progress status from body[2]["7"] (K11)
+	InternalTool func(name string)                 // internal Google tool detected in body[11]/body[24][0] (B1)
+	LimitBanner  func(msg string)                  // explicit Google quota/limit banner from body[52] (B1)
+	Identity     func(servedID, servedName string) // reported as soon as position 39 is read
+	Progress     func(textBytes, thoughtBytes int) // incremental bytes received and heartbeat
 }
 
 // GenerateStream sends a prompt and invokes emit for each incremental text delta.
@@ -1003,6 +1005,12 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 			}
 			if ok && fr.status != "" && h.Status != nil {
 				h.Status(fr.status)
+			}
+			if ok && fr.internalTool != "" && h.InternalTool != nil {
+				h.InternalTool(fr.internalTool)
+			}
+			if ok && fr.limitBanner != "" && h.LimitBanner != nil {
+				h.LimitBanner(fr.limitBanner)
 			}
 			if ok && len(fr.thought) > len(prevThought) {
 				delta := runeDelta(prevThought, fr.thought)
@@ -1166,11 +1174,116 @@ const thoughtIndex = 37
 
 // frame is the useful content of one streamed line.
 type frame struct {
-	text     string
-	thought  string
-	status   string      // Google progress status from body[2]["7"] (K11)
-	sizes    map[int]int // first candidate: index → string bytes in that subtree
-	thoughts []int       // sizes of the strings found under the thinking slot, in order
+	text         string
+	thought      string
+	status       string      // Google progress status from body[2]["7"] (K11)
+	internalTool string      // internal Google tool from body[11] or body[24][0] (B1)
+	limitBanner  string      // Google limit banner from body[52] (B1)
+	sizes        map[int]int // first candidate: index → string bytes in that subtree
+	thoughts     []int       // sizes of the strings found under the thinking slot, in order
+}
+
+// googleInternalTools lists tool/extension identifiers emitted by Gemini's own
+// server-side tools in body[24][0] (as opposed to user-declared local tools).
+var googleInternalTools = map[string]bool{
+	"google":                true,
+	"drive":                 true,
+	"drive_mcp":             true,
+	"docs_agent":            true,
+	"context_service_agent": true,
+	"retriever":             true,
+	"gmail":                 true,
+	"calendar":              true,
+	"workspace":             true,
+	"youtube":               true,
+	"maps":                  true,
+	"flights":               true,
+	"hotels":                true,
+}
+
+// parseBody11Extension extracts the invoked Google extension name from body[11]
+// (e.g. [[null, ["google", [null, null, "Google Search", ...], 5]]]).
+func parseBody11Extension(inner2 []any) string {
+	if len(inner2) <= 11 {
+		return ""
+	}
+	cards, ok := inner2[11].([]any)
+	if !ok {
+		return ""
+	}
+	for _, card := range cards {
+		entry, ok := card.([]any)
+		if !ok || len(entry) < 2 {
+			continue
+		}
+		ext, ok := entry[1].([]any)
+		if !ok || len(ext) == 0 {
+			continue
+		}
+		id, _ := ext[0].(string)
+		if meta, ok := indexAny(ext, 1).([]any); ok {
+			if label, ok := indexAny(meta, 2).(string); ok && strings.TrimSpace(label) != "" {
+				return strings.TrimSpace(label)
+			}
+		}
+		if strings.TrimSpace(id) != "" {
+			return strings.TrimSpace(id)
+		}
+	}
+	return ""
+}
+
+// parseBody24ToolCalls extracts the first internal Google tool call from
+// body[24][0] (e.g. [["retriever", "expand_skills", 2]]). Local tools declared
+// by the client (such as run_command, read_file, manage_task) are ignored.
+func parseBody24ToolCalls(inner2 []any) string {
+	if len(inner2) <= 24 {
+		return ""
+	}
+	b24, ok := inner2[24].([]any)
+	if !ok || len(b24) == 0 {
+		return ""
+	}
+	calls, ok := b24[0].([]any)
+	if !ok {
+		return ""
+	}
+	for _, c := range calls {
+		entry, ok := c.([]any)
+		if !ok || len(entry) == 0 {
+			continue
+		}
+		name, _ := entry[0].(string)
+		name = strings.TrimSpace(name)
+		if name == "" || !googleInternalTools[strings.ToLower(name)] {
+			continue
+		}
+		if action, ok := indexAny(entry, 1).(string); ok && strings.TrimSpace(action) != "" {
+			return name + ":" + strings.TrimSpace(action)
+		}
+		return name
+	}
+	return ""
+}
+
+// parseBody52Limit extracts Google's explicit quota/limit banner from body[52]
+// (e.g. [["Limit reached. Continuing with Flash-Lite."], ...]).
+func parseBody52Limit(inner2 []any) string {
+	if len(inner2) <= 52 {
+		return ""
+	}
+	b52, ok := inner2[52].([]any)
+	if !ok || len(b52) == 0 {
+		return ""
+	}
+	first, ok := b52[0].([]any)
+	if !ok || len(first) == 0 {
+		return ""
+	}
+	if msg, ok := first[0].(string); ok {
+		return strings.TrimSpace(msg)
+	}
+	return ""
 }
 
 // parseBody2Status extracts Google's internal tool progress text from body[2]["7"]
@@ -1227,15 +1340,22 @@ func parseFrame(line string) (frame, bool) {
 		return frame{}, false
 	}
 	status := parseBody2Status(inner2)
+	internalTool := parseBody11Extension(inner2)
+	if t24 := parseBody24ToolCalls(inner2); t24 != "" && internalTool == "" {
+		internalTool = t24
+	}
+	limitBanner := parseBody52Limit(inner2)
 	var cands []any
 	if len(inner2) > 4 {
 		cands, _ = inner2[4].([]any)
 	}
-	if len(cands) == 0 && status == "" {
+	if len(cands) == 0 && status == "" && internalTool == "" && limitBanner == "" {
 		return frame{}, false
 	}
 	var fr frame
 	fr.status = status
+	fr.internalTool = internalTool
+	fr.limitBanner = limitBanner
 	for _, part := range cands {
 		ps, ok := part.([]any)
 		if !ok {

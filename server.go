@@ -636,11 +636,13 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	defer cancel(nil)
 
 	type event struct {
-		text       string
-		thought    string
-		status     string
-		servedID   string
-		servedName string
+		text         string
+		thought      string
+		status       string
+		internalTool string
+		limitBanner  string
+		servedID     string
+		servedName   string
 	}
 	events := make(chan event, 256)
 	done := make(chan error, 1)
@@ -652,8 +654,10 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	}
 	ri := reqFrom(ctx)
 	h := gemini.StreamHandlers{
-		Text:   func(d string) { push(event{text: d}) },
-		Status: func(st string) { push(event{status: st}) },
+		Text:         func(d string) { push(event{text: d}) },
+		Status:       func(st string) { push(event{status: st}) },
+		InternalTool: func(name string) { push(event{internalTool: name}) },
+		LimitBanner:  func(msg string) { push(event{limitBanner: msg}) },
 		Identity: func(servedID, servedName string) {
 			push(event{servedID: servedID, servedName: servedName})
 		},
@@ -737,6 +741,28 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	}
 
 	handle := func(e event) bool {
+		if e.internalTool != "" {
+			if ri != nil {
+				ri.setInternalTool(e.internalTool)
+				if !ri.internalTool.Swap(true) {
+					s.stats.internalToolDetected.Add(1)
+				}
+			} else {
+				s.stats.internalToolDetected.Add(1)
+			}
+			return true
+		}
+		if e.limitBanner != "" {
+			if ri != nil {
+				ri.setLimitBanner(e.limitBanner)
+				if !ri.limitBannerHit.Swap(true) {
+					s.stats.limitBannerDetected.Add(1)
+				}
+			} else {
+				s.stats.limitBannerDetected.Add(1)
+			}
+			return true
+		}
 		if apiconv.IsInternalToolSignal(e.thought) || apiconv.IsInternalToolSignal(e.text) {
 			if ri != nil && !ri.internalTool.Swap(true) {
 				s.stats.internalToolDetected.Add(1)

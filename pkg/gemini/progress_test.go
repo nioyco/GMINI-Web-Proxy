@@ -209,3 +209,69 @@ func TestGenerateStreamEventsEmitsStatus(t *testing.T) {
 		t.Fatalf("text = %q", gotText.String())
 	}
 }
+
+func wrbBodyLine(inner []any) string {
+	ib, _ := json.Marshal(inner)
+	line, _ := json.Marshal([]any{[]any{"wrb.fr", nil, string(ib)}})
+	return string(line) + strings.Repeat(" ", 60) + "\n"
+}
+
+func TestParseFrameBody11Body24Body52AndTolerant(t *testing.T) {
+	// body[11]: Google Search extension card
+	inner11 := make([]any, 12)
+	inner11[11] = []any{[]any{nil, []any{"google", []any{nil, nil, "Google Search"}, 5}}}
+	fr, ok := parseFrame(wrbBodyLine(inner11))
+	if !ok || fr.internalTool != "Google Search" {
+		t.Fatalf("body[11] got (%+v, %v), want internalTool='Google Search'", fr, ok)
+	}
+
+	// body[24][0]: internal Google tool vs local tool
+	inner24 := make([]any, 25)
+	inner24[24] = []any{[]any{
+		[]any{"run_command", nil, 2},
+		[]any{"manage_task", "status", 2},
+		[]any{"retriever", "expand_skills", 2},
+	}}
+	fr, ok = parseFrame(wrbBodyLine(inner24))
+	if !ok || fr.internalTool != "retriever:expand_skills" {
+		t.Fatalf("body[24][0] got (%+v, %v), want internalTool='retriever:expand_skills'", fr, ok)
+	}
+
+	// body[24][0] with ONLY local tools must NOT trigger internalTool
+	innerLocal := make([]any, 25)
+	innerLocal[24] = []any{[]any{
+		[]any{"run_command", nil, 2},
+		[]any{"read_file", nil, 2},
+		[]any{"manage_task", "status", 2},
+	}}
+	if fr, ok := parseFrame(wrbBodyLine(innerLocal)); ok && fr.internalTool != "" {
+		t.Fatalf("local tools triggered internalTool: %+v", fr)
+	}
+
+	// body[52]: limit banner
+	inner52 := make([]any, 53)
+	inner52[52] = []any{[]any{"Limit reached. Continuing with Flash-Lite."}}
+	fr, ok = parseFrame(wrbBodyLine(inner52))
+	if !ok || fr.limitBanner != "Limit reached. Continuing with Flash-Lite." {
+		t.Fatalf("body[52] got (%+v, %v), want limitBanner", fr, ok)
+	}
+
+	// Unexpected shapes must not panic or misreport
+	for _, bad := range [][]any{
+		make([]any, 12),
+		{nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "not-a-list"},
+		make([]any, 25),
+		make([]any, 53),
+	} {
+		if len(bad) > 24 && bad[24] == nil {
+			bad[24] = "not-a-list"
+		}
+		if len(bad) > 52 && bad[52] == nil {
+			bad[52] = []any{"not-a-nested-list"}
+		}
+		fr, ok := parseFrame(wrbBodyLine(bad))
+		if ok && (fr.internalTool != "" || fr.limitBanner != "") {
+			t.Errorf("unexpected shape produced %+v", fr)
+		}
+	}
+}

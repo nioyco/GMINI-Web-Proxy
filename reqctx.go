@@ -61,18 +61,21 @@ type reqInfo struct {
 	echoFabricated atomic.Int64
 	refusal        atomic.Bool
 	internalTool   atomic.Bool
+	limitBannerHit atomic.Bool
 	met            gemini.CallMetrics // upstream timing/size, filled by the gemini client
 
-	// In-flight tracking (K7, K8, K9)
-	inFlightMu      sync.RWMutex
-	servedID        string
-	servedName      string
-	inFlightVerdict string
-	thoughtBytes    int
-	textBytes       int
-	sentBytes       int
-	lastFrameTime   time.Time
-	statusNote      string
+	// In-flight tracking (K7, K8, K9, B1)
+	inFlightMu       sync.RWMutex
+	servedID         string
+	servedName       string
+	inFlightVerdict  string
+	thoughtBytes     int
+	textBytes        int
+	sentBytes        int
+	lastFrameTime    time.Time
+	statusNote       string
+	internalToolName string
+	limitBanner      string
 }
 
 func (ri *reqInfo) setServed(id, name, verdict string) {
@@ -131,7 +134,29 @@ func (ri *reqInfo) setStatusNote(note string) {
 	ri.inFlightMu.Unlock()
 }
 
-// InFlightRequest summarizes one request currently in progress (K7, K8, K9).
+func (ri *reqInfo) setInternalTool(name string) {
+	if ri == nil || name == "" {
+		return
+	}
+	ri.inFlightMu.Lock()
+	if ri.internalToolName == "" {
+		ri.internalToolName = name
+	}
+	ri.inFlightMu.Unlock()
+}
+
+func (ri *reqInfo) setLimitBanner(msg string) {
+	if ri == nil || msg == "" {
+		return
+	}
+	ri.inFlightMu.Lock()
+	if ri.limitBanner == "" {
+		ri.limitBanner = msg
+	}
+	ri.inFlightMu.Unlock()
+}
+
+// InFlightRequest summarizes one request currently in progress (K7, K8, K9, B1).
 type InFlightRequest struct {
 	ID              string  `json:"id"`
 	Model           string  `json:"model"`
@@ -145,6 +170,8 @@ type InFlightRequest struct {
 	SentBytes       int     `json:"sent_bytes"`
 	LastFrameAgeSec float64 `json:"last_frame_age_sec"`
 	StatusNote      string  `json:"status_note,omitempty"`
+	InternalTool    string  `json:"internal_tool,omitempty"`
+	LimitBanner     string  `json:"limit_banner,omitempty"`
 }
 
 func (ri *reqInfo) inFlightSnapshot(now time.Time) InFlightRequest {
@@ -174,6 +201,8 @@ func (ri *reqInfo) inFlightSnapshot(now time.Time) InFlightRequest {
 		SentBytes:       ri.sentBytes,
 		LastFrameAgeSec: lastAge,
 		StatusNote:      ri.statusNote,
+		InternalTool:    ri.internalToolName,
+		LimitBanner:     ri.limitBanner,
 	}
 }
 
@@ -213,6 +242,7 @@ type statsCounters struct {
 	toolCallUnparsed     atomic.Int64
 	toolNameInferred     atomic.Int64
 	internalToolDetected atomic.Int64
+	limitBannerDetected  atomic.Int64
 	earlyStop            atomic.Int64
 	earlyStopMarker      atomic.Int64
 	earlyStopSize        atomic.Int64
