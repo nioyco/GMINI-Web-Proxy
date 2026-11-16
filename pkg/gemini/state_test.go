@@ -435,3 +435,57 @@ func TestRunningClientHotReloadsCookieAndStateFile(t *testing.T) {
 		t.Fatalf("state-only hot reload missed: at=%q url=%q", gotAT, gotURL)
 	}
 }
+
+func TestN8_CatalogRestoredAcrossSessionChangeWithin7Days(t *testing.T) {
+	dir := t.TempDir()
+	var log callLog
+	c1, _ := stateClient(t, dir, sessionRT(t, &log))
+	c1.CheckAuth(context.Background())
+	if err := c1.fetchModels(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Switch to a different Google session (different SAPISID).
+	if err := os.WriteFile(filepath.Join(dir, "cookie.txt"), []byte("SAPISID=new_session; __Secure-1PSIDTS=ts2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Case 1: catalog < 24h old -> restored across session change, token NOT restored.
+	c2, _ := stateClient(t, dir, sessionRT(t, &log))
+	r := c2.RestoreState()
+	if r.SessionFresh || c2.Authenticated() {
+		t.Fatalf("token must not be restored across session change: %+v auth=%v", r, c2.Authenticated())
+	}
+	if !r.CatalogRestored || !r.CatalogFresh || len(c2.ModelNames()) != 2 {
+		t.Fatalf("expected <24h catalog restored across session change, got %+v models=%v", r, c2.ModelNames())
+	}
+
+	// Case 2: catalog 3 days old (< 7 days, >= 24h) -> CatalogRestored=true, CatalogFresh=false.
+	raw, _ := os.ReadFile(c1.cfg.StateFile)
+	var st persistedState
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatal(err)
+	}
+	st.ModelsAt = time.Now().Add(-72 * time.Hour)
+	b, _ := json.Marshal(st)
+	if err := os.WriteFile(c1.cfg.StateFile, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c3, _ := stateClient(t, dir, sessionRT(t, &log))
+	r3 := c3.RestoreState()
+	if !r3.CatalogRestored || r3.CatalogFresh || len(c3.ModelNames()) != 2 {
+		t.Fatalf("expected 3d catalog restored with CatalogFresh=false, got %+v models=%v", r3, c3.ModelNames())
+	}
+
+	// Case 3: catalog 8 days old (>= 7 days) -> NOT restored.
+	st.ModelsAt = time.Now().Add(-8 * 24 * time.Hour)
+	b, _ = json.Marshal(st)
+	if err := os.WriteFile(c1.cfg.StateFile, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c4, _ := stateClient(t, dir, sessionRT(t, &log))
+	r4 := c4.RestoreState()
+	if r4.CatalogRestored || r4.CatalogFresh || len(c4.ModelNames()) != 0 {
+		t.Fatalf("expected >=7d catalog NOT restored, got %+v models=%v", r4, c4.ModelNames())
+	}
+}

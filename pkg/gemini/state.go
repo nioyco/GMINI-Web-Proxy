@@ -16,6 +16,10 @@ import (
 // /app reload and one new attempt (A6).
 const DefaultStateMaxAge = 24 * time.Hour
 
+// DefaultCatalogMaxRestoreAge is the maximum age of a persisted model catalog
+// restored at startup (even across a session change, N8).
+const DefaultCatalogMaxRestoreAge = 7 * 24 * time.Hour
+
 // stateVersion is the format version of the state file.
 const stateVersion = 1
 
@@ -133,10 +137,13 @@ type StateRestore struct {
 	// SessionFresh: a token younger than StateMaxAge for the configured session
 	// was restored; the startup /app load can be skipped.
 	SessionFresh bool
-	// CatalogRestored: a catalog was restored (source "persisted"); CatalogAt is
-	// the time it was fetched from Google.
+	// CatalogRestored: a catalog (< 7 days) was restored (source "persisted");
+	// CatalogAt is the time it was fetched from Google.
 	CatalogRestored bool
-	CatalogAt       time.Time
+	// CatalogFresh: the restored catalog is younger than 24 h, so startup must
+	// not send a batchexecute listModels call.
+	CatalogFresh bool
+	CatalogAt    time.Time
 }
 
 // RestoreState loads the state file (no Google call). The token is restored
@@ -252,6 +259,25 @@ func (c *Client) maybeReloadExternalState(cookie string, cookieChanged bool) {
 	c.log.Info("session state hot-reloaded from disk", "token_age_sec", ageSeconds(st.AtAt))
 }
 
+func (c *Client) restoreCatalog(st persistedState) (bool, time.Time) {
+	if len(st.Models) == 0 || st.ModelsAt.IsZero() || time.Since(st.ModelsAt) >= DefaultCatalogMaxRestoreAge {
+		return false, time.Time{}
+	}
+	c.storeModels(st.Models, "persisted")
+	c.modelMu.Lock()
+	c.catalogAt = st.ModelsAt
+	for _, w := range st.Withdrawn {
+		if _, listed := c.models[w.Model.Name]; !listed && w.Model.Name != "" {
+			if c.withdrawn == nil {
+				c.withdrawn = map[string]WithdrawnModel{}
+			}
+			c.withdrawn[w.Model.Name] = w
+		}
+	}
+	c.modelMu.Unlock()
+	return true, st.ModelsAt
+}
+
 func (c *Client) RestoreState() StateRestore {
 	var out StateRestore
 	if !c.stateEnabled() {
@@ -261,30 +287,19 @@ func (c *Client) RestoreState() StateRestore {
 	if !ok {
 		return out
 	}
+	out.CatalogRestored, out.CatalogAt = c.restoreCatalog(st)
+	out.CatalogFresh = out.CatalogRestored && time.Since(out.CatalogAt) < DefaultModelsRefreshInterval
+
 	cookie, _ := c.currentCookieDirect()
 	if fp := sessionFingerprint(cookie); fp == "" || fp != st.Session {
-		c.log.Warn("session state ignored: it belongs to another session (cookie changed)")
+		c.log.Warn("session state token ignored: it belongs to another session (cookie changed)",
+			"catalog_restored", out.CatalogRestored, "catalog_age_sec", ageSeconds(out.CatalogAt))
 		return out
 	}
 	out.SessionFresh = c.applyRestoredSession(cookie, st, mtime, false)
-	if len(st.Models) > 0 && !st.ModelsAt.IsZero() {
-		c.storeModels(st.Models, "persisted")
-		c.modelMu.Lock()
-		c.catalogAt = st.ModelsAt
-		for _, w := range st.Withdrawn {
-			if _, listed := c.models[w.Model.Name]; !listed && w.Model.Name != "" {
-				if c.withdrawn == nil {
-					c.withdrawn = map[string]WithdrawnModel{}
-				}
-				c.withdrawn[w.Model.Name] = w
-			}
-		}
-		c.modelMu.Unlock()
-		out.CatalogRestored, out.CatalogAt = true, st.ModelsAt
-	}
 	c.log.Info("session state restored", "session_fresh", out.SessionFresh,
 		"token_age_sec", ageSeconds(st.AtAt), "catalog_restored", out.CatalogRestored,
-		"catalog_age_sec", ageSeconds(st.ModelsAt))
+		"catalog_age_sec", ageSeconds(out.CatalogAt))
 	return out
 }
 

@@ -245,3 +245,87 @@ func TestStartupWithBrowserScriptStateSkipsApp(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestN8_StartupSkipsCatalogCallWhenUnder24hEvenOnNewSession(t *testing.T) {
+	dir := t.TempDir()
+	cfg := startupConfig(t, dir)
+	oldSum := sha256.Sum256([]byte("old_sapisid"))
+	oldFP := hex.EncodeToString(oldSum[:])[:16]
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// State written 2h ago under a different session, containing 4 models.
+	twoHoursAgo := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	raw, err := json.Marshal(map[string]any{
+		"version":             1,
+		"saved_at":            now,
+		"session_fingerprint": oldFP,
+		"at":                  "OLD_AT",
+		"at_at":               twoHoursAgo,
+		"bl":                  "boq_old",
+		"bl_at":               twoHoursAgo,
+		"models": []map[string]any{
+			{"Name": "gemini-quick-answers", "ModelID": "8c46e95b1a07cecc"},
+			{"Name": "gemini-everyday-help", "ModelID": "56fdd199312815e2"},
+			{"Name": "gemini-detailed-research", "ModelID": "e6fa609c3fa255c0"},
+			{"Name": "gemini-most-complex-work", "ModelID": "95a4c0abcba24364"},
+		},
+		"models_at":     twoHoursAgo,
+		"models_source": "dynamic",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.Gemini.StateFile, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, sim := startupClient(t, cfg)
+	_, _ = startSession(context.Background(), cfg, c, testLogger())
+	if sim.get("batch") != 0 {
+		t.Fatalf("expected 0 batchexecute calls at startup with <24h catalog, got %d", sim.get("batch"))
+	}
+	if len(c.ModelNames()) != 4 {
+		t.Fatalf("expected 4 restored models, got %v", c.ModelNames())
+	}
+
+	// Catalog 3 days old (< 7d, >= 24h) + batchexecute blocked (429): keeps all 4 models.
+	threeDaysAgo := time.Now().Add(-72 * time.Hour).UTC().Format(time.RFC3339)
+	rawOld, _ := json.Marshal(map[string]any{
+		"version":             1,
+		"saved_at":            now,
+		"session_fingerprint": oldFP,
+		"models": []map[string]any{
+			{"Name": "gemini-quick-answers", "ModelID": "8c46e95b1a07cecc"},
+			{"Name": "gemini-everyday-help", "ModelID": "56fdd199312815e2"},
+			{"Name": "gemini-detailed-research", "ModelID": "e6fa609c3fa255c0"},
+			{"Name": "gemini-most-complex-work", "ModelID": "95a4c0abcba24364"},
+		},
+		"models_at":     threeDaysAgo,
+		"models_source": "dynamic",
+	})
+	if err := os.WriteFile(cfg.Gemini.StateFile, rawOld, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := gemini.New(cfg.Gemini, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var batchCalls int
+	c2.SetTransport(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/app") {
+			return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(appPage)), Request: r}, nil
+		}
+		if strings.Contains(r.URL.Path, "batchexecute") {
+			batchCalls++
+			return &http.Response{StatusCode: 429, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("sorry")), Request: r}, nil
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+	}))
+	_, _ = startSession(context.Background(), cfg, c2, testLogger())
+	if batchCalls != 1 {
+		t.Fatalf("expected 1 startup batchexecute attempt for >24h catalog, got %d", batchCalls)
+	}
+	if len(c2.ModelNames()) != 4 || c2.ModelsSourceLabel() != "persisted" {
+		t.Fatalf("expected 4 persisted models retained on block, got %v (%q)", c2.ModelNames(), c2.ModelsSourceLabel())
+	}
+}

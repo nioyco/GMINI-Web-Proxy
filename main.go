@@ -146,9 +146,9 @@ func startSession(ctx context.Context, cfg *Config, client *gemini.Client, logge
 		client.StartupRotate(ctx)
 		authStatus = fmt.Sprintf("%s (auto-refresh %dm)", authStatus, cfg.CookieRefresh)
 	}
-	// The catalog is fetched at startup unless one was restored for a recent
-	// session (the catalog loop refreshes it when due).
-	if !restored.SessionFresh || !restored.CatalogRestored {
+	// The catalog is fetched at startup only when no recent (<24h) catalog was
+	// restored (even across a session change; the catalog loop refreshes when due).
+	if !restored.CatalogFresh {
 		client.ResolveModels(ctx)
 	}
 	return authStatus, refresh

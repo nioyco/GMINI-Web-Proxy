@@ -89,42 +89,61 @@ func (m *AvailableModel) headers(reqUUID string) map[string]string {
 func (c *Client) ResolveModel(name string) (*AvailableModel, error) {
 	if name == "" {
 		if m := c.defaultModel(); m != nil {
+			if m.ModelID == "" && c.ModelsSourceLabel() == "fallback" {
+				if km, ok := knownFallbackModels[m.Name]; ok {
+					cp := km
+					return &cp, nil
+				}
+			}
 			return m, nil
 		}
 		return nil, errors.New("no models available")
 	}
 	c.modelMu.Lock()
 	m, ok := c.models[name]
+	src := c.modelsSource
 	c.modelMu.Unlock()
-	if !ok {
-		c.modelMu.Lock()
-		wd, was := c.withdrawn[name]
-		shouldWarn := false
-		if was {
-			if c.absentWarnAt == nil {
-				c.absentWarnAt = map[string]time.Time{}
-			}
-			if last, seen := c.absentWarnAt[name]; !seen || time.Since(last) >= absentModelWarnEvery {
-				c.absentWarnAt[name] = time.Now()
-				shouldWarn = true
+	if ok {
+		if m.ModelID == "" && src == "fallback" {
+			if km, ok := knownFallbackModels[name]; ok {
+				cp := km
+				return &cp, nil
 			}
 		}
-		c.modelMu.Unlock()
-		if was {
-			// The catalogue Google returns can shrink without the model being
-			// refused (2026-11-15: one model listed while the web page offered
-			// four and the usage was at 1 %). The request is sent with the last
-			// known id; the reply itself says which model answered.
-			if shouldWarn {
-				c.log.Warn("model absent from the last catalogue; sending the request with its last known id",
-					"model", name, "model_id", wd.Model.ModelID, "absent_since", wd.Since.Format("15:04"))
-			}
-			m := wd.Model
-			return &m, nil
-		}
-		return nil, fmt.Errorf("unknown model: %q", name)
+		return m, nil
 	}
-	return m, nil
+	c.modelMu.Lock()
+	wd, was := c.withdrawn[name]
+	shouldWarn := false
+	if was {
+		if c.absentWarnAt == nil {
+			c.absentWarnAt = map[string]time.Time{}
+		}
+		if last, seen := c.absentWarnAt[name]; !seen || time.Since(last) >= absentModelWarnEvery {
+			c.absentWarnAt[name] = time.Now()
+			shouldWarn = true
+		}
+	}
+	c.modelMu.Unlock()
+	if was {
+		// The catalogue Google returns can shrink without the model being
+		// refused (2026-11-15: one model listed while the web page offered
+		// four and the usage was at 1 %). The request is sent with the last
+		// known id; the reply itself says which model answered.
+		if shouldWarn {
+			c.log.Warn("model absent from the last catalogue; sending the request with its last known id",
+				"model", name, "model_id", wd.Model.ModelID, "absent_since", wd.Since.Format("15:04"))
+		}
+		m := wd.Model
+		return &m, nil
+	}
+	if src == "fallback" {
+		if km, ok := knownFallbackModels[name]; ok {
+			cp := km
+			return &cp, nil
+		}
+	}
+	return nil, fmt.Errorf("unknown model: %q", name)
 }
 
 // ResolveModelOrDefault resolves a model name, falling back to the configured
@@ -495,6 +514,32 @@ func (c *Client) dynamicModelsWithMeta(ctx context.Context) ([]*AvailableModel, 
 		return nil, 0, fmt.Errorf("%s: wrb.fr entry not found in response", listModelsRPC)
 	}
 	return parseModelsWithMeta(inner)
+}
+
+// knownFallbackModels holds the four known Gemini web slugs with their last
+// observed model ids and mode codes so requests remain usable in fallback mode
+// when the startup catalog call fails or is blocked (N8).
+var knownFallbackModels = map[string]AvailableModel{
+	"gemini-quick-answers": {
+		Name: "gemini-quick-answers", ModelID: "8c46e95b1a07cecc",
+		DisplayName: "Fast", Description: "3.5 Flash-Lite",
+		Capacity: 2, CapacityField: 12, ModeCode: 6,
+	},
+	"gemini-everyday-help": {
+		Name: "gemini-everyday-help", ModelID: "56fdd199312815e2",
+		DisplayName: "Thinking", Description: "4 Hydrogen",
+		Capacity: 2, CapacityField: 12, ModeCode: 1,
+	},
+	"gemini-detailed-research": {
+		Name: "gemini-detailed-research", ModelID: "e6fa609c3fa255c0",
+		DisplayName: "Pro", Description: "3.1 Pro",
+		Capacity: 2, CapacityField: 12, ModeCode: 3,
+	},
+	"gemini-most-complex-work": {
+		Name: "gemini-most-complex-work", ModelID: "95a4c0abcba24364",
+		DisplayName: "Code & Analysis", Description: "4 Argon",
+		Capacity: 2, CapacityField: 12, ModeCode: 8,
+	},
 }
 
 // fallbackModels returns the model set used when the dynamic list cannot be

@@ -1,7 +1,9 @@
 package gemini
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
 	"testing"
 )
 
@@ -239,5 +241,43 @@ func TestSetModels(t *testing.T) {
 	names := c.ModelNames()
 	if len(names) != 3 || names[0] != "gemini-3.5-flash" {
 		t.Errorf("names = %v", names)
+	}
+}
+
+func TestN8_FallbackKnownModelsUsable(t *testing.T) {
+	cfg := testConfig()
+	cfg.DefaultModel = "gemini-detailed-research"
+	c, err := New(cfg, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetTransport(rtFunc(func(r *http.Request) (*http.Response, error) {
+		return resp200(r, ""), nil
+	}))
+	// Unauthenticated startup installs the 1-entry fallback list.
+	c.ResolveModels(context.Background())
+	if c.ModelsSourceLabel() != "fallback" || len(c.ModelNames()) != 1 {
+		t.Fatalf("expected 1-model fallback, got source=%q names=%v", c.ModelsSourceLabel(), c.ModelNames())
+	}
+	want := map[string]struct {
+		id   string
+		mode int
+	}{
+		"gemini-quick-answers":     {id: "8c46e95b1a07cecc", mode: 6},
+		"gemini-everyday-help":     {id: "56fdd199312815e2", mode: 1},
+		"gemini-detailed-research": {id: "e6fa609c3fa255c0", mode: 3},
+		"gemini-most-complex-work": {id: "95a4c0abcba24364", mode: 8},
+	}
+	for name, w := range want {
+		m, err := c.ResolveModel(name)
+		if err != nil {
+			t.Fatalf("ResolveModel(%q) in fallback mode failed: %v", name, err)
+		}
+		if m.ModelID != w.id || m.ModeCode != w.mode {
+			t.Errorf("ResolveModel(%q) = (id=%q, mode=%d), want (id=%q, mode=%d)", name, m.ModelID, m.ModeCode, w.id, w.mode)
+		}
+	}
+	if _, err := c.ResolveModel("gemini-nonexistent"); err == nil {
+		t.Error("expected unknown model error for non-known name")
 	}
 }
