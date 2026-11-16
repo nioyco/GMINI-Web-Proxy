@@ -275,3 +275,39 @@ func TestParseFrameBody11Body24Body52AndTolerant(t *testing.T) {
 		}
 	}
 }
+
+func TestTraceRawFrameTimesMS(t *testing.T) {
+	dir := t.TempDir()
+	c, _ := New(Config{GeminiBL: "bl", RetryAttempts: 1, TraceDir: dir, TraceRaw: true}, nil)
+	c.SetTransport(rtFunc(func(r *http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			defer pw.Close()
+			_, _ = pw.Write([]byte(wrbLine("", "T1")))
+			time.Sleep(15 * time.Millisecond)
+			_, _ = pw.Write([]byte(wrbLine("Hi", "T1")))
+		}()
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: pr, Request: r}, nil
+	}))
+	if err := c.GenerateStreamEvents(context.Background(), GenParams{Prompt: "h"}, StreamHandlers{}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("expected 1 trace file, got %d (err=%v)", len(entries), err)
+	}
+	b, err := os.ReadFile(dir + "/" + entries[0].Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tf traceFile
+	if err := json.Unmarshal(b, &tf); err != nil {
+		t.Fatal(err)
+	}
+	if len(tf.RawFrames) != 2 || len(tf.RawFrameTimesM) != len(tf.RawFrames) {
+		t.Fatalf("raw_frames=%d raw_frame_times_ms=%v", len(tf.RawFrames), tf.RawFrameTimesM)
+	}
+	if tf.RawFrameTimesM[1] < tf.RawFrameTimesM[0] {
+		t.Errorf("timestamps not monotonic: %v", tf.RawFrameTimesM)
+	}
+}

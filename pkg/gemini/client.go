@@ -909,13 +909,14 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 	var runErr error
 	scan := &idScan{}
 	var rawLines []string
+	var rawTimesMS []int64
 	rawBytes := 0
 	sent := false
 	defer func() {
 		met.upstream(t0, respBytes)
 		c.logFrameShape(shape)
 		c.writeTrace(met, p, traceResult{Stream: true, Text: prevText, Thought: prevThought, Err: runErr,
-			Start: t0, Frames: shape.frames, FirstTextMS: shape.firstTextMS, LastFrameMS: shape.lastFrameMS, Raw: rawLines})
+			Start: t0, Frames: shape.frames, FirstTextMS: shape.firstTextMS, LastFrameMS: shape.lastFrameMS, Raw: rawLines, RawTimesMS: rawTimesMS})
 		if !sent {
 			return // nothing was asked of Gemini (cancelled before the call)
 		}
@@ -1004,6 +1005,7 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 			if c.cfg.TraceRaw && c.cfg.TraceDir != "" && rawBytes < traceRawMax {
 				rawBytes += len(line)
 				rawLines = append(rawLines, line)
+				rawTimesMS = append(rawTimesMS, time.Since(t0).Milliseconds())
 			}
 			fr, ok := parseFrame(line)
 			if ok {
