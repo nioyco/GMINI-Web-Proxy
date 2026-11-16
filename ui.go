@@ -103,6 +103,9 @@ type uiModel struct {
 	LastServed          string `json:"last_served"`      // model name stated by Google in the last reply
 	Calls5h             int    `json:"calls_5h"`         // generations sent to Gemini in the last 5 hours
 	MismatchSince       string `json:"mismatch_since,omitempty"`
+	FailureCount        int    `json:"failure_count,omitempty"`
+	FailureSince        string `json:"failure_since,omitempty"`
+	Unresponsive        bool   `json:"unresponsive,omitempty"`
 }
 
 type uiAntigravity struct {
@@ -185,11 +188,20 @@ func (s *Server) uiModels() []uiModel {
 			identByModel[mi.Model] = mi.MismatchSince.UTC().Format(time.RFC3339)
 		}
 	}
+	failByModel := map[string]modelFailureSummary{}
+	for _, mf := range s.modelFailures() {
+		failByModel[mf.Model] = mf
+	}
 	out := make([]uiModel, 0, len(list))
 	for _, m := range list {
+		mf := failByModel[m.Name]
+		var failSince string
+		if !mf.Since.IsZero() {
+			failSince = mf.Since.UTC().Format(time.RFC3339)
+		}
 		u := uiModel{Name: m.Name, ModelID: m.ModelID, DisplayName: m.DisplayName, Description: m.Description,
 			Default: m.Name == def, MedianFirstMS: -1, MedianFirstSignMS: -1, MedianFirstThoughtM: -1, MenuLabel: m.MenuLabel, Family: m.Family,
-			MismatchSince: identByModel[m.Name]}
+			MismatchSince: identByModel[m.Name], FailureCount: mf.Count, FailureSince: failSince, Unresponsive: mf.Unresponsive}
 		var firsts, firstSigns, firstThoughts []int64
 		for _, c := range all {
 			if c.Model != m.Name {

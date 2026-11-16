@@ -189,3 +189,93 @@ func TestN2_OnceAllowsSlowRetryOnceThoughtArrives(t *testing.T) {
 		t.Fatalf("expected retry to finish once thoughts arrived: reasoning=%q content=%q", reasoning, content)
 	}
 }
+
+func TestN3_ModelFailureMemorySkipsRetryAndResetsOnSuccess(t *testing.T) {
+	var calls atomic.Int32
+	var succeed atomic.Bool
+	_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		txt := "I seem to be encountering an error. Can I try something else for you?"
+		if succeed.Load() {
+			txt = "Réponse valide du modèle."
+		}
+		body := fakeStreamServed(txt, "", "56fdd199312815e2", "4 Hydrogen")
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+	}))
+	cfg := testConfig()
+	cfg.UIEnabled = true
+	cfg.StreamToolsProgress = true
+	cfg.StreamThoughts = true
+	cfg.SSEKeepaliveSec = 1
+	cfg.CannedErrorRetry = "once"
+	s := newServer(cfg, client, testLogger())
+	s.keepaliveOverride = 20 * time.Millisecond
+	now := time.Date(2026, 11, 16, 20, 0, 0, 0, time.UTC)
+	s.warnNow = func() time.Time { return now }
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	// Request 1 & 2: both fail (in once mode each triggers 2 calls -> 2 failures recorded).
+	_ = readSSE(t, context.Background(), ts.URL, k9ChatToolsBody)
+	now = now.Add(2 * time.Minute)
+	_ = readSSE(t, context.Background(), ts.URL, k9ChatToolsBody)
+	if calls.Load() != 4 {
+		t.Fatalf("calls after 2 failed requests = %d, want 4", calls.Load())
+	}
+
+	// Request 3 within 15 min: must NOT be blocked, must NOT retry even in once mode (1 call only!).
+	now = now.Add(2 * time.Minute)
+	c3 := readSSE(t, context.Background(), ts.URL, k9ChatToolsBody)
+	assertProgressStream(t, c3)
+	if calls.Load() != 5 {
+		t.Fatalf("calls on 3rd request = %d, want 5 (retry must be skipped after 2 recent failures)", calls.Load())
+	}
+
+	// Verify /_status and /_ui/api/state expose unresponsive=true and count=3.
+	stRec := uiDo(s.handler(), "GET", "/_status", "127.0.0.1:5000", "")
+	var st struct {
+		Failures []modelFailureStatus `json:"model_failures"`
+	}
+	if err := json.Unmarshal(stRec.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Failures) != 1 || !st.Failures[0].Unresponsive || st.Failures[0].ConsecutiveFailures != 3 {
+		t.Fatalf("/_status model_failures = %+v", st.Failures)
+	}
+	uiRec := uiDo(s.handler(), "GET", "/_ui/api/state", "127.0.0.1:5000", s.uiToken)
+	var uiSt struct {
+		Models []uiModel `json:"models"`
+	}
+	if err := json.Unmarshal(uiRec.Body.Bytes(), &uiSt); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, m := range uiSt.Models {
+		if m.Name == "gemini-everyday-help" {
+			found = m.Unresponsive && m.FailureCount == 3 && m.FailureSince != ""
+		}
+	}
+	if !found {
+		t.Fatalf("expected gemini-everyday-help unresponsive in /_ui/api/state: %+v", uiSt.Models)
+	}
+
+	// Success resets the counter to zero.
+	succeed.Store(true)
+	now = now.Add(time.Minute)
+	c4 := readSSE(t, context.Background(), ts.URL, k9ChatToolsBody)
+	content4, _ := sseContentAndReasoning(t, c4)
+	if !strings.Contains(content4, "Réponse valide du modèle.") {
+		t.Fatalf("expected request 4 to succeed (not blocked): %q", content4)
+	}
+	if len(s.modelFailures()) != 0 {
+		t.Fatalf("expected modelFailures cleared after success, got %+v", s.modelFailures())
+	}
+
+	// Failures older than 15 minutes expire naturally.
+	succeed.Store(false)
+	_ = readSSE(t, context.Background(), ts.URL, k9ChatToolsBody)
+	now = now.Add(16 * time.Minute)
+	if s.shouldSkipCannedRetry("gemini-everyday-help") || len(s.modelFailures()) != 0 {
+		t.Fatalf("expected failure older than 15m to expire, got %+v", s.modelFailures())
+	}
+}

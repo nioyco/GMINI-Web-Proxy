@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -56,6 +57,9 @@ type Server struct {
 	suspectWarnMu sync.Mutex
 	suspectWarn   map[string]suspectWarnState
 	warnNow       func() time.Time
+
+	failMemMu sync.Mutex
+	failMem   map[string][]time.Time
 
 	autoRefresh *cookieAutoRefresher
 }
@@ -325,6 +329,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	text, toolCalls := s.finishText(r.Context(), text, toolsActive, req.DeclaredTools())
+	if text != "" || len(toolCalls) > 0 {
+		s.recordModelSuccess(m.Name)
+	}
 
 	if req.Stream {
 		// Tools + stream: emit one chunk carrying the full message, then DONE.
@@ -391,6 +398,9 @@ func (s *Server) streamChat(ctx context.Context, w http.ResponseWriter, cid, mod
 		s.rlog(ctx).Warn("stream interrupted", "err", err)
 		s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+err.Error())), sse.done())
 		return
+	}
+	if acc.Len() > 0 {
+		s.recordModelSuccess(model)
 	}
 	s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkStop(cid, created, model)), sse.done())
 }
@@ -540,7 +550,14 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 		isToolRefusal := !res.released && !isCannedErr && len(declared) > 0 && apiconv.IsUpstreamToolRefusal(res.rawText)
 		if isCannedErr {
 			if normalizeCannedErrorRetry(s.cfg.CannedErrorRetry) != "once" {
+				s.recordModelFailure(model)
 				s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(res.rawText), "action", "off")
+				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
+				return
+			}
+			if s.shouldSkipCannedRetry(model) {
+				s.recordModelFailure(model)
+				s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(res.rawText), "action", "skipped_recent_failures")
 				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
 				return
 			}
@@ -574,6 +591,7 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 					return
 				}
 				if rres.cannedRetryTimedOut || (rres.earlyStopReason == "" && (rres.genErr != nil || rres.rawText == "" || (!rres.released && apiconv.IsUpstreamCannedError(rres.rawText)))) {
+					s.recordModelFailure(model)
 					s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(rres.rawText), "timed_out", rres.cannedRetryTimedOut, "action", "reported")
 					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
 					return
@@ -587,6 +605,7 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 			switch {
 			case bres.out == kaGone:
 				if ctx.Err() == nil && errors.Is(retryCtx.Err(), context.DeadlineExceeded) {
+					s.recordModelFailure(model)
 					s.rlog(ctx).Warn("upstream_canned_error", "timed_out", true, "action", "reported")
 					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
 				}
@@ -594,12 +613,14 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 				s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
 			case bres.err != nil:
 				if ctx.Err() == nil && errors.Is(bres.err, context.DeadlineExceeded) {
+					s.recordModelFailure(model)
 					s.rlog(ctx).Warn("upstream_canned_error", "timed_out", true, "action", "reported")
 					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
 					return
 				}
 				s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+bres.err.Error())), sse.done())
 			case apiconv.IsUpstreamCannedError(bres.text):
+				s.recordModelFailure(model)
 				s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(bres.text), "action", "reported")
 				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
 			default:
@@ -612,6 +633,9 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 					}
 				}
 				text, toolCalls := s.finishText(ctx, bres.text, true, declared)
+				if text != "" || len(toolCalls) > 0 {
+					s.recordModelSuccess(model)
+				}
 				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
 			}
 			return
@@ -709,6 +733,9 @@ func (s *Server) finishStreamProgress(ctx context.Context, sse *sseStream, cid, 
 		}
 	}
 	text, toolCalls := s.finishText(ctx, strings.TrimSpace(res.rawText), true, declared)
+	if text != "" || len(toolCalls) > 0 {
+		s.recordModelSuccess(model)
+	}
 	rest, ok := gate.Rest(text)
 	if !ok {
 		s.rlog(ctx).Warn("progress_text_mismatch", "sent_bytes", len(gate.Sent()), "final_bytes", len(text))
@@ -1294,6 +1321,99 @@ func cannedErrorMessage(model string, p gemini.GenParams) string {
 	return fmt.Sprintf("GMINI : Gemini a renvoyé une erreur interne sur %s (pas une réponse du modèle). Réessayez, ou changez de modèle.", modelDisplayLabel(model, p))
 }
 
+const (
+	modelFailureWindow    = 15 * time.Minute
+	modelFailureThreshold = 2
+)
+
+func (s *Server) currentNow() time.Time {
+	if s.warnNow != nil {
+		return s.warnNow()
+	}
+	return time.Now()
+}
+
+func pruneFailureTimes(ts []time.Time, now time.Time) []time.Time {
+	cutoff := now.Add(-modelFailureWindow)
+	keep := ts[:0]
+	for _, t := range ts {
+		if t.After(cutoff) {
+			keep = append(keep, t)
+		}
+	}
+	return keep
+}
+
+func (s *Server) recordModelFailure(model string) {
+	if model == "" {
+		return
+	}
+	now := s.currentNow()
+	s.failMemMu.Lock()
+	defer s.failMemMu.Unlock()
+	if s.failMem == nil {
+		s.failMem = map[string][]time.Time{}
+	}
+	list := pruneFailureTimes(s.failMem[model], now)
+	list = append(list, now)
+	s.failMem[model] = list
+}
+
+func (s *Server) recordModelSuccess(model string) {
+	if model == "" {
+		return
+	}
+	s.failMemMu.Lock()
+	delete(s.failMem, model)
+	s.failMemMu.Unlock()
+}
+
+func (s *Server) shouldSkipCannedRetry(model string) bool {
+	if model == "" {
+		return false
+	}
+	now := s.currentNow()
+	s.failMemMu.Lock()
+	defer s.failMemMu.Unlock()
+	list := pruneFailureTimes(s.failMem[model], now)
+	if len(list) == 0 {
+		delete(s.failMem, model)
+		return false
+	}
+	s.failMem[model] = list
+	return len(list) >= modelFailureThreshold
+}
+
+type modelFailureSummary struct {
+	Model        string
+	Count        int
+	Since        time.Time
+	Unresponsive bool
+}
+
+func (s *Server) modelFailures() []modelFailureSummary {
+	now := s.currentNow()
+	s.failMemMu.Lock()
+	defer s.failMemMu.Unlock()
+	var out []modelFailureSummary
+	for model, raw := range s.failMem {
+		list := pruneFailureTimes(raw, now)
+		if len(list) == 0 {
+			delete(s.failMem, model)
+			continue
+		}
+		s.failMem[model] = list
+		out = append(out, modelFailureSummary{
+			Model:        model,
+			Count:        len(list),
+			Since:        list[0],
+			Unresponsive: len(list) >= modelFailureThreshold,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })
+	return out
+}
+
 func (s *Server) warnCooldown() time.Duration {
 	if s.cfg.WarnSuspectCooldownMin < 0 {
 		return 0
@@ -1600,6 +1720,9 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	text, toolCalls := s.finishText(r.Context(), text, toolsActive, req.DeclaredTools())
+	if text != "" || len(toolCalls) > 0 {
+		s.recordModelSuccess(m.Name)
+	}
 
 	if req.Stream {
 		sse, ok := openSSE(w)
@@ -1867,6 +1990,9 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	text, toolCalls := s.finishText(r.Context(), text, toolsActive, req.DeclaredTools())
+	if text != "" || len(toolCalls) > 0 {
+		s.recordModelSuccess(m.Name)
+	}
 
 	if req.Stream {
 		// Tools + stream (keepalive disabled): replay the full message as SSE events.

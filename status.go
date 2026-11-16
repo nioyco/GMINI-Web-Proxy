@@ -45,6 +45,14 @@ type statusResponse struct {
 	IgnoredFields       ignoredFields           `json:"ignored_request_fields"`
 	SessionState        sessionState            `json:"session_state"`
 	ModelIdentities     []modelIdentity         `json:"model_identities"`
+	ModelFailures       []modelFailureStatus    `json:"model_failures"`
+}
+
+type modelFailureStatus struct {
+	Model               string  `json:"model"`
+	ConsecutiveFailures int     `json:"consecutive_failures"`
+	Since               *string `json:"since,omitempty"`
+	Unresponsive        bool    `json:"unresponsive"`
 }
 
 // modelIdentity summarizes the latest served-model verdict for one model and
@@ -279,6 +287,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			ServedID:      mi.ServedID,
 			ServedName:    mi.ServedName,
 			LastTime:      rfc3339Ptr(mi.LastTime),
+		})
+	}
+	failures := s.modelFailures()
+	resp.ModelFailures = make([]modelFailureStatus, 0, len(failures))
+	for _, mf := range failures {
+		resp.ModelFailures = append(resp.ModelFailures, modelFailureStatus{
+			Model:               mf.Model,
+			ConsecutiveFailures: mf.Count,
+			Since:               rfc3339Ptr(mf.Since),
+			Unresponsive:        mf.Unresponsive,
 		})
 	}
 	resp.UpstreamParams = s.client.UpstreamParams()
