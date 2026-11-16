@@ -126,7 +126,7 @@ async function load(){
     $("idwarn").style.display="block";
   }else{$("idwarn").style.display="none";$("idwarn").innerHTML="";}
   const ar=s.cookie_auto_refresh||{};
-  const arNext=ar.running?"en cours…":ar.paused?"arrêtée (2 échecs — changer cookie.txt)":!ar.configured?"commande non réglée":!ar.enabled?"désactivée":ar.next_refresh_in_sec!=null?`dans ${age(ar.next_refresh_in_sec)} (${hmShort(ar.next_refresh_at)})`:"—";
+  const arNext=ar.running?"en cours…":ar.paused?"arrêtée (2 échecs — changer cookie.txt)":!ar.configured?"désactivée — ajouter GEMINI_COOKIE_AUTO_REFRESH_MIN et GEMINI_COOKIE_REFRESH_CMD dans .env":!ar.enabled?"désactivée — ajouter GEMINI_COOKIE_AUTO_REFRESH_MIN=90 dans .env":ar.next_refresh_in_sec!=null?`dans ${age(ar.next_refresh_in_sec)} (${hmShort(ar.next_refresh_at)})`:"—";
   const arLast=ar.last_ok==null?"aucun":`${ar.last_ok?"OK":"échec (code "+ar.last_exit_code+")"} · ${dur(ar.last_duration_ms)}`;
   const arBtn=ar.configured?` <button id="ar-toggle" style="padding:2px 8px;font-size:12px">${ar.enabled?"Désactiver":"Activer"}</button>`:"";
   const t=[
