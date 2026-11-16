@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
 )
 
 func TestStatusRequiresKey(t *testing.T) {
@@ -137,5 +139,40 @@ func TestStatusGoogleBlockBlock(t *testing.T) {
 	}
 	if _, ok := st.Counters["google_blocks"]; !ok {
 		t.Errorf("counter google_blocks missing")
+	}
+}
+
+func TestP6_StatusBackgroundCallsBlock(t *testing.T) {
+	s := newTestServer(t, testConfig())
+	rr := httptest.NewRecorder()
+	s.handler().ServeHTTP(rr, newReq(http.MethodGet, "/_status", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	var st struct {
+		BG backgroundCallsStatus `json:"background_calls"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.BG.Total24h != 0 || st.BG.LastAt != nil || st.BG.Label != "aucun depuis le démarrage" {
+		t.Fatalf("initial background_calls = %+v, want none since startup", st.BG)
+	}
+	if st.BG.IdleQuietMin != 10 || st.BG.CookieRotation || st.BG.CatalogRefreshAfterCookie || st.BG.AuthRecovery {
+		t.Fatalf("unexpected defaults in background_calls = %+v", st.BG)
+	}
+
+	// Trigger one allowed background call (e.g. after user activity).
+	s.client.RecordUserActivity()
+	if !s.client.AcquireBackground(gemini.FamilyBatch, "catalog_manual") {
+		t.Fatal("expected AcquireBackground to allow after user activity")
+	}
+	rr2 := httptest.NewRecorder()
+	s.handler().ServeHTTP(rr2, newReq(http.MethodGet, "/_status", nil))
+	if err := json.Unmarshal(rr2.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.BG.Total24h != 1 || st.BG.ByFamily24h["batchexecute"] != 1 || st.BG.LastAt == nil || st.BG.LastFamily != "batchexecute" || st.BG.LastReason != "catalog_manual" {
+		t.Fatalf("after call background_calls = %+v", st.BG)
 	}
 }

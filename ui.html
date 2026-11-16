@@ -135,9 +135,15 @@ async function load(){
   const arRunDis=ar.running||ar.manual_cooldown_sec>0?"disabled":"";
   const arRunLabel=ar.running?"en cours…":ar.manual_cooldown_sec>0?`Actualiser le cookie maintenant (${fmtCooldown(ar.manual_cooldown_sec)})`:"Actualiser le cookie maintenant";
   const arRunBtn=ar.configured?`<div style="margin-top:6px"><button id="ar-run" style="padding:3px 10px;font-size:12px" ${arRunDis}>${esc(arRunLabel)}</button><div class="sub" id="ar-msg">${esc(arRunMsg)}</div></div>`:"";
+  const bg=s.background_calls||{};
+  const bgFam=bg.by_family_24h||{};
+  const bgBreakdown=["accounts","app","batchexecute","generate","other"].filter(f=>bgFam[f]>0).map(f=>`${f} : ${bgFam[f]}`).join(" · ");
+  const bgMain=!bg.last_at?badge("ok","aucun depuis le démarrage"):`${bg.total_24h||0} sur 24 h`+(bgBreakdown?` <span class="sub">(${esc(bgBreakdown)})</span>`:"");
+  const bgSub=(bg.last_at?`<div class="sub">Dernier : ${hm(bg.last_at)}${bg.last_family?" ("+esc(bg.last_family)+(bg.last_reason?", "+esc(bg.last_reason):"")+")":""}</div>`:"")+`<div class="sub">calme : ${bg.idle_quiet_min||0} min · rotation : ${bg.cookie_rotation?"on":"off"} · reprise auth : ${bg.auth_recovery?"on":"off"}${bg.refused_24h?` · refusés (24 h) : ${bg.refused_24h}`:""}</div>`;
   const t=[
     ["Session Google",(!s.authenticated?badge("bad","Non connectée"):ss.session_degraded?badge("warn","Session affaiblie : actualiser le cookie"):badge("ok","Connectée"))+`<div class="sub">Âge du jeton : ${tokAgeHTML}</div><div class="sub">Actualisation auto : ${esc(arNext)}${arBtn}</div>`+(ar.configured?`<div class="sub">Dernier lancement : ${esc(arLast)}</div>`:"")+arRunBtn],
     ["Blocage anti-robot",g.active?badge("bad","Actif, niveau "+g.level):badge("ok","Aucun")+` <span class="sub">${g.total} au total</span>`],
+    ["Appels de fond vers Google",bgMain+bgSub],
     ["Catalogue",`${s.models_count} modèles <span class="sub">${esc(s.models_source)}, ${ss.catalog_age_sec>86400?`<span style="color:var(--warn);font-weight:600">${age(ss.catalog_age_sec)}</span>`:age(ss.catalog_age_sec)}</span>`+(ss.session_degraded?" "+badge("warn","1 modèle ignoré"):"")],
     ["Dernière rotation du cookie",!s.cookie_rotation.enabled?`désactivée (n'a jamais abouti — voir R&D-14)`:((s.cookie_rotation.suspended?badge("warn","Rotation suspendue")+" ":"")+age(s.cookie_rotation.last_success_age_sec)+` <span class="sub">${esc(s.cookie_rotation.last_result||"")}</span>`+(s.cookie_rotation.suspended?`<div class="sub">Âge du jeton (__Secure-1PSIDTS) : ${age(s.cookie_rotation.token_age_sec)} — Le renouvellement automatique est arrêté : relancer le raccourci 7 (choix 2) pour garder la session</div>`:""))],
     ["Requêtes en cours",String(Math.max(0,s.active_requests-1))],

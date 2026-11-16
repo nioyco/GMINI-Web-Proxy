@@ -227,6 +227,12 @@ func TestUISessionDegradedExposedAndCleared(t *testing.T) {
 	if !strings.Contains(wHTML.Body.String(), "désactivée (n'a jamais abouti — voir R&D-14)") {
 		t.Error("ui.html missing disabled rotation message")
 	}
+	if !strings.Contains(wHTML.Body.String(), "Appels de fond vers Google") || !strings.Contains(wHTML.Body.String(), "aucun depuis le démarrage") {
+		t.Error("ui.html missing background calls tile")
+	}
+	if !strings.Contains(wState.Body.String(), `"background_calls":`) {
+		t.Errorf("state missing background_calls: %s", wState.Body.String())
+	}
 	// K5: after the failed manual refresh, cooldown_sec > 0 is returned and
 	// exposed in /_ui/api/state; ui.html shows the remaining delay & disables the button.
 	if !strings.Contains(wRef.Body.String(), `"cooldown_sec":`) || !strings.Contains(wState.Body.String(), `"catalog_refresh_cooldown_sec":`) {

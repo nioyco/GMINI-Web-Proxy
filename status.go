@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
 	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
 	"net/http"
@@ -47,6 +48,21 @@ type statusResponse struct {
 	SessionState        sessionState            `json:"session_state"`
 	ModelIdentities     []modelIdentity         `json:"model_identities"`
 	ModelFailures       []modelFailureStatus    `json:"model_failures"`
+	BackgroundCalls     backgroundCallsStatus   `json:"background_calls"`
+}
+
+type backgroundCallsStatus struct {
+	IdleQuietMin              int            `json:"idle_quiet_min"`
+	CookieRotation            bool           `json:"cookie_rotation"`
+	CatalogRefreshAfterCookie bool           `json:"catalog_refresh_after_cookie"`
+	AuthRecovery              bool           `json:"auth_recovery"`
+	Total24h                  int            `json:"total_24h"`
+	Refused24h                int            `json:"refused_24h"`
+	ByFamily24h               map[string]int `json:"by_family_24h"`
+	LastAt                    *string        `json:"last_at"`
+	LastFamily                string         `json:"last_family,omitempty"`
+	LastReason                string         `json:"last_reason,omitempty"`
+	Label                     string         `json:"label"`
 }
 
 type modelFailureStatus struct {
@@ -314,6 +330,34 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	resp.IgnoredFields = ignoredFields{
 		Note:   "top-level fields received from clients that the proxy parses or forwards nowhere (e.g. temperature, reasoning_effort); counted since start",
 		Counts: s.ignored.snapshot(),
+	}
+	bg := s.client.BackgroundCallStatus()
+	byFam := make(map[string]int, len(bg.ByFamily24h))
+	for k, v := range bg.ByFamily24h {
+		byFam[string(k)] = v
+	}
+	bgLabel := "aucun depuis le démarrage"
+	if !bg.LastAt.IsZero() {
+		bgLabel = fmt.Sprintf("%d sur 24 h", bg.Total24h)
+	}
+	idleQuietMin := s.cfg.IdleQuietMin
+	if s.cfg.Gemini.IdleQuiet < 0 {
+		idleQuietMin = 0
+	} else if idleQuietMin <= 0 {
+		idleQuietMin = int(gemini.DefaultIdleQuiet / time.Minute)
+	}
+	resp.BackgroundCalls = backgroundCallsStatus{
+		IdleQuietMin:              idleQuietMin,
+		CookieRotation:            s.cfg.CookieRotation,
+		CatalogRefreshAfterCookie: s.cfg.CatalogRefreshAfterCookie,
+		AuthRecovery:              s.cfg.AuthRecovery,
+		Total24h:                  bg.Total24h,
+		Refused24h:                bg.Refused24h,
+		ByFamily24h:               byFam,
+		LastAt:                    rfc3339Ptr(bg.LastAt),
+		LastFamily:                string(bg.LastFamily),
+		LastReason:                bg.LastReason,
+		Label:                     bgLabel,
 	}
 	sendJSON(w, http.StatusOK, resp)
 }
