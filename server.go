@@ -293,7 +293,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			if req.Stream {
 				if sse, ok := openSSE(w); ok {
 					if s.cfg.StreamThoughts {
-						_ = sse.data(apiconv.ChatChunkReasoning(cid, time.Now().Unix(), m.Name, "GMINI : actualisation de la session…\n"))
+						_ = sse.data(apiconv.ChatChunkReasoning(cid, time.Now().Unix(), m.Name, "["+s.currentNow().Format("15:04:05")+"] (pas le modèle — attente technique) GMINI : actualisation de la session…\n"))
 					} else {
 						_ = sse.comment("GMINI : actualisation de la session…")
 					}
@@ -499,7 +499,7 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 	}
 	if res.internalToolRetry {
 		if s.cfg.StreamThoughts {
-			if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, "\nGemini a tenté d'utiliser un outil interne : nouvelle tentative avec rappel renforcé…\n")); err != nil {
+			if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, proxyWaitNote(s.currentNow(), "Gemini a tenté d'utiliser un outil interne : nouvelle tentative avec rappel renforcé…"))); err != nil {
 				s.rlog(ctx).Warn("sse write failed", "err", err)
 				return
 			}
@@ -578,7 +578,7 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 			retryTimeout := s.cannedErrorRetryTimeout()
 			s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(res.rawText), "action", "retry_once", "timeout_sec", int(retryTimeout.Seconds()))
 			if s.cfg.StreamThoughts {
-				if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, "\nGemini a renvoyé une erreur interne : nouvelle tentative à l'identique…\n")); err != nil {
+				if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, proxyWaitNote(s.currentNow(), "Gemini a renvoyé une erreur interne : nouvelle tentative à l'identique…"))); err != nil {
 					s.rlog(ctx).Warn("sse write failed", "err", err)
 					return
 				}
@@ -659,11 +659,11 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 			// Nothing of it reached the client: try once more with corrective note.
 			s.rlog(ctx).Warn("upstream_glitch", "bytes", len(res.rawText), "tool_refusal", isToolRefusal, "action", "retry_once")
 			if s.cfg.StreamThoughts {
-				retryMsg := "\nGemini a renvoyé un message de service au lieu de traiter la demande : nouvelle tentative…\n"
+				retryMsg := "Gemini a renvoyé un message de service au lieu de traiter la demande : nouvelle tentative…"
 				if isToolRefusal {
-					retryMsg = "\nGemini affirme ne pas avoir d'outils locaux : nouvelle tentative avec consigne corrective…\n"
+					retryMsg = "Gemini affirme ne pas avoir d'outils locaux : nouvelle tentative avec consigne corrective…"
 				}
-				if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, retryMsg)); err != nil {
+				if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, proxyWaitNote(s.currentNow(), retryMsg))); err != nil {
 					s.rlog(ctx).Warn("sse write failed", "err", err)
 					return
 				}
@@ -891,7 +891,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		}
 		if hooks != nil && hooks.progressive && s.cfg.StreamThoughts {
 			res.forwarded = true
-			return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, "\n"+note+"\n")))
+			return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, proxyWaitNote(s.currentNow(), note))))
 		}
 		return true
 	}
@@ -958,7 +958,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			}
 			if hooks != nil && hooks.progressive && s.cfg.StreamThoughts {
 				res.forwarded = true
-				if !write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, "\nGemini lance un outil interne ; la réponse peut tarder.\n"))) {
+				if !write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, proxyWaitNote(s.currentNow(), "Gemini lance un outil interne ; la réponse peut tarder.")))) {
 					return false
 				}
 			}
@@ -1045,7 +1045,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 				lastStatusText = e.status
 				lastStatusAt = time.Now()
 				res.forwarded = true
-				return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, "\nGoogle : "+e.status+"\n")))
+				return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, proxyWaitNote(s.currentNow(), "Google : "+e.status))))
 			}
 			return true
 		}
@@ -1188,7 +1188,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			}
 			if hooks != nil && hooks.progressive && s.cfg.StreamThoughts {
 				res.forwarded = true
-				return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, msg+"\n")))
+				return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, proxyWaitNote(s.currentNow(), msg))))
 			}
 			return true
 		}
@@ -1200,9 +1200,9 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			return true
 		}
 		lastHeld = held
-		note := fmt.Sprintf("Préparation d'un appel d'outil… %d Ko reçus (%s)\n", (held+512)/1024, time.Since(start).Round(time.Second))
+		note := fmt.Sprintf("Préparation d'un appel d'outil… %d Ko reçus (%s)", (held+512)/1024, time.Since(start).Round(time.Second))
 		res.forwarded = true
-		return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, note)))
+		return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, proxyWaitNote(s.currentNow(), note))))
 	}
 	// If thoughts have arrived but no answer text follows for SilenceWarningSec,
 	// warn the user that Gemini may be executing an internal tool.
@@ -1215,14 +1215,14 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			if age >= silenceThreshold {
 				silenceWarned = true
 				sec := int(age.Round(time.Second).Seconds())
-				note := fmt.Sprintf("\nGemini ne répond plus depuis %d s ; il utilise peut-être un outil interne (recherche web ou génération d'artifact).\n", sec)
+				note := fmt.Sprintf("Gemini ne répond plus depuis %d s ; il utilise peut-être un outil interne (recherche web ou génération d'artifact).", sec)
 				if ri != nil {
 					ri.setStatusNote(fmt.Sprintf("Gemini ne répond plus depuis %d s ; il utilise peut-être un outil interne", sec))
 				}
 				s.rlog(ctx).Warn("upstream_silence_after_thoughts", "silence_sec", sec, "thought_bytes", thoughtBytes)
 				if hooks != nil && hooks.progressive && s.cfg.StreamThoughts {
 					res.forwarded = true
-					return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, note)))
+					return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, proxyWaitNote(s.currentNow(), note))))
 				}
 			}
 		}
@@ -1416,6 +1416,12 @@ func (s *Server) noContentNoteInterval() time.Duration {
 
 func noContentTimeoutMessage(model string, p gemini.GenParams, sec int) string {
 	return fmt.Sprintf("GMINI : %s ne répond pas (Google n'envoie que des signaux d'attente depuis %d s). Réessayez plus tard ou changez de modèle.", modelDisplayLabel(model, p), sec)
+}
+
+// proxyWaitNote formats a timestamped technical note so proxy wait/retry status
+// lines in reasoning_content are clearly distinguished from the model's thoughts.
+func proxyWaitNote(now time.Time, msg string) string {
+	return fmt.Sprintf("\n[%s] GMINI (pas le modèle — attente technique) : %s\n", now.Format("15:04:05"), msg)
 }
 
 func (s *Server) cannedErrorRetryTimeout() time.Duration {

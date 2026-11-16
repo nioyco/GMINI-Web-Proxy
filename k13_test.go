@@ -403,3 +403,32 @@ func TestN4_Body2StatusPreventsNoContentCutoff(t *testing.T) {
 		t.Fatalf("body[2][7] status should disarm N4 timeout, got %q", content)
 	}
 }
+
+func TestN5_WaitAndRetryNotesExplicitlyTimestamped(t *testing.T) {
+	var calls atomic.Int32
+	_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			body := fakeStreamServed("I seem to be encountering an error. Can I try something else for you?", "", "56fdd199312815e2", "4 Hydrogen")
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+		}
+		body := fakeStreamServed("Réponse finale.", "", "56fdd199312815e2", "4 Hydrogen")
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+	}))
+	cfg := testConfig()
+	cfg.StreamToolsProgress = true
+	cfg.StreamThoughts = true
+	cfg.SSEKeepaliveSec = 1
+	cfg.CannedErrorRetry = "once"
+	s := newServer(cfg, client, testLogger())
+	s.keepaliveOverride = 20 * time.Millisecond
+	s.warnNow = func() time.Time { return time.Date(2026, 11, 16, 21, 5, 9, 0, time.UTC) }
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	c := readSSE(t, context.Background(), ts.URL, k9ChatToolsBody)
+	assertProgressStream(t, c)
+	_, reasoning := sseContentAndReasoning(t, c)
+	if !strings.Contains(reasoning, "[21:05:09] GMINI (pas le modèle — attente technique) :") {
+		t.Fatalf("expected timestamped GMINI (not model) note, got %q", reasoning)
+	}
+}
