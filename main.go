@@ -81,10 +81,9 @@ func main() {
 	// Periodic catalog refresh was removed in K14 P3: the catalog is only
 	// refreshed on explicit request, at startup without a <7d persisted copy, or
 	// optionally after a successful cookie refresh (<=1/6h).
-	// Whenever a cookie is configured, watch the session: while it is not signed in
-	// (Google block at startup, stale cookie, session lost after a generation
-	// error) it is re-checked sparingly; while signed in, no call is made.
-	if cfg.Gemini.Cookie != "" || cfg.Gemini.CookieFile != "" {
+	// Background /app recovery polling is disabled by default (K14 P4); when
+	// GEMINI_AUTH_RECOVERY=on it watches an unauthenticated session sparingly.
+	if cfg.AuthRecovery && (cfg.Gemini.Cookie != "" || cfg.Gemini.CookieFile != "") {
 		go client.AuthRecoveryLoop(ctx, nil)
 	}
 

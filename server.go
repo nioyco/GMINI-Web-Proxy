@@ -302,6 +302,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			}
 		})
 	}
+	s.client.EnsureAuthOnRequest(r.Context())
 	s.applyEffort(&p, m, effort, req.ReasoningEffort)
 
 	// True streaming path (no active tools): forward deltas as they arrive.
@@ -1816,6 +1817,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 			}
 		})
 	}
+	s.client.EnsureAuthOnRequest(r.Context())
 
 	// Stream + tools: same keepalive behaviour as chat completions.
 	if interval := s.keepaliveInterval(); req.Stream && toolsActive && interval > 0 {
@@ -1931,6 +1933,7 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 			}
 		})
 	}
+	s.client.EnsureAuthOnRequest(r.Context())
 
 	// Incremental streaming (no tools): emit a chunk per delta, then a final
 	// chunk with finishReason and usage.
@@ -2080,6 +2083,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			}
 		})
 	}
+	s.client.EnsureAuthOnRequest(r.Context())
 
 	// True streaming (no active tools): forward text deltas as they arrive.
 	if req.Stream && !toolsActive {

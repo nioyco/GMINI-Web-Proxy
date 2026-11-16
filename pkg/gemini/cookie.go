@@ -136,7 +136,7 @@ func (c *Client) AuthRecoveryLoop(ctx context.Context, onRecovered func()) {
 			if i >= len(authRecoverySchedule) {
 				i = len(authRecoverySchedule) - 1
 			}
-			if !lastTry.IsZero() && time.Since(lastTry) < jitterFn(authRecoverySchedule[i]) {
+			if !lastTry.IsZero() && nowFn().Round(0).Sub(lastTry) < jitterFn(authRecoverySchedule[i]) {
 				continue
 			}
 		default:
@@ -149,7 +149,7 @@ func (c *Client) AuthRecoveryLoop(ctx context.Context, onRecovered func()) {
 		if !c.acquireBackground(FamilyApp) {
 			continue
 		}
-		lastTry = time.Now()
+		lastTry = nowFn().Round(0)
 		rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		c.invalidateAppPage() // a re-check must see the live page, not a cached copy
 		status := c.CheckAuth(rctx)
@@ -169,6 +169,47 @@ func (c *Client) AuthRecoveryLoop(ctx context.Context, onRecovered func()) {
 		if onRecovered != nil {
 			onRecovered()
 		}
+	}
+}
+
+// EnsureAuthOnRequest attempts a single on-demand /app auth recovery when a
+// user generation request arrives while unauthenticated after a previous startup
+// block, fetch failure, or cookie change (K14 P4). It makes no call when no
+// cookie is configured, when already authenticated, when CheckAuth has never
+// recorded a recoverable failure (keeping standalone client callers untouched),
+// or when blocked by backoff/rate limit.
+func (c *Client) EnsureAuthOnRequest(ctx context.Context) {
+	if c.Authenticated() {
+		return
+	}
+	cookie, _ := c.loadCookie()
+	if cookie == "" {
+		return
+	}
+	last := c.lastAuthCheck()
+	switch last.result {
+	case authBlocked, authFetchFailed:
+	case authNoToken:
+		if c.cookieGeneration() == last.gen {
+			return
+		}
+	default:
+		return
+	}
+	c.atMu.Lock()
+	recent := !c.reauthAt.IsZero() && nowFn().Round(0).Sub(c.reauthAt.Round(0)) < reauthMinInterval
+	c.atMu.Unlock()
+	if recent || !c.acquireBackground(FamilyApp) {
+		return
+	}
+	c.atMu.Lock()
+	c.reauthAt = nowFn().Round(0)
+	c.atMu.Unlock()
+	rctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	c.invalidateAppPage()
+	if status := c.CheckAuth(rctx); status == "authenticated" {
+		c.log.Info("gemini session recovered on user request")
 	}
 }
 

@@ -226,3 +226,47 @@ func TestAuthRecoveryAfterBlockAndAnonymousStart(t *testing.T) {
 		t.Errorf("block should be cleared: %+v", bs)
 	}
 }
+
+func TestP4_AuthRecoveryLoopNeverFetchesCatalogAndEnsureAuthOnRequest(t *testing.T) {
+	oldS, oldA, oldJ, oldN, oldP, oldR := blockSchedule, appBlockSchedule, jitterFn, nowFn, probeWindow, reauthMinInterval
+	t.Cleanup(func() {
+		blockSchedule, appBlockSchedule, jitterFn, nowFn, probeWindow, reauthMinInterval = oldS, oldA, oldJ, oldN, oldP, oldR
+	})
+	now := time.Now()
+	nowFn = func() time.Time { return now }
+	jitterFn = func(d time.Duration) time.Duration { return d }
+	appBlockSchedule = []time.Duration{5 * time.Minute}
+	blockSchedule = []time.Duration{5 * time.Minute}
+	probeWindow = time.Minute
+	reauthMinInterval = 10 * time.Minute
+
+	var appCalls, batchCalls atomic.Int32
+	c, _ := newAutoBLClient(t, Config{Cookie: "SAPISID=s; __Secure-1PSIDTS=ts", GeminiBL: "x"}, rtFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/app") {
+			n := appCalls.Add(1)
+			if n == 1 {
+				return &http.Response{StatusCode: 429, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+			}
+			return resp200(r, appPageAuth), nil
+		}
+		if strings.Contains(r.URL.Path, "batchexecute") {
+			batchCalls.Add(1)
+		}
+		return resp200(r, ""), nil
+	}))
+
+	if got := c.CheckAuth(context.Background()); !strings.Contains(got, "blocked") {
+		t.Fatalf("initial CheckAuth = %q", got)
+	}
+	// During block backoff: EnsureAuthOnRequest makes 0 calls.
+	c.EnsureAuthOnRequest(context.Background())
+	if appCalls.Load() != 1 {
+		t.Fatalf("during block: appCalls = %d, want 1", appCalls.Load())
+	}
+	// After backoff expires, a user request triggers on-demand recovery without fetching catalog.
+	now = now.Add(6 * time.Minute)
+	c.EnsureAuthOnRequest(context.Background())
+	if appCalls.Load() != 2 || !c.Authenticated() || batchCalls.Load() != 0 {
+		t.Fatalf("after backoff: appCalls=%d auth=%v batchCalls=%d", appCalls.Load(), c.Authenticated(), batchCalls.Load())
+	}
+}

@@ -119,6 +119,9 @@ type Config struct {
 	// successful cookie refresh, at most once per 6 hours
 	// (GEMINI_CATALOG_REFRESH_AFTER_COOKIE, default off = false; K14 P3).
 	CatalogRefreshAfterCookie bool
+	// AuthRecovery enables the background /app recovery polling loop when not
+	// authenticated (GEMINI_AUTH_RECOVERY, default off = false; K14 P4).
+	AuthRecovery bool
 	// BlockMaxBackoffMin is the top step of the anti-bot backoff
 	// (GEMINI_BLOCK_MAX_BACKOFF_MIN, default 60).
 	BlockMaxBackoffMin int
@@ -180,6 +183,7 @@ func loadConfig(envFile string) *Config {
 		AllowedHosts:                splitKeys(getEnv("GEMINI_ALLOWED_HOSTS", "")),
 		ModelsRefreshHours:          nonNegative(getEnvInt("GEMINI_MODELS_REFRESH_HOURS", 0), 0),
 		CatalogRefreshAfterCookie:   getEnvBool("GEMINI_CATALOG_REFRESH_AFTER_COOKIE", false),
+		AuthRecovery:                getEnvBool("GEMINI_AUTH_RECOVERY", false),
 		BlockMaxBackoffMin:          positive(getEnvInt("GEMINI_BLOCK_MAX_BACKOFF_MIN", 60), 60),
 		StateMaxAgeMin:              positive(getEnvInt("GEMINI_STATE_MAX_AGE_MIN", 1440), 1440),
 		Gemini: gemini.Config{

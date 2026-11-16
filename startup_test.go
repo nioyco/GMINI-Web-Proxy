@@ -419,3 +419,16 @@ func TestP2_CookieRotationOffByDefault(t *testing.T) {
 		t.Fatalf("expected hot-reload to authenticate without rotation enabled")
 	}
 }
+
+func TestP4_AuthRecoveryOffByDefault(t *testing.T) {
+	noEnv := filepath.Join(t.TempDir(), "none.env")
+	t.Setenv("GEMINI_AUTH_RECOVERY", "")
+	os.Unsetenv("GEMINI_AUTH_RECOVERY")
+	if cfg := loadConfig(noEnv); cfg.AuthRecovery {
+		t.Fatal("GEMINI_AUTH_RECOVERY must default to off (false)")
+	}
+	t.Setenv("GEMINI_AUTH_RECOVERY", "on")
+	if cfg := loadConfig(noEnv); !cfg.AuthRecovery {
+		t.Fatal("GEMINI_AUTH_RECOVERY=on must enable AuthRecovery")
+	}
+}
