@@ -56,6 +56,12 @@ type Config struct {
 	// InternalToolAction controls how the proxy reacts when an internal Google tool
 	// is detected (GEMINI_INTERNAL_TOOL_ACTION = notify | retry | off; default notify).
 	InternalToolAction string
+	// CannedErrorRetry controls whether Gemini's canned internal-error replies are
+	// retried once identically (GEMINI_CANNED_ERROR_RETRY = off | once; default off),
+	// and CannedErrorRetrySec bounds that retry when neither text nor thought arrives
+	// (GEMINI_CANNED_ERROR_RETRY_SEC, default 25).
+	CannedErrorRetry    string
+	CannedErrorRetrySec int
 	// DisableMarkerNeutralization stops escaping history markers ([User]:, ...) found
 	// in input contents (GEMINI_NEUTRALIZE_HISTORY_MARKERS=0|false|off; default: on).
 	DisableMarkerNeutralization bool
@@ -142,6 +148,8 @@ func loadConfig(envFile string) *Config {
 		DisableToolPromptRules:      !getEnvBool("GEMINI_TOOL_PROMPT_NOECHO_RULES", true),
 		ToolPromptReminder:          getEnvBool("GEMINI_TOOL_PROMPT_REMINDER", true),
 		InternalToolAction:          normalizeInternalToolAction(getEnv("GEMINI_INTERNAL_TOOL_ACTION", "notify")),
+		CannedErrorRetry:            normalizeCannedErrorRetry(getEnv("GEMINI_CANNED_ERROR_RETRY", "off")),
+		CannedErrorRetrySec:         positive(getEnvInt("GEMINI_CANNED_ERROR_RETRY_SEC", 25), 25),
 		DisableMarkerNeutralization: !getEnvBool("GEMINI_NEUTRALIZE_HISTORY_MARKERS", true),
 		KeepTextAfterToolCall:       !getEnvBool("GEMINI_DROP_TEXT_AFTER_TOOL_CALL", true),
 		UIEnabled:                   getEnvBool("GEMINI_UI", true),
@@ -247,6 +255,13 @@ func normalizeInternalToolAction(v string) string {
 	default:
 		return "notify"
 	}
+}
+
+func normalizeCannedErrorRetry(v string) string {
+	if strings.EqualFold(strings.TrimSpace(v), "once") {
+		return "once"
+	}
+	return "off"
 }
 
 // defaultShutdownGraceSec is the default graceful-shutdown window.

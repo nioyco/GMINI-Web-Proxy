@@ -41,9 +41,10 @@ type Server struct {
 	keepaliveOverride time.Duration
 	// heldDurationOverride and heldNoteOverride override the K9 120 s held cap
 	// and 30 s progress note period in tests. Never set in production.
-	heldDurationOverride time.Duration
-	heldNoteOverride     time.Duration
-	statusNoteOverride   time.Duration
+	heldDurationOverride       time.Duration
+	heldNoteOverride           time.Duration
+	statusNoteOverride         time.Duration
+	cannedRetryTimeoutOverride time.Duration
 	// uiToken protects the API of the local management page (ui.go); empty: page off.
 	uiToken string
 
@@ -537,22 +538,93 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 		isCannedErr := !res.released && apiconv.IsUpstreamCannedError(res.rawText)
 		isGlitch := !res.released && !isCannedErr && apiconv.IsUpstreamGlitch(res.rawText)
 		isToolRefusal := !res.released && !isCannedErr && len(declared) > 0 && apiconv.IsUpstreamToolRefusal(res.rawText)
-		if isGlitch || isToolRefusal || isCannedErr {
-			// Gemini sent a canned non-answer (generic refusal, "can't use Workspace",
-			// a bare widget placeholder, claimed local tools are not declared/accessible,
-			// or a canned internal error). Nothing of it reached the client: try once more.
-			if isCannedErr {
-				s.stats.cannedErrorRetries.Add(1)
-				s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(res.rawText), "action", "retry_once")
-			} else {
-				s.rlog(ctx).Warn("upstream_glitch", "bytes", len(res.rawText), "tool_refusal", isToolRefusal, "action", "retry_once")
+		if isCannedErr {
+			if normalizeCannedErrorRetry(s.cfg.CannedErrorRetry) != "once" {
+				s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(res.rawText), "action", "off")
+				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
+				return
 			}
+			s.stats.cannedErrorRetries.Add(1)
+			retryTimeout := s.cannedErrorRetryTimeout()
+			s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(res.rawText), "action", "retry_once", "timeout_sec", int(retryTimeout.Seconds()))
+			if s.cfg.StreamThoughts {
+				if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, "\nGemini a renvoyé une erreur interne : nouvelle tentative à l'identique…\n")); err != nil {
+					s.rlog(ctx).Warn("sse write failed", "err", err)
+					return
+				}
+			}
+			if s.streamEvents != nil {
+				var gate2 apiconv.ProgressGate
+				var echo2 apiconv.EchoFilter
+				rres := s.runStreamTools(ctx, sse, p, interval, declared, &streamToolsHooks{
+					progressive:        true,
+					noInternalRetry:    true,
+					cannedRetryTimeout: retryTimeout,
+					cid:                cid,
+					created:            res.created,
+					model:              model,
+					gate:               &gate2,
+					echo:               &echo2,
+				})
+				if rres.aborted {
+					return
+				}
+				if rres.earlyStopMsg != "" {
+					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, rres.earlyStopMsg, nil)), sse.done())
+					return
+				}
+				if rres.cannedRetryTimedOut || (rres.earlyStopReason == "" && (rres.genErr != nil || rres.rawText == "" || (!rres.released && apiconv.IsUpstreamCannedError(rres.rawText)))) {
+					s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(rres.rawText), "timed_out", rres.cannedRetryTimedOut, "action", "reported")
+					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
+					return
+				}
+				s.finishStreamProgress(ctx, sse, cid, model, declared, rres, &gate2, &echo2)
+				return
+			}
+			retryCtx, retryCancel := context.WithTimeout(ctx, retryTimeout)
+			bres := s.awaitGenerate(retryCtx, sse, p, interval)
+			retryCancel()
+			switch {
+			case bres.out == kaGone:
+				if ctx.Err() == nil && errors.Is(retryCtx.Err(), context.DeadlineExceeded) {
+					s.rlog(ctx).Warn("upstream_canned_error", "timed_out", true, "action", "reported")
+					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
+				}
+			case bres.out == kaShutdown:
+				s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
+			case bres.err != nil:
+				if ctx.Err() == nil && errors.Is(bres.err, context.DeadlineExceeded) {
+					s.rlog(ctx).Warn("upstream_canned_error", "timed_out", true, "action", "reported")
+					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
+					return
+				}
+				s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+bres.err.Error())), sse.done())
+			case apiconv.IsUpstreamCannedError(bres.text):
+				s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(bres.text), "action", "reported")
+				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
+			default:
+				if !res.warnEmitted {
+					if note := s.maybeSuspectWarning(ctx, model); note != "" {
+						if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, note)); err != nil {
+							s.rlog(ctx).Warn("sse write failed", "err", err)
+							return
+						}
+					}
+				}
+				text, toolCalls := s.finishText(ctx, bres.text, true, declared)
+				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
+			}
+			return
+		}
+		if isGlitch || isToolRefusal {
+			// Gemini sent a canned non-answer ("can't use Workspace", a bare widget
+			// placeholder, or claimed local tools are not declared/accessible).
+			// Nothing of it reached the client: try once more with corrective note.
+			s.rlog(ctx).Warn("upstream_glitch", "bytes", len(res.rawText), "tool_refusal", isToolRefusal, "action", "retry_once")
 			if s.cfg.StreamThoughts {
 				retryMsg := "\nGemini a renvoyé un message de service au lieu de traiter la demande : nouvelle tentative…\n"
 				if isToolRefusal {
 					retryMsg = "\nGemini affirme ne pas avoir d'outils locaux : nouvelle tentative avec consigne corrective…\n"
-				} else if isCannedErr {
-					retryMsg = "\nGemini a renvoyé une erreur interne : nouvelle tentative à l'identique…\n"
 				}
 				if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, retryMsg)); err != nil {
 					s.rlog(ctx).Warn("sse write failed", "err", err)
@@ -572,10 +644,6 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 				s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
 			case bres.err != nil:
 				s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+bres.err.Error())), sse.done())
-			case isCannedErr && apiconv.IsUpstreamCannedError(bres.text):
-				s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(bres.text), "action", "reported")
-				msg := "GMINI : Gemini a renvoyé une erreur interne deux fois de suite ; réessayez dans un instant."
-				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
 			case isToolRefusal && apiconv.IsUpstreamToolRefusal(bres.text):
 				s.rlog(ctx).Warn("upstream_tool_refusal", "bytes", len(bres.text), "action", "reported")
 				msg := "GMINI : Gemini a affirmé deux fois qu'aucun outil local n'est déclaré ou disponible (« " +
@@ -605,6 +673,10 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 		}
 	}
 
+	s.finishStreamProgress(ctx, sse, cid, model, declared, res, &gate, &echo)
+}
+
+func (s *Server) finishStreamProgress(ctx context.Context, sse *sseStream, cid, model string, declared []apiconv.DeclaredTool, res streamToolsResult, gate *apiconv.ProgressGate, echo *apiconv.EchoFilter) {
 	ri := reqFrom(ctx)
 	sentBytes := res.transmittedBytes
 	if !res.released {
@@ -646,29 +718,31 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 }
 
 type streamToolsHooks struct {
-	progressive     bool
-	noInternalRetry bool
-	cid             string
-	created         int64
-	model           string
-	gate            *apiconv.ProgressGate
-	echo            *apiconv.EchoFilter
+	progressive        bool
+	noInternalRetry    bool
+	cannedRetryTimeout time.Duration
+	cid                string
+	created            int64
+	model              string
+	gate               *apiconv.ProgressGate
+	echo               *apiconv.EchoFilter
 }
 
 type streamToolsResult struct {
-	rawText           string
-	earlyStopReason   string // "" | "marker" | "size" | "duration"
-	earlyStopMsg      string
-	internalToolRetry bool
-	internalToolName  string
-	genErr            error
-	forwarded         bool
-	released          bool
-	early             string
-	warnEmitted       bool
-	aborted           bool // SSE write failed or client cancelled
-	created           int64
-	transmittedBytes  int
+	rawText             string
+	earlyStopReason     string // "" | "marker" | "size" | "duration"
+	earlyStopMsg        string
+	internalToolRetry   bool
+	internalToolName    string
+	cannedRetryTimedOut bool
+	genErr              error
+	forwarded           bool
+	released            bool
+	early               string
+	warnEmitted         bool
+	aborted             bool // SSE write failed or client cancelled
+	created             int64
+	transmittedBytes    int
 }
 
 // runStreamTools drives s.streamEvents for all stream+tools routes with keepalives,
@@ -995,6 +1069,9 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	if heldNoteEvery > 0 && heldNoteEvery/4 > 0 && heldNoteEvery/4 < tick {
 		tick = heldNoteEvery / 4
 	}
+	if hooks != nil && hooks.cannedRetryTimeout > 0 && hooks.cannedRetryTimeout/4 > 0 && hooks.cannedRetryTimeout/4 < tick {
+		tick = hooks.cannedRetryTimeout / 4
+	}
 	if tick < 5*time.Millisecond {
 		tick = 5 * time.Millisecond
 	}
@@ -1067,6 +1144,11 @@ loop:
 			cancelled()
 			return res
 		case <-ticker.C:
+			if hooks != nil && hooks.cannedRetryTimeout > 0 && thoughtBytes == 0 && raw.Len() == 0 && time.Since(start) >= hooks.cannedRetryTimeout {
+				res.cannedRetryTimedOut = true
+				cancel(errCannedRetryTimeout)
+				break loop
+			}
 			heldBytes := raw.Len() - rawAtLastUsefulTx
 			if maxHeldDur > 0 && heldBytes > 0 && !heldSince.IsZero() && time.Since(heldSince) >= maxHeldDur {
 				triggerCap("duration", heldBytes)
@@ -1187,6 +1269,29 @@ const internalToolRetryNote = "\n\n[CRITICAL REMINDER: Do NOT invoke any interna
 func internalToolRetryParams(p gemini.GenParams) gemini.GenParams {
 	p.Prompt += internalToolRetryNote
 	return p
+}
+
+var errCannedRetryTimeout = errors.New("canned_retry_timeout")
+
+func (s *Server) cannedErrorRetryTimeout() time.Duration {
+	if s.cannedRetryTimeoutOverride > 0 {
+		return s.cannedRetryTimeoutOverride
+	}
+	return time.Duration(positive(s.cfg.CannedErrorRetrySec, 25)) * time.Second
+}
+
+func modelDisplayLabel(model string, p gemini.GenParams) string {
+	if p.Model != nil && p.Model.Description != "" {
+		return p.Model.Description
+	}
+	if p.Model != nil && p.Model.DisplayName != "" {
+		return p.Model.DisplayName
+	}
+	return model
+}
+
+func cannedErrorMessage(model string, p gemini.GenParams) string {
+	return fmt.Sprintf("GMINI : Gemini a renvoyé une erreur interne sur %s (pas une réponse du modèle). Réessayez, ou changez de modèle.", modelDisplayLabel(model, p))
 }
 
 func (s *Server) warnCooldown() time.Duration {

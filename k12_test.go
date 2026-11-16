@@ -184,6 +184,8 @@ func TestB6_CannedErrorDetectionAndIdenticalRetry(t *testing.T) {
 		cfg.StreamToolsProgress = true
 		cfg.StreamThoughts = true
 		cfg.SSEKeepaliveSec = 1
+		cfg.CannedErrorRetry = "once"
+		cfg.CannedErrorRetrySec = 25
 		s := newServer(cfg, client, testLogger())
 		s.keepaliveOverride = 50 * time.Millisecond
 		ts := httptest.NewServer(s.handler())
@@ -221,6 +223,8 @@ func TestB6_CannedErrorDetectionAndIdenticalRetry(t *testing.T) {
 		cfg.StreamToolsProgress = true
 		cfg.StreamThoughts = true
 		cfg.SSEKeepaliveSec = 1
+		cfg.CannedErrorRetry = "once"
+		cfg.CannedErrorRetrySec = 25
 		s := newServer(cfg, client, testLogger())
 		s.keepaliveOverride = 50 * time.Millisecond
 		ts := httptest.NewServer(s.handler())
@@ -232,7 +236,7 @@ func TestB6_CannedErrorDetectionAndIdenticalRetry(t *testing.T) {
 			t.Fatalf("calls = %d, want 2", calls.Load())
 		}
 		joined := strings.Join(c.dataFrames, "\n")
-		if !strings.Contains(joined, "Gemini a renvoyé une erreur interne deux fois de suite") {
+		if !strings.Contains(joined, "Gemini a renvoyé une erreur interne sur") {
 			t.Errorf("expected clear French error message, got %s", joined)
 		}
 	})
