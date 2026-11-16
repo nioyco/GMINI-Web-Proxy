@@ -32,6 +32,9 @@ const (
 // rotation is expected to be done synchronously at startup, so the loop only
 // ticks on the interval and stops when ctx is cancelled.
 func (c *Client) CookieRefreshLoop(ctx context.Context, interval time.Duration) {
+	if !c.cfg.CookieRotation || interval <= 0 {
+		return
+	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -80,7 +83,12 @@ func (c *Client) RotateCookieIfStale(ctx context.Context, minAge time.Duration) 
 }
 
 // StartupRotate is RotateCookieIfStale with the default recency threshold.
-func (c *Client) StartupRotate(ctx context.Context) { c.RotateCookieIfStale(ctx, startupRotateMinAge) }
+func (c *Client) StartupRotate(ctx context.Context) {
+	if !c.cfg.CookieRotation {
+		return
+	}
+	c.RotateCookieIfStale(ctx, startupRotateMinAge)
+}
 
 // authRecoverySchedule spaces the /app re-checks after a failed fetch (network
 // error) while the session is not authenticated; blocks follow the block
@@ -296,6 +304,7 @@ type rotateInfo struct {
 
 // RotationStatus is a secret-free snapshot of the cookie rotation state.
 type RotationStatus struct {
+	Enabled            bool
 	LastAttempt        time.Time
 	LastSuccess        time.Time
 	LastResult         string // renewed | no_new_token | error | skipped_no_psidts | "" (no attempt yet)
@@ -411,6 +420,7 @@ func (c *Client) RotationStatus() RotationStatus {
 	c.cookieMu.Lock()
 	defer c.cookieMu.Unlock()
 	return RotationStatus{
+		Enabled:     c.cfg.CookieRotation,
 		LastAttempt: c.rot.lastAttempt, LastSuccess: c.rotatedAt, LastResult: c.rot.lastResult,
 		Attempts: c.rot.attempts, Renewed: c.rot.renewed, NotRenewed: c.rot.notRenewed,
 		ConsecutiveFailure: c.rot.streak, TokenAge: age, TokenAgeSource: src,

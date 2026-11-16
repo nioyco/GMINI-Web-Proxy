@@ -71,7 +71,7 @@ func TestStartupRotateSkippedWhenTokenRecent(t *testing.T) {
 	c.cookieMu.Unlock()
 	c.saveState()
 
-	c2, logs2 := newAutoBLClient(t, Config{CookieFile: path, StateFile: statePath}, rtFunc(func(r *http.Request) (*http.Response, error) {
+	c2, logs2 := newAutoBLClient(t, Config{CookieFile: path, StateFile: statePath, CookieRotation: true}, rtFunc(func(r *http.Request) (*http.Response, error) {
 		calls.Add(1)
 		return resp200(r, ""), nil
 	}))
@@ -129,7 +129,7 @@ func TestBackgroundSuspendedDuringBlock(t *testing.T) {
 	blockSchedule = []time.Duration{time.Hour}
 	defer func() { blockSchedule = oldS }()
 	var calls atomic.Int32
-	c, _ := newAutoBLClient(t, Config{Cookie: "SAPISID=s; __Secure-1PSIDTS=ts", GeminiBL: "x"}, rtFunc(func(r *http.Request) (*http.Response, error) {
+	c, _ := newAutoBLClient(t, Config{Cookie: "SAPISID=s; __Secure-1PSIDTS=ts", GeminiBL: "x", CookieRotation: true}, rtFunc(func(r *http.Request) (*http.Response, error) {
 		calls.Add(1)
 		return resp200(r, ""), nil
 	}))

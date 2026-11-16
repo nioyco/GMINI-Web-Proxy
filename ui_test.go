@@ -224,6 +224,9 @@ func TestUISessionDegradedExposedAndCleared(t *testing.T) {
 	if !strings.Contains(wHTML.Body.String(), "Le renouvellement automatique est arrêté : relancer le raccourci 7 (choix 2) pour garder la session") {
 		t.Error("ui.html missing explicit suspended rotation action message")
 	}
+	if !strings.Contains(wHTML.Body.String(), "désactivée (n'a jamais abouti — voir R&D-14)") {
+		t.Error("ui.html missing disabled rotation message")
+	}
 	// K5: after the failed manual refresh, cooldown_sec > 0 is returned and
 	// exposed in /_ui/api/state; ui.html shows the remaining delay & disables the button.
 	if !strings.Contains(wRef.Body.String(), `"cooldown_sec":`) || !strings.Contains(wState.Body.String(), `"catalog_refresh_cooldown_sec":`) {

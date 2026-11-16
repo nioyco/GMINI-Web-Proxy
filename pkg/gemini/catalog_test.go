@@ -66,7 +66,8 @@ func TestRotationTickMakesOneCall(t *testing.T) {
 		log.add(r)
 		return resp200(r, ""), nil
 	}))
-	c.setAt("tok") // authenticated: the old loop called listModels after each tick
+	c.cfg.CookieRotation = true // mode on
+	c.setAt("tok")              // authenticated: the old loop called listModels after each tick
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
 	defer cancel()
 	c.CookieRefreshLoop(ctx, 20*time.Millisecond)
@@ -188,13 +189,14 @@ func TestRefreshModelsOnRequest(t *testing.T) {
 	}
 }
 
-// AUDIT-13 A7: the rotation loop also runs for an unauthenticated session.
+// AUDIT-13 A7: the rotation loop also runs for an unauthenticated session (when enabled).
 func TestRotationLoopRunsWithoutSession(t *testing.T) {
 	var log callLog
 	c, _ := blockClient(t, rtFunc(func(r *http.Request) (*http.Response, error) {
 		log.add(r)
 		return resp200(r, ""), nil
 	}))
+	c.cfg.CookieRotation = true // mode on
 	if c.Authenticated() || !c.HasRotatingToken() {
 		t.Fatal("setup")
 	}
@@ -203,5 +205,26 @@ func TestRotationLoopRunsWithoutSession(t *testing.T) {
 	c.CookieRefreshLoop(ctx, 15*time.Millisecond)
 	if log.count(FamilyAccounts) == 0 || log.count("") != log.count(FamilyAccounts) {
 		t.Errorf("calls=%d accounts=%d", log.count(""), log.count(FamilyAccounts))
+	}
+}
+
+func TestRotationDisabledByDefaultMakesNoCalls(t *testing.T) {
+	var log callLog
+	c, _ := blockClient(t, rtFunc(func(r *http.Request) (*http.Response, error) {
+		log.add(r)
+		return resp200(r, ""), nil
+	}))
+	if c.cfg.CookieRotation {
+		t.Fatal("CookieRotation must default to false")
+	}
+	c.StartupRotate(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	c.CookieRefreshLoop(ctx, 10*time.Millisecond)
+	if got := log.count(""); got != 0 {
+		t.Fatalf("expected 0 calls when CookieRotation is off, got %d", got)
+	}
+	if rs := c.RotationStatus(); rs.Enabled {
+		t.Fatalf("expected RotationStatus.Enabled=false, got true")
 	}
 }

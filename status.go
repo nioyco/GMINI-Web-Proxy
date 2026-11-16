@@ -130,6 +130,7 @@ func rfc3339Ptr(t time.Time) *string {
 
 // rotationStatus describes the cookie rotation state (no secrets).
 type rotationStatus struct {
+	Enabled              bool     `json:"enabled"`
 	AuthState            string   `json:"auth_state"` // authenticated | anonymous
 	PSIDTSPresent        bool     `json:"psidts_present"`
 	LastAttemptAgeSec    *int64   `json:"last_attempt_age_sec"`
@@ -228,6 +229,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	rs := s.client.RotationStatus()
 	resp.CookieRotation = rotationStatus{
+		Enabled:   rs.Enabled,
 		AuthState: "anonymous", PSIDTSPresent: rs.PSIDTSPresent,
 		LastAttemptAgeSec: ageSec(rs.LastAttempt), LastSuccessAgeSec: ageSec(rs.LastSuccess),
 		LastResult: rs.LastResult, Attempts: rs.Attempts, Renewed: rs.Renewed, NotRenewed: rs.NotRenewed,

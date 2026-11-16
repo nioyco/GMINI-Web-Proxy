@@ -139,7 +139,7 @@ func startSession(ctx context.Context, cfg *Config, client *gemini.Client, logge
 	// whenever the cookie carries the rotating token, signed in or not, so the
 	// session keeps being maintained through a block or an anonymous start
 	// (AUDIT-13 A7, S-03).
-	refresh = client.HasRotatingToken() && cfg.CookieRefresh > 0
+	refresh = cfg.CookieRotation && client.HasRotatingToken() && cfg.CookieRefresh > 0
 	if refresh {
 		// Rotate once up front (skipped when the token is recent); the periodic loop
 		// then only ticks on its interval.

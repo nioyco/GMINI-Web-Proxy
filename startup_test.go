@@ -113,6 +113,8 @@ func startupClient(t *testing.T, cfg *Config) (*gemini.Client, *googleSim) {
 func TestStartupColdThenWarmRestart(t *testing.T) {
 	dir := t.TempDir()
 	cfg := startupConfig(t, dir)
+	cfg.CookieRotation = true
+	cfg.Gemini.CookieRotation = true
 
 	c1, sim1 := startupClient(t, cfg)
 	sim1.rotateTS = "ts_rotated"
@@ -181,6 +183,8 @@ func TestStateFilePath(t *testing.T) {
 func TestRotationEnabledWhenStartingUnauthenticated(t *testing.T) {
 	dir := t.TempDir()
 	cfg := startupConfig(t, dir)
+	cfg.CookieRotation = true
+	cfg.Gemini.CookieRotation = true
 	c, err := gemini.New(cfg.Gemini, testLogger())
 	if err != nil {
 		t.Fatal(err)
@@ -327,5 +331,53 @@ func TestN8_StartupSkipsCatalogCallWhenUnder24hEvenOnNewSession(t *testing.T) {
 	}
 	if len(c2.ModelNames()) != 4 || c2.ModelsSourceLabel() != "persisted" {
 		t.Fatalf("expected 4 persisted models retained on block, got %v (%q)", c2.ModelNames(), c2.ModelsSourceLabel())
+	}
+}
+
+func TestP2_CookieRotationOffByDefault(t *testing.T) {
+	noEnv := filepath.Join(t.TempDir(), "none.env")
+	t.Setenv("GEMINI_COOKIE_ROTATION", "")
+	os.Unsetenv("GEMINI_COOKIE_ROTATION")
+	if cfg := loadConfig(noEnv); cfg.CookieRotation || cfg.Gemini.CookieRotation {
+		t.Fatal("GEMINI_COOKIE_ROTATION must default to off (false)")
+	}
+	t.Setenv("GEMINI_COOKIE_ROTATION", "on")
+	if cfg := loadConfig(noEnv); !cfg.CookieRotation || !cfg.Gemini.CookieRotation {
+		t.Fatal("GEMINI_COOKIE_ROTATION=on must enable cookie rotation")
+	}
+
+	// Default (off): startSession makes 0 rotation calls even with unknown token age,
+	// and hot-reload from cookie.txt + .state.json still works.
+	dir := t.TempDir()
+	cfg := startupConfig(t, dir)
+	c, sim := startupClient(t, cfg)
+	auth, refresh := startSession(context.Background(), cfg, c, testLogger())
+	if refresh || strings.Contains(auth, "auto-refresh") {
+		t.Fatalf("expected refresh=false when CookieRotation is off, got auth=%q refresh=%v", auth, refresh)
+	}
+	if sim.get("rotate") != 0 {
+		t.Fatalf("expected 0 rotation calls at startup when off, got %d", sim.get("rotate"))
+	}
+
+	// Rewrite cookie.txt + .state.json externally and confirm hot-reload still works with rotation off.
+	future := time.Now().Add(2 * time.Second)
+	if err := os.WriteFile(cfg.Gemini.CookieFile, []byte("SAPISID=s; __Secure-1PSIDTS=ts_new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(cfg.Gemini.CookieFile, future, future)
+	sum := sha256.Sum256([]byte("s"))
+	fp := hex.EncodeToString(sum[:])[:16]
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+	stBytes, _ := json.Marshal(map[string]any{
+		"version": 1, "saved_at": nowStr, "session_fingerprint": fp,
+		"at": "HOT_AT", "at_at": nowStr, "psidts_at": nowStr,
+	})
+	if err := os.WriteFile(cfg.Gemini.StateFile, stBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(cfg.Gemini.StateFile, future, future)
+	c.ReloadCookieFromDisk()
+	if !c.Authenticated() || c.RotationStatus().Suspended {
+		t.Fatalf("expected hot-reload to authenticate without rotation enabled")
 	}
 }

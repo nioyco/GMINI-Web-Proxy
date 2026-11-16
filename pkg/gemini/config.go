@@ -76,6 +76,10 @@ type Config struct {
 	// TemporaryChat sets inner[45] = 1 in StreamGenerate payloads when true
 	// (GEMINI_TEMPORARY_CHAT, default false; R&D-14 R2).
 	TemporaryChat bool
+
+	// CookieRotation enables startup and periodic RotateCookies calls
+	// (GEMINI_COOKIE_ROTATION=on; default false = off, K14 P2).
+	CookieRotation bool
 }
 
 // DefaultRotateSuspendAfter is the default consecutive no_new_token threshold.
