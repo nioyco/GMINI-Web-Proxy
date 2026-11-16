@@ -161,9 +161,6 @@ func (c *Client) AuthRecoveryLoop(ctx context.Context, onRecovered func()) {
 			continue
 		}
 		fails = 0
-		if c.ModelsSourceLabel() != "dynamic" {
-			_ = c.fetchModels(rctx)
-		}
 		cancel()
 		c.modelMu.Lock()
 		count, source := len(c.modelOrder), c.modelsSource

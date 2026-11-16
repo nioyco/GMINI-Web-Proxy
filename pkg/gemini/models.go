@@ -25,11 +25,13 @@ const listModelsRPC = "otAQ7b"
 // (AUDIT-13 A2). It used to be refreshed at every cookie-rotation tick.
 const DefaultModelsRefreshInterval = 24 * time.Hour
 
-// catalogRetryAfter spaces catalog attempts after a failed or skipped one, and
-// catalogManualMinInterval spaces explicit refresh requests (vars for tests).
+// catalogRetryAfter spaces catalog attempts after a failed or skipped one,
+// catalogManualMinInterval spaces explicit refresh requests, and
+// catalogAfterCookieMinInterval caps optional post-cookie refreshes to 1/6h.
 var (
-	catalogRetryAfter        = time.Hour
-	catalogManualMinInterval = 5 * time.Minute
+	catalogRetryAfter             = time.Hour
+	catalogManualMinInterval      = 5 * time.Minute
+	catalogAfterCookieMinInterval = 6 * time.Hour
 )
 
 // genericModelHeader is the x-goog-ext-525001261-jspb value used on the model
@@ -210,36 +212,19 @@ func (c *Client) SetModels(models []*AvailableModel) {
 	c.storeModels(models, "static")
 }
 
-// CatalogRefreshLoop refreshes the model catalog at most once per interval
-// (counted from the last successful fetch, restored state included), and retries
-// a failed or skipped attempt after catalogRetryAfter. It makes no call without
-// an authenticated session or while a gemini.google.com block is in force. It is
-// independent of the cookie rotation, so a rotation tick makes a single call.
+// CatalogRefreshLoop is retained for API compatibility; periodic background
+// catalog refreshes were removed in K14 P3 (catalog refreshes now happen only on
+// explicit click, at startup when no <7d catalog exists, or optionally after a
+// successful cookie refresh). It waits for ctx cancellation without calling Google.
 func (c *Client) CatalogRefreshLoop(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		return
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(c.catalogDueIn(interval)):
-		}
-		if !c.Authenticated() || !c.acquireBackground(FamilyBatch) {
-			c.markCatalogTried()
-			continue
-		}
-		rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		c.fetchModels(rctx)
-		cancel()
-	}
+	<-ctx.Done()
 }
 
 // catalogDueIn returns how long until the next periodic catalog refresh is due.
 func (c *Client) catalogDueIn(interval time.Duration) time.Duration {
 	c.modelMu.Lock()
 	defer c.modelMu.Unlock()
-	now := time.Now()
+	now := nowFn().Round(0)
 	due := now
 	if !c.catalogAt.IsZero() {
 		due = c.catalogAt.Add(interval)
@@ -257,7 +242,7 @@ func (c *Client) catalogDueIn(interval time.Duration) time.Duration {
 
 func (c *Client) markCatalogTried() {
 	c.modelMu.Lock()
-	c.catalogTriedAt = time.Now()
+	c.catalogTriedAt = nowFn().Round(0)
 	c.modelMu.Unlock()
 }
 
@@ -290,20 +275,23 @@ func (c *Client) CatalogHealth() CatalogHealthStatus {
 }
 
 // CatalogRefreshNextAt returns when the next manual RefreshModels call is
-// allowed (considering the 5-min minimum interval and any FamilyBatch backoff),
-// or the zero time if one may run now.
+// allowed (considering the 5-min minimum interval and any gating family block
+// backoff), or the zero time if one may run now.
 func (c *Client) CatalogRefreshNextAt() time.Time {
 	var due time.Time
+	now := nowFn().Round(0)
 	c.modelMu.Lock()
 	if !c.catalogTriedAt.IsZero() {
 		due = c.catalogTriedAt.Add(catalogManualMinInterval)
 	}
 	c.modelMu.Unlock()
 	bs := c.GoogleBlockStatus()
-	if fb, ok := bs.Families[FamilyBatch]; ok && fb.Active && fb.BackoffUntil.After(due) {
-		due = fb.BackoffUntil
+	for _, fam := range gatingFamilies(FamilyBatch) {
+		if fb, ok := bs.Families[fam]; ok && fb.Active && fb.BackoffUntil.After(due) {
+			due = fb.BackoffUntil
+		}
 	}
-	if !due.After(time.Now()) {
+	if !due.After(now) {
 		return time.Time{}
 	}
 	return due
@@ -317,8 +305,9 @@ func (c *Client) RefreshModels(ctx context.Context) error {
 	if !c.Authenticated() {
 		return fmt.Errorf("%w: session is not authenticated", ErrCatalogRefreshRefused)
 	}
+	now := nowFn().Round(0)
 	c.modelMu.Lock()
-	recent := !c.catalogTriedAt.IsZero() && time.Since(c.catalogTriedAt) < catalogManualMinInterval
+	recent := !c.catalogTriedAt.IsZero() && now.Sub(c.catalogTriedAt.Round(0)) < catalogManualMinInterval
 	c.modelMu.Unlock()
 	if recent {
 		return fmt.Errorf("%w: last attempt less than %s ago", ErrCatalogRefreshRefused, catalogManualMinInterval)
@@ -330,6 +319,32 @@ func (c *Client) RefreshModels(ctx context.Context) error {
 		return err
 	}
 	c.log.Info("gemini model list refreshed on request", "count", len(c.ModelNames()))
+	return nil
+}
+
+// RefreshCatalogAfterCookie optionally refreshes the catalog right after a
+// successful external cookie refresh, at most once per 6 hours (K14 P3).
+func (c *Client) RefreshCatalogAfterCookie(ctx context.Context) error {
+	if !c.Authenticated() {
+		return fmt.Errorf("%w: session is not authenticated", ErrCatalogRefreshRefused)
+	}
+	now := nowFn().Round(0)
+	c.modelMu.Lock()
+	recent := !c.catalogAfterCookieAt.IsZero() && now.Sub(c.catalogAfterCookieAt.Round(0)) < catalogAfterCookieMinInterval
+	c.modelMu.Unlock()
+	if recent {
+		return fmt.Errorf("%w: last after-cookie refresh less than %s ago", ErrCatalogRefreshRefused, catalogAfterCookieMinInterval)
+	}
+	if !c.acquireBackground(FamilyBatch) {
+		return fmt.Errorf("%w: background guard refused", ErrCatalogRefreshRefused)
+	}
+	c.modelMu.Lock()
+	c.catalogAfterCookieAt = now
+	c.modelMu.Unlock()
+	if err := c.fetchModels(ctx); err != nil {
+		return err
+	}
+	c.log.Info("gemini model list refreshed after cookie refresh", "count", len(c.ModelNames()))
 	return nil
 }
 
@@ -444,7 +459,7 @@ func (c *Client) fetchModels(ctx context.Context) error {
 		c.modelMu.Unlock()
 		c.storeModels(models, "dynamic")
 		c.modelMu.Lock()
-		c.catalogAt = time.Now()
+		c.catalogAt = nowFn().Round(0)
 		c.modelMu.Unlock()
 		c.saveState()
 		if wasDegraded {

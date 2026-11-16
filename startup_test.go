@@ -292,7 +292,7 @@ func TestN8_StartupSkipsCatalogCallWhenUnder24hEvenOnNewSession(t *testing.T) {
 		t.Fatalf("expected 4 restored models, got %v", c.ModelNames())
 	}
 
-	// Catalog 3 days old (< 7d, >= 24h) + batchexecute blocked (429): keeps all 4 models.
+	// Catalog 3 days old (< 7d, >= 24h): K14 P3 skips startup batchexecute and retains all 4 models.
 	threeDaysAgo := time.Now().Add(-72 * time.Hour).UTC().Format(time.RFC3339)
 	rawOld, _ := json.Marshal(map[string]any{
 		"version":             1,
@@ -326,11 +326,49 @@ func TestN8_StartupSkipsCatalogCallWhenUnder24hEvenOnNewSession(t *testing.T) {
 		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
 	}))
 	_, _ = startSession(context.Background(), cfg, c2, testLogger())
-	if batchCalls != 1 {
-		t.Fatalf("expected 1 startup batchexecute attempt for >24h catalog, got %d", batchCalls)
+	if batchCalls != 0 {
+		t.Fatalf("expected 0 startup batchexecute calls for <7d catalog, got %d", batchCalls)
 	}
 	if len(c2.ModelNames()) != 4 || c2.ModelsSourceLabel() != "persisted" {
-		t.Fatalf("expected 4 persisted models retained on block, got %v (%q)", c2.ModelNames(), c2.ModelsSourceLabel())
+		t.Fatalf("expected 4 persisted models retained for <7d catalog, got %v (%q)", c2.ModelNames(), c2.ModelsSourceLabel())
+	}
+
+	// Catalog 8 days old (>= 7d) + batchexecute blocked (429): startup tries once and falls back without repeating.
+	eightDaysAgo := time.Now().Add(-8 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	rawExpired, _ := json.Marshal(map[string]any{
+		"version":             1,
+		"saved_at":            now,
+		"session_fingerprint": oldFP,
+		"models": []map[string]any{
+			{"Name": "gemini-quick-answers", "ModelID": "8c46e95b1a07cecc"},
+		},
+		"models_at":     eightDaysAgo,
+		"models_source": "dynamic",
+	})
+	if err := os.WriteFile(cfg.Gemini.StateFile, rawExpired, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c3, err := gemini.New(cfg.Gemini, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	batchCalls = 0
+	c3.SetTransport(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/app") {
+			return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(appPage)), Request: r}, nil
+		}
+		if strings.Contains(r.URL.Path, "batchexecute") {
+			batchCalls++
+			return &http.Response{StatusCode: 429, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("sorry")), Request: r}, nil
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+	}))
+	_, _ = startSession(context.Background(), cfg, c3, testLogger())
+	if batchCalls != 1 {
+		t.Fatalf("expected 1 startup batchexecute attempt for >=7d catalog, got %d", batchCalls)
+	}
+	if c3.ModelsSourceLabel() != "fallback" {
+		t.Fatalf("expected fallback source after blocked >=7d catalog, got %q", c3.ModelsSourceLabel())
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -128,9 +129,11 @@ func TestCatalogDueIn(t *testing.T) {
 }
 
 func TestCatalogRefreshLoopOnlyWhenDue(t *testing.T) {
-	old := catalogRetryAfter
-	catalogRetryAfter = 40 * time.Millisecond
-	defer func() { catalogRetryAfter = old }()
+	oldN := nowFn
+	now := time.Now()
+	nowFn = func() time.Time { return now }
+	defer func() { nowFn = oldN }()
+
 	var log callLog
 	body := listModelsBody(t, "x1")
 	c, _ := blockClient(t, rtFunc(func(r *http.Request) (*http.Response, error) {
@@ -138,14 +141,76 @@ func TestCatalogRefreshLoopOnlyWhenDue(t *testing.T) {
 		return resp200(r, body), nil
 	}))
 	c.setAt("tok")
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	defer cancel()
-	c.CatalogRefreshLoop(ctx, time.Hour) // never fetched: one fetch, then nothing for an hour
-	if n := log.count(FamilyBatch); n != 1 || log.count("") != 1 {
-		t.Errorf("calls=%d batch=%d, want exactly 1 listModels", log.count(""), n)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		c.CatalogRefreshLoop(ctx, time.Millisecond)
+		close(done)
+	}()
+	// Advance clock by 48h without any user request: 0 background catalog calls.
+	for h := 0; h < 48; h++ {
+		now = now.Add(time.Hour)
+		time.Sleep(time.Millisecond)
 	}
-	if c.ModelsSourceLabel() != "dynamic" {
-		t.Errorf("source = %q", c.ModelsSourceLabel())
+	cancel()
+	<-done
+	if n := log.count(""); n != 0 {
+		t.Errorf("calls=%d over 48h without request, want 0 (K14 P3)", n)
+	}
+}
+
+func TestP3_CatalogAfterCookieThrottledTo6HoursAndBlockCooldown(t *testing.T) {
+	oldN, oldB, oldJ := nowFn, blockSchedule, jitterFn
+	now := time.Now()
+	nowFn = func() time.Time { return now }
+	blockSchedule = []time.Duration{5 * time.Minute}
+	jitterFn = func(d time.Duration) time.Duration { return d }
+	defer func() { nowFn, blockSchedule, jitterFn = oldN, oldB, oldJ }()
+
+	var log callLog
+	var blockNext atomic.Bool
+	body := listModelsBody(t, "x1", "x2")
+	c, _ := blockClient(t, rtFunc(func(r *http.Request) (*http.Response, error) {
+		log.add(r)
+		if blockNext.Load() {
+			return &http.Response{StatusCode: 429, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("sorry")), Request: r}, nil
+		}
+		return resp200(r, body), nil
+	}))
+	c.setAt("tok")
+
+	// 1st after-cookie refresh succeeds.
+	if err := c.RefreshCatalogAfterCookie(context.Background()); err != nil {
+		t.Fatalf("first after-cookie refresh failed: %v", err)
+	}
+	if log.count(FamilyBatch) != 1 {
+		t.Fatalf("calls = %d, want 1", log.count(FamilyBatch))
+	}
+	// Within 6h: skipped without Google call.
+	now = now.Add(5 * time.Hour)
+	if err := c.RefreshCatalogAfterCookie(context.Background()); !errors.Is(err, ErrCatalogRefreshRefused) || log.count(FamilyBatch) != 1 {
+		t.Fatalf("within 6h: err=%v calls=%d", err, log.count(FamilyBatch))
+	}
+	// After 6h: allowed again.
+	now = now.Add(61 * time.Minute)
+	if err := c.RefreshCatalogAfterCookie(context.Background()); err != nil || log.count(FamilyBatch) != 2 {
+		t.Fatalf("after 6h: err=%v calls=%d", err, log.count(FamilyBatch))
+	}
+
+	// Block on manual refresh -> CatalogRefreshNextAt returns BackoffUntil, no auto retry.
+	now = now.Add(10 * time.Minute)
+	blockNext.Store(true)
+	if err := c.RefreshModels(context.Background()); !errors.Is(err, ErrGoogleBlocked) {
+		t.Fatalf("expected ErrGoogleBlocked, got %v", err)
+	}
+	if next := c.CatalogRefreshNextAt(); next.IsZero() || next.Sub(now) < 4*time.Minute {
+		t.Fatalf("expected CatalogRefreshNextAt >= 5m block backoff, got %v", next.Sub(now))
+	}
+	// Even advancing clock 48h without explicit request triggers 0 further calls.
+	blockNext.Store(false)
+	now = now.Add(48 * time.Hour)
+	if log.count(FamilyBatch) != 3 {
+		t.Fatalf("expected 3 total calls (no background retries), got %d", log.count(FamilyBatch))
 	}
 }
 

@@ -53,14 +53,15 @@ type cookieAutoRefresher struct {
 	client *gemini.Client
 	log    *slog.Logger
 
-	cmdArgs          []string
-	activityWindow   time.Duration
-	minSpacing       time.Duration
-	manualMinSpacing time.Duration
-	execTimeout      time.Duration
-	waitTimeout      time.Duration
-	pollInterval     time.Duration
-	nowFn            func() time.Time
+	cmdArgs            []string
+	catalogAfterCookie bool
+	activityWindow     time.Duration
+	minSpacing         time.Duration
+	manualMinSpacing   time.Duration
+	execTimeout        time.Duration
+	waitTimeout        time.Duration
+	pollInterval       time.Duration
+	nowFn              func() time.Time
 
 	mu                  sync.Mutex
 	enabled             bool
@@ -96,19 +97,20 @@ func newCookieAutoRefresher(cfg *Config, client *gemini.Client, log *slog.Logger
 	interval := time.Duration(cfg.CookieAutoRefreshMin) * time.Minute
 	now := time.Now().Round(0)
 	return &cookieAutoRefresher{
-		client:           client,
-		log:              log,
-		cmdArgs:          args,
-		activityWindow:   defaultAutoRefreshActivityWindow,
-		minSpacing:       defaultAutoRefreshMinSpacing,
-		manualMinSpacing: defaultManualRefreshMinSpacing,
-		execTimeout:      defaultAutoRefreshExecTimeout,
-		waitTimeout:      defaultAutoRefreshWaitTimeout,
-		pollInterval:     defaultAutoRefreshPollInterval,
-		nowFn:            func() time.Time { return time.Now().Round(0) },
-		enabled:          len(args) > 0 && interval > 0,
-		interval:         interval,
-		startedAt:        now,
+		client:             client,
+		log:                log,
+		cmdArgs:            args,
+		catalogAfterCookie: cfg.CatalogRefreshAfterCookie,
+		activityWindow:     defaultAutoRefreshActivityWindow,
+		minSpacing:         defaultAutoRefreshMinSpacing,
+		manualMinSpacing:   defaultManualRefreshMinSpacing,
+		execTimeout:        defaultAutoRefreshExecTimeout,
+		waitTimeout:        defaultAutoRefreshWaitTimeout,
+		pollInterval:       defaultAutoRefreshPollInterval,
+		nowFn:              func() time.Time { return time.Now().Round(0) },
+		enabled:            len(args) > 0 && interval > 0,
+		interval:           interval,
+		startedAt:          now,
 	}
 }
 
@@ -339,6 +341,11 @@ func (r *cookieAutoRefresher) run(trigger string, done chan struct{}) {
 	if err == nil {
 		r.client.ReloadCookieFromDisk()
 		r.client.UnsuspendRotation()
+		if r.catalogAfterCookie {
+			catCtx, catCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_ = r.client.RefreshCatalogAfterCookie(catCtx)
+			catCancel()
+		}
 	}
 
 	r.mu.Lock()

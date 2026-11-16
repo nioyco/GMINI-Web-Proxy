@@ -147,14 +147,15 @@ type Client struct {
 
 	// Model registry, populated from the listModels RPC (or the static fallback
 	// set). modelOrder preserves a stable listing order.
-	modelMu        sync.Mutex
-	models         map[string]*AvailableModel
-	modelOrder     []string
-	modelsSource   string               // "dynamic" | "fallback" | "static" | "persisted"
-	catalogAt      time.Time            // last successful listModels fetch (or restored state)
-	catalogTriedAt time.Time            // last listModels attempt (success or not)
-	catalogWarnAt  time.Time            // last "model list refresh failed" WARN (guarded by modelMu)
-	absentWarnAt   map[string]time.Time // last "model absent from the last catalogue" WARN per model
+	modelMu              sync.Mutex
+	models               map[string]*AvailableModel
+	modelOrder           []string
+	modelsSource         string               // "dynamic" | "fallback" | "static" | "persisted"
+	catalogAt            time.Time            // last successful listModels fetch (or restored state)
+	catalogTriedAt       time.Time            // last listModels attempt (success or not)
+	catalogAfterCookieAt time.Time            // last listModels attempt after a cookie refresh (K14 P3)
+	catalogWarnAt        time.Time            // last "model list refresh failed" WARN (guarded by modelMu)
+	absentWarnAt         map[string]time.Time // last "model absent from the last catalogue" WARN per model
 	// withdrawn holds models that a later catalogue no longer lists (observed when
 	// the web usage limit is reached). In memory only (guarded by modelMu).
 	withdrawn map[string]WithdrawnModel

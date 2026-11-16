@@ -343,3 +343,81 @@ func TestB8_TickUsesWallClockAcrossSleep(t *testing.T) {
 		t.Fatalf("expected background Tick NOT to fire after 3h13m wall-clock inactivity, got %+v", st)
 	}
 }
+
+func TestP3_CatalogRefreshAfterCookieOption(t *testing.T) {
+	c, cookieFile, _ := newCookieTestClient(t, "SAPISID=s1; __Secure-1PSIDTS=t1", 2*time.Hour)
+	var batchCalls int
+	c.SetTransport(roundTripFn(func(r *http.Request) (*http.Response, error) {
+		if strings.Contains(r.URL.Path, "batchexecute") {
+			batchCalls++
+			m := make([]any, 12)
+			m[0], m[1], m[11] = "hex1", "Fast", "3.5 Flash"
+			b := make([]any, 18)
+			b[15] = []any{m}
+			ib, _ := json.Marshal(b)
+			outer, _ := json.Marshal([]any{[]any{"wrb.fr", "otAQ7b", string(ib)}})
+			return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(")]}'\n" + string(outer))), Request: r}, nil
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+	}))
+	// Write a fresh state with AT token so ReloadCookieFromDisk authenticates.
+	sum := strings.Split(cookieFile, "")
+	_ = sum
+	script := writeFakeScript(t, "exit 0")
+
+	// Default off: 0 batchexecute calls after manual refresh.
+	arOff := newCookieAutoRefresher(&Config{CookieRefreshCmd: script, CatalogRefreshAfterCookie: false}, c, nil)
+	_, code, reason := arOff.RunManual(0)
+	if code != http.StatusOK || reason != "" {
+		t.Fatalf("RunManual off failed: code=%d reason=%s", code, reason)
+	}
+	waitForCondition(t, 2*time.Second, func() bool { return !arOff.Status().Running })
+	if batchCalls != 0 {
+		t.Fatalf("expected 0 catalog calls when CatalogRefreshAfterCookie is off, got %d", batchCalls)
+	}
+
+	// Mode on (with authenticated session via cookie state): 1 batchexecute call after cookie refresh.
+	// Seed state file with matching SAPISID fingerprint and AT token.
+	cfg2 := testConfig()
+	cfg2.CookieRefreshCmd = script
+	cfg2.CatalogRefreshAfterCookie = true
+	dir2 := t.TempDir()
+	cookie2 := filepath.Join(dir2, "cookie.txt")
+	if err := os.WriteFile(cookie2, []byte("SAPISID=s1; __Secure-1PSIDTS=t1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg2.Gemini.CookieFile = cookie2
+	cfg2.Gemini.StateFile = stateFilePath("", cookie2, "")
+	c2, err := gemini.New(cfg2.Gemini, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2.SetTransport(roundTripFn(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/app") {
+			return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(appPage)), Request: r}, nil
+		}
+		if strings.Contains(r.URL.Path, "batchexecute") {
+			batchCalls++
+			m := make([]any, 12)
+			m[0], m[1], m[11] = "hex1", "Fast", "3.5 Flash"
+			b := make([]any, 18)
+			b[15] = []any{m}
+			ib, _ := json.Marshal(b)
+			outer, _ := json.Marshal([]any{[]any{"wrb.fr", "otAQ7b", string(ib)}})
+			return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(")]}'\n" + string(outer))), Request: r}, nil
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+	}))
+	if got := c2.CheckAuth(context.Background()); got != "authenticated" {
+		t.Fatalf("CheckAuth = %q", got)
+	}
+	arOn := newCookieAutoRefresher(cfg2, c2, nil)
+	_, code, reason = arOn.RunManual(0)
+	if code != http.StatusOK || reason != "" {
+		t.Fatalf("RunManual on failed: code=%d reason=%s", code, reason)
+	}
+	waitForCondition(t, 2*time.Second, func() bool { return !arOn.Status().Running })
+	if batchCalls != 1 {
+		t.Fatalf("expected 1 catalog call when CatalogRefreshAfterCookie is on, got %d", batchCalls)
+	}
+}

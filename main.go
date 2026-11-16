@@ -78,9 +78,9 @@ func main() {
 	if srv.autoRefresh != nil {
 		go srv.autoRefresh.Loop(ctx)
 	}
-	// The catalog is refreshed at most once per GEMINI_MODELS_REFRESH_HOURS, on its
-	// own timer (never chained to a rotation tick).
-	go client.CatalogRefreshLoop(ctx, time.Duration(cfg.ModelsRefreshHours)*time.Hour)
+	// Periodic catalog refresh was removed in K14 P3: the catalog is only
+	// refreshed on explicit request, at startup without a <7d persisted copy, or
+	// optionally after a successful cookie refresh (<=1/6h).
 	// Whenever a cookie is configured, watch the session: while it is not signed in
 	// (Google block at startup, stale cookie, session lost after a generation
 	// error) it is re-checked sparingly; while signed in, no call is made.
@@ -146,9 +146,9 @@ func startSession(ctx context.Context, cfg *Config, client *gemini.Client, logge
 		client.StartupRotate(ctx)
 		authStatus = fmt.Sprintf("%s (auto-refresh %dm)", authStatus, cfg.CookieRefresh)
 	}
-	// The catalog is fetched at startup only when no recent (<24h) catalog was
-	// restored (even across a session change; the catalog loop refreshes when due).
-	if !restored.CatalogFresh {
+	// The catalog is fetched at startup only when no persisted catalog (<7 days)
+	// was restored (even across a session change; K14 P3).
+	if !restored.CatalogRestored {
 		client.ResolveModels(ctx)
 	}
 	return authStatus, refresh

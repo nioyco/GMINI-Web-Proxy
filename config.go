@@ -112,9 +112,13 @@ type Config struct {
 	// AllowedHosts are extra Host header values accepted beside the loopback names
 	// (GEMINI_ALLOWED_HOSTS, comma-separated).
 	AllowedHosts []string
-	// ModelsRefreshHours spaces the periodic catalog refresh (listModels)
-	// (GEMINI_MODELS_REFRESH_HOURS, default 24; 0 = startup and explicit requests only).
+	// ModelsRefreshHours is kept for backward compatibility (deprecated: periodic
+	// background catalog refresh was removed in K14 P3; default 0).
 	ModelsRefreshHours int
+	// CatalogRefreshAfterCookie optionally refreshes the catalog right after a
+	// successful cookie refresh, at most once per 6 hours
+	// (GEMINI_CATALOG_REFRESH_AFTER_COOKIE, default off = false; K14 P3).
+	CatalogRefreshAfterCookie bool
 	// BlockMaxBackoffMin is the top step of the anti-bot backoff
 	// (GEMINI_BLOCK_MAX_BACKOFF_MIN, default 60).
 	BlockMaxBackoffMin int
@@ -174,7 +178,8 @@ func loadConfig(envFile string) *Config {
 		MaxPromptBytes:              getEnvInt("GEMINI_MAX_PROMPT_BYTES", 0),
 		CORSOrigins:                 splitKeys(getEnv("GEMINI_CORS_ORIGINS", "")),
 		AllowedHosts:                splitKeys(getEnv("GEMINI_ALLOWED_HOSTS", "")),
-		ModelsRefreshHours:          nonNegative(getEnvInt("GEMINI_MODELS_REFRESH_HOURS", 24), 24),
+		ModelsRefreshHours:          nonNegative(getEnvInt("GEMINI_MODELS_REFRESH_HOURS", 0), 0),
+		CatalogRefreshAfterCookie:   getEnvBool("GEMINI_CATALOG_REFRESH_AFTER_COOKIE", false),
 		BlockMaxBackoffMin:          positive(getEnvInt("GEMINI_BLOCK_MAX_BACKOFF_MIN", 60), 60),
 		StateMaxAgeMin:              positive(getEnvInt("GEMINI_STATE_MAX_AGE_MIN", 1440), 1440),
 		Gemini: gemini.Config{

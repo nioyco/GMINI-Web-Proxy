@@ -297,17 +297,18 @@ func TestLot1SessionSettings(t *testing.T) {
 	}
 	t.Setenv("GEMINI_COOKIE_FILE", "/d/cookie.txt")
 	cfg := loadConfig(filepath.Join(t.TempDir(), "none.env"))
-	if cfg.Gemini.BlockMaxBackoff != time.Hour || cfg.Gemini.StateMaxAge != 24*time.Hour || cfg.ModelsRefreshHours != 24 ||
-		cfg.Gemini.StateFile != "/d/cookie.txt.state.json" {
-		t.Errorf("defaults: backoff=%v stateAge=%v refresh=%d state=%q", cfg.Gemini.BlockMaxBackoff, cfg.Gemini.StateMaxAge, cfg.ModelsRefreshHours, cfg.Gemini.StateFile)
+	if cfg.Gemini.BlockMaxBackoff != time.Hour || cfg.Gemini.StateMaxAge != 24*time.Hour || cfg.ModelsRefreshHours != 0 ||
+		cfg.CatalogRefreshAfterCookie || cfg.Gemini.StateFile != "/d/cookie.txt.state.json" {
+		t.Errorf("defaults: backoff=%v stateAge=%v refresh=%d afterCookie=%v state=%q", cfg.Gemini.BlockMaxBackoff, cfg.Gemini.StateMaxAge, cfg.ModelsRefreshHours, cfg.CatalogRefreshAfterCookie, cfg.Gemini.StateFile)
 	}
 	t.Setenv("GEMINI_BLOCK_MAX_BACKOFF_MIN", "30")
 	t.Setenv("GEMINI_STATE_MAX_AGE_MIN", "0") // invalid -> default
-	t.Setenv("GEMINI_MODELS_REFRESH_HOURS", "0")
+	t.Setenv("GEMINI_MODELS_REFRESH_HOURS", "24")
+	t.Setenv("GEMINI_CATALOG_REFRESH_AFTER_COOKIE", "on")
 	t.Setenv("GEMINI_STATE_FILE", "off")
 	cfg = loadConfig(filepath.Join(t.TempDir(), "none.env"))
-	if cfg.Gemini.BlockMaxBackoff != 30*time.Minute || cfg.Gemini.StateMaxAge != 24*time.Hour || cfg.ModelsRefreshHours != 0 || cfg.Gemini.StateFile != "" {
-		t.Errorf("overrides: backoff=%v stateAge=%v refresh=%d state=%q", cfg.Gemini.BlockMaxBackoff, cfg.Gemini.StateMaxAge, cfg.ModelsRefreshHours, cfg.Gemini.StateFile)
+	if cfg.Gemini.BlockMaxBackoff != 30*time.Minute || cfg.Gemini.StateMaxAge != 24*time.Hour || cfg.ModelsRefreshHours != 24 || !cfg.CatalogRefreshAfterCookie || cfg.Gemini.StateFile != "" {
+		t.Errorf("overrides: backoff=%v stateAge=%v refresh=%d afterCookie=%v state=%q", cfg.Gemini.BlockMaxBackoff, cfg.Gemini.StateMaxAge, cfg.ModelsRefreshHours, cfg.CatalogRefreshAfterCookie, cfg.Gemini.StateFile)
 	}
 }
 
