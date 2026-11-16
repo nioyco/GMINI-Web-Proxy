@@ -432,3 +432,73 @@ func TestP4_AuthRecoveryOffByDefault(t *testing.T) {
 		t.Fatal("GEMINI_AUTH_RECOVERY=on must enable AuthRecovery")
 	}
 }
+
+func TestK14_WarmStartAndUIStatePollingMakeZeroGoogleCalls(t *testing.T) {
+	dir := t.TempDir()
+	cfg := startupConfig(t, dir)
+	// Override startupConfig's test helper defaults with real K14 defaults from loadConfig.
+	noEnv := filepath.Join(t.TempDir(), "none.env")
+	t.Setenv("GEMINI_COOKIE_ROTATION", "")
+	t.Setenv("GEMINI_CATALOG_REFRESH_AFTER_COOKIE", "")
+	t.Setenv("GEMINI_AUTH_RECOVERY", "")
+	t.Setenv("GEMINI_IDLE_QUIET_MIN", "")
+	def := loadConfig(noEnv)
+	cfg.CookieRotation = def.CookieRotation
+	cfg.Gemini.CookieRotation = def.Gemini.CookieRotation
+	cfg.CatalogRefreshAfterCookie = def.CatalogRefreshAfterCookie
+	cfg.AuthRecovery = def.AuthRecovery
+	cfg.IdleQuietMin = def.IdleQuietMin
+	cfg.Gemini.IdleQuiet = def.Gemini.IdleQuiet
+	cfg.UIEnabled = true
+
+	// Seed a warm state with a 3-day-old catalog (<7d) and fresh session token.
+	sum := sha256.Sum256([]byte("s"))
+	fp := hex.EncodeToString(sum[:])[:16]
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+	threeDaysAgo := time.Now().Add(-72 * time.Hour).UTC().Format(time.RFC3339)
+	raw, _ := json.Marshal(map[string]any{
+		"version":             1,
+		"saved_at":            nowStr,
+		"session_fingerprint": fp,
+		"at":                  "WARM_AT",
+		"at_at":               nowStr,
+		"bl":                  "boq_warm",
+		"bl_at":               nowStr,
+		"psidts_at":           nowStr,
+		"models": []map[string]any{
+			{"Name": "gemini-quick-answers", "ModelID": "8c46e95b1a07cecc"},
+			{"Name": "gemini-detailed-research", "ModelID": "e6fa609c3fa255c0"},
+		},
+		"models_at":     threeDaysAgo,
+		"models_source": "dynamic",
+	})
+	if err := os.WriteFile(cfg.Gemini.StateFile, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, sim := startupClient(t, cfg)
+	_, refresh := startSession(context.Background(), cfg, c, testLogger())
+	if refresh {
+		t.Fatal("expected refresh=false by default")
+	}
+
+	s := newServer(cfg, c, testLogger())
+	h := s.handler()
+	// Passive polling of /_ui, /_ui/api/state, /_status, /v1/models must NEVER count as user activity or trigger Google calls.
+	for i := 0; i < 5; i++ {
+		w1 := httptest.NewRecorder()
+		h.ServeHTTP(w1, newReq(http.MethodGet, "/_status", nil))
+		w2 := httptest.NewRecorder()
+		r2 := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8081/_ui/api/state", nil)
+		r2.RemoteAddr = "127.0.0.1:5000"
+		r2.Header.Set("X-GMINI-UI", s.uiToken)
+		h.ServeHTTP(w2, r2)
+	}
+	// Even if a background loop checks AcquireBackground, passive polling must NOT have opened the quiet gate.
+	if c.AcquireBackground(gemini.FamilyAccounts, "cookie_rotation") {
+		t.Fatal("passive /_status and /_ui/api/state polling must not count as user activity")
+	}
+	if sim.total() != 0 {
+		t.Fatalf("expected 0 Google calls, got %v", sim.calls)
+	}
+}

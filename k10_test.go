@@ -422,3 +422,107 @@ func TestP3_CatalogRefreshAfterCookieOption(t *testing.T) {
 		t.Fatalf("expected 1 catalog call when CatalogRefreshAfterCookie is on, got %d", batchCalls)
 	}
 }
+
+func TestP7_AutoRefreshDisabledZeroProcessesAndPassesThroughP5(t *testing.T) {
+	// 1. Disabled by GEMINI_COOKIE_AUTO_REFRESH_MIN=0 or Toggle(false):
+	//    Tick, PrepareRequest, TriggerEarly emit 0 Google calls, 0 background_call logs, 0 processes.
+	markerFile := filepath.Join(t.TempDir(), "should_not_run")
+	script := writeFakeScript(t, fmt.Sprintf("touch %q\n", markerFile))
+	var googleCalls int
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	dir1 := t.TempDir()
+	cookie1 := filepath.Join(dir1, "cookie.txt")
+	if err := os.WriteFile(cookie1, []byte("SAPISID=s1; __Secure-1PSIDTS=t1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := gemini.New(gemini.Config{
+		GeminiBL:   "bl_old",
+		CookieFile: cookie1,
+		StateFile:  cookie1 + ".state.json",
+	}, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetTransport(roundTripFn(func(r *http.Request) (*http.Response, error) {
+		googleCalls++
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+	}))
+
+	// Case A: interval=0 (disabled by default even with command set).
+	arZero := newCookieAutoRefresher(&Config{CookieAutoRefreshMin: 0, CookieRefreshCmd: script}, c, logger)
+	now := time.Now()
+	arZero.nowFn = func() time.Time { return now }
+	arZero.startedAt = now.Add(-4 * time.Hour)
+	arZero.lastActivityAt = now.Add(-2 * time.Minute)
+	arZero.Tick()
+	arZero.PrepareRequest(context.Background(), nil)
+	arZero.TriggerEarly()
+	time.Sleep(40 * time.Millisecond)
+
+	// Case B: interval=90 but toggled off.
+	arToggledOff := newCookieAutoRefresher(&Config{CookieAutoRefreshMin: 90, CookieRefreshCmd: script}, c, logger)
+	arToggledOff.nowFn = func() time.Time { return now }
+	arToggledOff.startedAt = now.Add(-4 * time.Hour)
+	off := false
+	arToggledOff.Toggle(&off)
+	arToggledOff.lastActivityAt = now.Add(-2 * time.Minute)
+	arToggledOff.Tick()
+	arToggledOff.PrepareRequest(context.Background(), nil)
+	arToggledOff.TriggerEarly()
+	time.Sleep(40 * time.Millisecond)
+
+	if _, err := os.Stat(markerFile); !os.IsNotExist(err) {
+		t.Fatal("disabled auto-refresh launched external process")
+	}
+	if googleCalls != 0 {
+		t.Fatalf("disabled auto-refresh made %d Google calls, want 0", googleCalls)
+	}
+	if strings.Contains(logBuf.String(), "background_call") || strings.Contains(logBuf.String(), "cookie_auto_refresh") {
+		t.Fatalf("disabled auto-refresh emitted unexpected logs:\n%s", logBuf.String())
+	}
+
+	// 2. Enabled auto-refresh passes through P5:
+	//    When idle (>10m, even within K10's 90m activityWindow), P5 refuses Tick() and launches 0 processes.
+	var logIdle bytes.Buffer
+	idleLogger := slog.New(slog.NewTextHandler(&logIdle, nil))
+	dirIdle := t.TempDir()
+	cookieIdle := filepath.Join(dirIdle, "cookie.txt")
+	if err := os.WriteFile(cookieIdle, []byte("SAPISID=s1; __Secure-1PSIDTS=t1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cIdle, err := gemini.New(gemini.Config{
+		GeminiBL:   "bl_old",
+		CookieFile: cookieIdle,
+		StateFile:  cookieIdle + ".state.json",
+	}, idleLogger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arOn := newCookieAutoRefresher(&Config{CookieAutoRefreshMin: 90, CookieRefreshCmd: script}, cIdle, idleLogger)
+	arOn.nowFn = func() time.Time { return now }
+	arOn.startedAt = now.Add(-4 * time.Hour)
+	arOn.lastActivityAt = now.Add(-20 * time.Minute) // inside 90m K10 window, but no cIdle.RecordUserActivity() within 10m!
+	arOn.Tick()
+	time.Sleep(40 * time.Millisecond)
+	if _, err := os.Stat(markerFile); !os.IsNotExist(err) {
+		t.Fatal("P5 quiet guard should have blocked Tick() from launching process")
+	}
+	if !strings.Contains(logIdle.String(), "background_call") || !strings.Contains(logIdle.String(), "reason=cookie_auto_refresh_background") || !strings.Contains(logIdle.String(), "allowed=false") {
+		t.Fatalf("expected P5 refusal log for auto-refresh Tick(), got:\n%s", logIdle.String())
+	}
+
+	// 3. Enabled auto-refresh with recent user activity passes P5 and logs allowed=true.
+	cIdle.RecordUserActivity()
+	arOn.Tick()
+	waitForCondition(t, 2*time.Second, func() bool {
+		st := arOn.Status()
+		return !st.Running && st.LastOK != nil && *st.LastOK
+	})
+	if _, err := os.Stat(markerFile); err != nil {
+		t.Fatalf("expected process to run after user activity: %v", err)
+	}
+	if !strings.Contains(logIdle.String(), "reason=cookie_auto_refresh_background") || !strings.Contains(logIdle.String(), "allowed=true") {
+		t.Fatalf("expected P5 allowed=true log, got:\n%s", logIdle.String())
+	}
+}
