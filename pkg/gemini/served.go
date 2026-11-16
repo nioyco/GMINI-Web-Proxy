@@ -291,10 +291,18 @@ func (c *Client) recordCall(r CallRecord, scan *idScan) {
 			"identity", r.Identity, "served_id", r.ServedID, "served_name", r.ServedName,
 			"seen_model_ids", strings.Join(r.SeenModelIDs, ","), "suspect", r.Suspect,
 			"first_text_ms", r.FirstTextMS, "thought_bytes", r.ThoughtBytes)
-	} else if c.cfg.LogParams {
-		c.log.Info("served_model", "request_id", r.RequestID, "model", r.Model, "identity", r.Identity,
-			"served_id", r.ServedID, "served_name", r.ServedName,
-			"seen_model_ids", strings.Join(r.SeenModelIDs, ","), "other_hex_ids", r.OtherHexIDs)
+	} else {
+		if r.Identity == "confirmed" && r.ServedName != "" {
+			if m, err := c.ResolveModel(r.Model); err == nil && m != nil && m.Description != "" && r.ServedName != m.Description {
+				c.log.Info("served_name_changed", "request_id", r.RequestID, "model", r.Model, "model_id", r.ModelID,
+					"catalog_name", m.Description, "served_name", r.ServedName)
+			}
+		}
+		if c.cfg.LogParams {
+			c.log.Info("served_model", "request_id", r.RequestID, "model", r.Model, "identity", r.Identity,
+				"served_id", r.ServedID, "served_name", r.ServedName,
+				"seen_model_ids", strings.Join(r.SeenModelIDs, ","), "other_hex_ids", r.OtherHexIDs)
+		}
 	}
 }
 

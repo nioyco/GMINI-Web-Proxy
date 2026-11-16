@@ -96,13 +96,13 @@ type uiModel struct {
 	MedianFirstMS       int64  `json:"median_first_text_ms"`    // -1: no data
 	MedianFirstSignMS   int64  `json:"median_first_sign_ms"`    // -1: no data (min of first_thought_ms, first_text_ms)
 	MedianFirstThoughtM int64  `json:"median_first_thought_ms"` // -1: no data
-	LastTime       string `json:"last_time"`
-	LastIdentity   string `json:"last_identity"`
-	LastSuspect    string `json:"last_suspect"`
-	LastSeenModels string `json:"last_seen_models"` // display names of catalogue ids found in the last reply
-	LastServed     string `json:"last_served"`      // model name stated by Google in the last reply
-	Calls5h        int    `json:"calls_5h"`         // generations sent to Gemini in the last 5 hours
-	MismatchSince  string `json:"mismatch_since,omitempty"`
+	LastTime            string `json:"last_time"`
+	LastIdentity        string `json:"last_identity"`
+	LastSuspect         string `json:"last_suspect"`
+	LastSeenModels      string `json:"last_seen_models"` // display names of catalogue ids found in the last reply
+	LastServed          string `json:"last_served"`      // model name stated by Google in the last reply
+	Calls5h             int    `json:"calls_5h"`         // generations sent to Gemini in the last 5 hours
+	MismatchSince       string `json:"mismatch_since,omitempty"`
 }
 
 type uiAntigravity struct {
