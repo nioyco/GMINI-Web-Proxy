@@ -53,6 +53,9 @@ type Config struct {
 	// ToolPromptReminder appends a short 3-line reminder just before the last
 	// user request when tools are active (GEMINI_TOOL_PROMPT_REMINDER, default true).
 	ToolPromptReminder bool
+	// InternalToolAction controls how the proxy reacts when an internal Google tool
+	// is detected (GEMINI_INTERNAL_TOOL_ACTION = notify | retry | off; default notify).
+	InternalToolAction string
 	// DisableMarkerNeutralization stops escaping history markers ([User]:, ...) found
 	// in input contents (GEMINI_NEUTRALIZE_HISTORY_MARKERS=0|false|off; default: on).
 	DisableMarkerNeutralization bool
@@ -138,6 +141,7 @@ func loadConfig(envFile string) *Config {
 		DisableEchoFilter:           !getEnvBool("GEMINI_STRIP_HISTORY_ECHO", true),
 		DisableToolPromptRules:      !getEnvBool("GEMINI_TOOL_PROMPT_NOECHO_RULES", true),
 		ToolPromptReminder:          getEnvBool("GEMINI_TOOL_PROMPT_REMINDER", true),
+		InternalToolAction:          normalizeInternalToolAction(getEnv("GEMINI_INTERNAL_TOOL_ACTION", "notify")),
 		DisableMarkerNeutralization: !getEnvBool("GEMINI_NEUTRALIZE_HISTORY_MARKERS", true),
 		KeepTextAfterToolCall:       !getEnvBool("GEMINI_DROP_TEXT_AFTER_TOOL_CALL", true),
 		UIEnabled:                   getEnvBool("GEMINI_UI", true),
@@ -234,6 +238,15 @@ func normalizeListen(s string) string {
 		return "127.0.0.1" + s
 	}
 	return s
+}
+
+func normalizeInternalToolAction(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "retry", "off", "notify":
+		return strings.ToLower(strings.TrimSpace(v))
+	default:
+		return "notify"
+	}
 }
 
 // defaultShutdownGraceSec is the default graceful-shutdown window.

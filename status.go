@@ -37,6 +37,7 @@ type statusResponse struct {
 	MaxPromptBytes     int                     `json:"max_prompt_bytes"`           // GEMINI_MAX_PROMPT_BYTES (0 = no limit)
 	MaxHeldBytes       int                     `json:"max_held_bytes"`             // GEMINI_MAX_HELD_BYTES (0 = no limit)
 	MaxHeldSec         int                     `json:"max_held_sec"`               // GEMINI_MAX_HELD_SEC (0 = no limit)
+	InternalToolAction string                  `json:"internal_tool_action"`       // GEMINI_INTERNAL_TOOL_ACTION (notify|retry|off)
 	TraceEnabled       bool                    `json:"content_trace_enabled"`      // GEMINI_TRACE_DIR set (files hold conversation content)
 	TemporaryChat      bool                    `json:"temporary_chat"`             // GEMINI_TEMPORARY_CHAT
 	IgnoredFields      ignoredFields           `json:"ignored_request_fields"`
@@ -176,8 +177,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		ModelsCount:      len(s.client.ModelNames()),
 		DefaultModel:     s.client.DefaultModelName(),
 		ActiveRequests:   s.active.count(),
-		SSEKeepaliveSec:  s.cfg.SSEKeepaliveSec,
-		ShutdownGraceSec: s.cfg.ShutdownGraceSec,
+		SSEKeepaliveSec:    s.cfg.SSEKeepaliveSec,
+		ShutdownGraceSec:   s.cfg.ShutdownGraceSec,
+		InternalToolAction: normalizeInternalToolAction(s.cfg.InternalToolAction),
 		Counters: map[string]int64{
 			"requests_total":            s.stats.requests.Load(),
 			"responses_2xx":             s.stats.status2xx.Load(),

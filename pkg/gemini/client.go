@@ -80,6 +80,10 @@ var ErrEarlyStop = errors.New("early_stop")
 // a runaway upstream stream because a safety cap was exceeded without a tool call.
 var ErrEarlyStopAborted = errors.New("early_stop_aborted")
 
+// ErrInternalToolRetry is used as a cancellation cause when the proxy aborts a
+// stream upon detecting an internal Google tool so it can retry once (B2).
+var ErrInternalToolRetry = errors.New("internal_tool_retry")
+
 // readLimited reads at most max bytes, returning ErrResponseTooLarge when the
 // body is longer.
 func readLimited(r io.Reader, max int64) ([]byte, error) {
@@ -922,6 +926,8 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 		if runErr != nil {
 			if errors.Is(runErr, ErrEarlyStopAborted) {
 				rec.Error = "early_stop"
+			} else if errors.Is(runErr, ErrInternalToolRetry) {
+				rec.Error = "internal_tool_retry"
 			} else {
 				rec.Error = "stream_interrupted"
 			}
@@ -937,6 +943,9 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 		}
 		if errors.Is(cause, ErrEarlyStopAborted) {
 			return ErrEarlyStopAborted, true
+		}
+		if errors.Is(cause, ErrInternalToolRetry) {
+			return ErrInternalToolRetry, true
 		}
 		return nil, false
 	}

@@ -260,10 +260,18 @@ func IsUpstreamToolRefusal(text string) bool {
 	return toolRefusalEN.MatchString(t) || toolRefusalFR.MatchString(t)
 }
 
-var internalToolRe = regexp.MustCompile(`(?i)(expand_skills|retriever:expand_skills|<GenerateWidget\b|trigger(ing)?\s+artifact\s+generation|artifact\s+generation\s+using)`)
+var internalToolRe = regexp.MustCompile(`(?i)(expand_skills|expand_tools|retriever:expand_skills|<GenerateWidget\b|trigger(ed|ing)?\s+artifact\s+generation|artifact\s+generation\s+using)`)
 
 // IsInternalToolSignal reports whether text or thought indicates that Gemini
 // tried to use its built-in internal tools (expand_skills, internal artifact, widget).
 func IsInternalToolSignal(text string) bool {
 	return internalToolRe.MatchString(text)
+}
+
+var internalToolStatusRe = regexp.MustCompile(`(?i)(trigger(ed|ing)?\s+artifact\s+generation|searching\s+the\s+web|google\s+(search|drive|docs)|drive_mcp|docs_agent|context_service|expand_skills)`)
+
+// IsInternalToolStatus reports whether a body[2]["7"] progress status string
+// indicates an internal Google tool is running.
+func IsInternalToolStatus(status string) bool {
+	return internalToolStatusRe.MatchString(status)
 }

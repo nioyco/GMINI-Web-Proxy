@@ -473,6 +473,34 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 		s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, res.earlyStopMsg, nil)), sse.done())
 		return
 	}
+	if res.internalToolRetry {
+		if s.cfg.StreamThoughts {
+			if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, "\nGemini a tenté d'utiliser un outil interne : nouvelle tentative avec rappel renforcé…\n")); err != nil {
+				s.rlog(ctx).Warn("sse write failed", "err", err)
+				return
+			}
+		}
+		bres := s.awaitGenerate(ctx, sse, internalToolRetryParams(p), interval)
+		switch {
+		case bres.out == kaGone:
+		case bres.out == kaShutdown:
+			s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
+		case bres.err != nil:
+			s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+bres.err.Error())), sse.done())
+		default:
+			if !res.warnEmitted {
+				if note := s.maybeSuspectWarning(ctx, model); note != "" {
+					if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, note)); err != nil {
+						s.rlog(ctx).Warn("sse write failed", "err", err)
+						return
+					}
+				}
+			}
+			text, toolCalls := s.finishText(ctx, bres.text, true, declared)
+			s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
+		}
+		return
+	}
 	if res.earlyStopReason == "" && (res.genErr != nil || res.rawText == "") {
 		if !res.forwarded && (res.genErr == nil || gemini.Retryable(res.genErr)) && !errors.Is(res.genErr, gemini.ErrSessionAuth) {
 			// Nothing reached the client yet: let the buffered path retry.
@@ -604,26 +632,29 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 }
 
 type streamToolsHooks struct {
-	progressive bool
-	cid         string
-	created     int64
-	model       string
-	gate        *apiconv.ProgressGate
-	echo        *apiconv.EchoFilter
+	progressive     bool
+	noInternalRetry bool
+	cid             string
+	created         int64
+	model           string
+	gate            *apiconv.ProgressGate
+	echo            *apiconv.EchoFilter
 }
 
 type streamToolsResult struct {
-	rawText          string
-	earlyStopReason  string // "" | "marker" | "size" | "duration"
-	earlyStopMsg     string
-	genErr           error
-	forwarded        bool
-	released         bool
-	early            string
-	warnEmitted      bool
-	aborted          bool // SSE write failed or client cancelled
-	created          int64
-	transmittedBytes int
+	rawText           string
+	earlyStopReason   string // "" | "marker" | "size" | "duration"
+	earlyStopMsg      string
+	internalToolRetry bool
+	internalToolName  string
+	genErr            error
+	forwarded         bool
+	released          bool
+	early             string
+	warnEmitted       bool
+	aborted           bool // SSE write failed or client cancelled
+	created           int64
+	transmittedBytes  int
 }
 
 // runStreamTools drives s.streamEvents for all stream+tools routes with keepalives,
@@ -697,6 +728,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	var lastStatusText string
 	completeToolCalls, lastCompleteEnd := 0, 0
 	lastHeldNoteBytes := 0
+	internalToolNotified := false
 
 	write := func(err error) bool {
 		if err != nil {
@@ -741,17 +773,47 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		}
 	}
 
-	handle := func(e event) bool {
-		if e.internalTool != "" {
-			if ri != nil {
-				ri.setInternalTool(e.internalTool)
-				if !ri.internalTool.Swap(true) {
-					s.stats.internalToolDetected.Add(1)
-				}
-			} else {
+	onInternalTool := func(name string) bool {
+		if ri != nil {
+			ri.setInternalTool(name)
+			if !ri.internalTool.Swap(true) {
 				s.stats.internalToolDetected.Add(1)
 			}
+		} else {
+			s.stats.internalToolDetected.Add(1)
+		}
+		action := normalizeInternalToolAction(s.cfg.InternalToolAction)
+		switch action {
+		case "off":
 			return true
+		case "retry":
+			if !res.released && res.transmittedBytes == 0 && completeToolCalls == 0 && (hooks == nil || !hooks.noInternalRetry) {
+				res.internalToolRetry = true
+				res.internalToolName = name
+				s.rlog(ctx).Warn("internal_tool_retry", "tool", name)
+				cancel(gemini.ErrInternalToolRetry)
+				return false
+			}
+			// Already transmitted text/tool_call: cannot retry, fall back to notify.
+		}
+		if !internalToolNotified {
+			internalToolNotified = true
+			if ri != nil {
+				ri.setStatusNote("Gemini lance un outil interne (" + name + ") ; la réponse peut tarder")
+			}
+			if hooks != nil && hooks.progressive && s.cfg.StreamThoughts {
+				res.forwarded = true
+				if !write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, "\nGemini lance un outil interne ; la réponse peut tarder.\n"))) {
+					return false
+				}
+			}
+		}
+		return true
+	}
+
+	handle := func(e event) bool {
+		if e.internalTool != "" {
+			return onInternalTool(e.internalTool)
 		}
 		if e.limitBanner != "" {
 			if ri != nil {
@@ -765,8 +827,8 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			return true
 		}
 		if apiconv.IsInternalToolSignal(e.thought) || apiconv.IsInternalToolSignal(e.text) {
-			if ri != nil && !ri.internalTool.Swap(true) {
-				s.stats.internalToolDetected.Add(1)
+			if !onInternalTool("artifact/skills") {
+				return false
 			}
 		}
 		if e.servedID != "" {
@@ -798,6 +860,11 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			silenceWarned = false
 			if ri != nil {
 				ri.setStatusNote("Google : " + e.status)
+			}
+			if apiconv.IsInternalToolStatus(e.status) {
+				if !onInternalTool(e.status) {
+					return false
+				}
 			}
 			if e.status != lastStatusText && hooks != nil && hooks.progressive && s.cfg.StreamThoughts &&
 				(lastStatusAt.IsZero() || time.Since(lastStatusAt) >= statusNoteEvery) {
@@ -1056,6 +1123,9 @@ func (s *Server) awaitStreamOrGenerate(ctx context.Context, sse *sseStream, p ge
 	if res.earlyStopReason != "" {
 		return kaResult{text: res.rawText}
 	}
+	if res.internalToolRetry {
+		return s.awaitGenerate(ctx, sse, internalToolRetryParams(p), interval)
+	}
 	if res.genErr != nil || res.rawText == "" {
 		if res.genErr == nil || (gemini.Retryable(res.genErr) && !errors.Is(res.genErr, gemini.ErrSessionAuth)) {
 			return s.awaitGenerate(ctx, sse, p, interval)
@@ -1095,6 +1165,13 @@ const toolRefusalRetryNote = "\n\n[Retry instruction: The listed tools are NOT b
 
 func toolRefusalRetryParams(p gemini.GenParams) gemini.GenParams {
 	p.Prompt += toolRefusalRetryNote
+	return p
+}
+
+const internalToolRetryNote = "\n\n[CRITICAL REMINDER: Do NOT invoke any internal Google tool, Canvas, artifact generator, widget, Google Search, Drive, or Docs. Use ONLY the provided local tools, or reply directly in plain text.]"
+
+func internalToolRetryParams(p gemini.GenParams) gemini.GenParams {
+	p.Prompt += internalToolRetryNote
 	return p
 }
 
