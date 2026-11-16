@@ -216,9 +216,6 @@ func (r *cookieAutoRefresher) canLaunchLocked(now time.Time) (bool, string) {
 			return false, "paused_failures"
 		}
 	}
-	if r.client.GoogleBlockStatus().Active {
-		return false, "google_blocked"
-	}
 	if !r.lastLaunchAt.IsZero() && now.Round(0).Sub(r.lastLaunchAt.Round(0)) < r.minSpacing {
 		return false, "min_spacing"
 	}
@@ -249,6 +246,10 @@ func (r *cookieAutoRefresher) Tick() {
 		r.mu.Unlock()
 		return
 	}
+	if !r.client.AcquireBackground(gemini.FamilyApp, "cookie_auto_refresh_background") {
+		r.mu.Unlock()
+		return
+	}
 	r.startRunLocked(now, "background")
 	r.mu.Unlock()
 }
@@ -257,6 +258,7 @@ func (r *cookieAutoRefresher) Tick() {
 // token is older than the configured interval, runs a synchronous refresh
 // (capped at 45 s) before the request proceeds.
 func (r *cookieAutoRefresher) PrepareRequest(ctx context.Context, onWait func()) {
+	r.client.RecordUserActivity()
 	r.mu.Lock()
 	now := r.nowFn().Round(0)
 	wasIdle := r.lastActivityAt.IsZero() || now.Sub(r.lastActivityAt.Round(0)) > r.activityWindow
@@ -271,7 +273,7 @@ func (r *cookieAutoRefresher) PrepareRequest(ctx context.Context, onWait func())
 			waitCh = r.runDone
 		}
 	} else if r.tokenDueLocked(now) {
-		if ok, _ := r.canLaunchLocked(now); ok {
+		if ok, _ := r.canLaunchLocked(now); ok && r.client.AcquireBackground(gemini.FamilyApp, "cookie_auto_refresh_on_demand") {
 			waitCh = r.startRunLocked(now, "on_demand")
 		}
 	}
@@ -296,6 +298,7 @@ func (r *cookieAutoRefresher) PrepareRequest(ctx context.Context, onWait func())
 // TriggerEarly launches an early refresh when Gemini serves another model
 // (at most once per minSpacing = 60 min).
 func (r *cookieAutoRefresher) TriggerEarly() {
+	r.client.RecordUserActivity()
 	r.mu.Lock()
 	now := r.nowFn()
 	if r.running {
@@ -303,6 +306,10 @@ func (r *cookieAutoRefresher) TriggerEarly() {
 		return
 	}
 	if ok, _ := r.canLaunchLocked(now); !ok {
+		r.mu.Unlock()
+		return
+	}
+	if !r.client.AcquireBackground(gemini.FamilyApp, "cookie_auto_refresh_other_model") {
 		r.mu.Unlock()
 		return
 	}
@@ -412,6 +419,11 @@ func (r *cookieAutoRefresher) RunManual(activeInFlight int) (cookieAutoRefreshSt
 	if !r.lastLaunchAt.IsZero() && r.manualMinSpacing > 0 && now.Sub(r.lastLaunchAt.Round(0)) < r.manualMinSpacing {
 		r.mu.Unlock()
 		return r.Status(), http.StatusConflict, "cooldown"
+	}
+	r.client.RecordUserActivity()
+	if !r.client.AcquireBackground(gemini.FamilyApp, "cookie_auto_refresh_manual") {
+		r.mu.Unlock()
+		return r.Status(), http.StatusConflict, "google_blocked"
 	}
 	r.startRunLocked(now, "manual")
 	r.mu.Unlock()

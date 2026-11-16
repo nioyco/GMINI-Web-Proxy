@@ -155,6 +155,7 @@ func (s *Server) handleUICookieRefreshToggle(w http.ResponseWriter, r *http.Requ
 	if !s.uiAllowed(w, r, true) {
 		return
 	}
+	s.client.RecordUserActivity()
 	if s.autoRefresh == nil {
 		sendError(w, http.StatusServiceUnavailable, "cookie auto-refresh unavailable")
 		return
@@ -173,6 +174,7 @@ func (s *Server) handleUICookieRefreshRun(w http.ResponseWriter, r *http.Request
 	if !s.uiAllowed(w, r, true) {
 		return
 	}
+	s.client.RecordUserActivity()
 	if s.autoRefresh == nil {
 		sendError(w, http.StatusServiceUnavailable, "cookie auto-refresh unavailable")
 		return

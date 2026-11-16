@@ -154,6 +154,7 @@ func (s *Server) handleUILaunch(w http.ResponseWriter, r *http.Request) {
 	if !s.uiAllowed(w, r, true) {
 		return
 	}
+	s.client.RecordUserActivity()
 	var req struct {
 		Path string `json:"path"`
 	}

@@ -574,7 +574,7 @@ func (c *Client) reloadSession(ctx context.Context) bool {
 		c.log.Warn("session reload skipped: previous reload too recent", "min_interval", reauthMinInterval)
 		return false
 	}
-	if !c.acquireBackground(FamilyApp) {
+	if !c.AcquireBackground(FamilyApp, "session_reload") {
 		c.log.Warn("session reload skipped: google block backoff in force")
 		return false
 	}
@@ -714,6 +714,8 @@ func (c *Client) checkGenerateStatus(resp *http.Response, hadAt bool, attempt in
 // a block or a cancellation is not. A session error (401/403, or 400 with a
 // token) triggers at most one session reload followed by one new attempt.
 func (c *Client) Generate(ctx context.Context, p GenParams) (string, error) {
+	c.beginUserActivity()
+	defer c.endUserActivity()
 	images := c.uploadImages(ctx, p.Images)
 	met := metricsFrom(ctx)
 	start := time.Now()
@@ -881,6 +883,8 @@ func (c *Client) GenerateStream(ctx context.Context, p GenParams, emit func(delt
 // GenerateStreamEvents is GenerateStream with separate handlers for the answer
 // text and the thinking text.
 func (c *Client) GenerateStreamEvents(ctx context.Context, p GenParams, h StreamHandlers) error {
+	c.beginUserActivity()
+	defer c.endUserActivity()
 	images := c.uploadImages(ctx, p.Images)
 	err := c.streamOnce(ctx, p, images, h, 0)
 	if errors.Is(err, ErrSessionAuth) && c.reloadSession(ctx) {

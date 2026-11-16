@@ -131,10 +131,36 @@ type famBlock struct {
 
 func (f *famBlock) active() bool { return !f.since.IsZero() }
 
-// blockState tracks Google blocks per family. Guarded by mu.
+// bgCallEvent records one background call gate decision for 24h telemetry.
+type bgCallEvent struct {
+	at      time.Time
+	family  CallFamily
+	reason  string
+	allowed bool
+}
+
+// BackgroundCallSnapshot summarizes background Google call activity over the
+// last 24 hours (no URLs, parameters or secrets; K14 P5/P6).
+type BackgroundCallSnapshot struct {
+	Total24h    int
+	Refused24h  int
+	ByFamily24h map[CallFamily]int
+	LastAt      time.Time
+	LastFamily  CallFamily
+	LastReason  string
+}
+
+// blockState tracks Google blocks per family and user activity for background
+// call gating. Guarded by mu.
 type blockState struct {
-	mu   sync.Mutex
-	fams map[CallFamily]*famBlock
+	mu                sync.Mutex
+	fams              map[CallFamily]*famBlock
+	lastUserActivity  time.Time // wall clock (.Round(0))
+	activeUserReqs    int
+	bgEvents          []bgCallEvent
+	lastAllowedAt     time.Time
+	lastAllowedFamily CallFamily
+	lastAllowedReason string
 }
 
 // fam returns (creating it) the state of family f. Caller holds mu.
@@ -310,41 +336,148 @@ func (c *Client) blockedNow(f CallFamily) bool {
 	return false
 }
 
-// acquireBackground gates every background Google call of family f (cookie
-// rotation, catalog refresh, /app reload, auth check). While no gating family is
-// blocked it always allows. Otherwise it refuses until every gating backoff has
-// elapsed, then grants one probe per probeWindow (shared by the gating families).
-func (c *Client) acquireBackground(f CallFamily) bool {
+// RecordUserActivity records a generation request or explicit management-page
+// action using wall-clock time (.Round(0)) so macOS sleep cannot skew the idle
+// window (K14 P5).
+func (c *Client) RecordUserActivity() {
+	now := nowFn().Round(0)
+	b := &c.block
+	b.mu.Lock()
+	b.lastUserActivity = now
+	b.mu.Unlock()
+}
+
+func (c *Client) beginUserActivity() {
+	now := nowFn().Round(0)
+	b := &c.block
+	b.mu.Lock()
+	b.activeUserReqs++
+	b.lastUserActivity = now
+	b.mu.Unlock()
+}
+
+func (c *Client) endUserActivity() {
+	now := nowFn().Round(0)
+	b := &c.block
+	b.mu.Lock()
+	if b.activeUserReqs > 0 {
+		b.activeUserReqs--
+	}
+	b.lastUserActivity = now
+	b.mu.Unlock()
+}
+
+func pruneBGEventsLocked(b *blockState, now time.Time) {
+	cutoff := now.Add(-24 * time.Hour)
+	keep := b.bgEvents[:0]
+	for _, ev := range b.bgEvents {
+		if !ev.at.Before(cutoff) {
+			keep = append(keep, ev)
+		}
+	}
+	b.bgEvents = keep
+}
+
+// BackgroundCallStatus returns a 24h summary of gated background calls
+// (accepted calls per family, total accepted/refused, and last accepted time).
+func (c *Client) BackgroundCallStatus() BackgroundCallSnapshot {
+	now := nowFn().Round(0)
 	b := &c.block
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	now := nowFn()
+	pruneBGEventsLocked(b, now)
+	byFam := make(map[CallFamily]int, len(allFamilies))
+	for _, f := range allFamilies {
+		byFam[f] = 0
+	}
+	total, refused := 0, 0
+	for _, ev := range b.bgEvents {
+		if ev.allowed {
+			total++
+			byFam[ev.family]++
+		} else {
+			refused++
+		}
+	}
+	return BackgroundCallSnapshot{
+		Total24h:    total,
+		Refused24h:  refused,
+		ByFamily24h: byFam,
+		LastAt:      b.lastAllowedAt,
+		LastFamily:  b.lastAllowedFamily,
+		LastReason:  b.lastAllowedReason,
+	}
+}
+
+// AcquireBackground is the single gatekeeper for every Google call not tied to
+// an active generation request (cookie rotation, catalog refresh, /app reload,
+// auth recovery, external cookie refresh; K14 P5). It refuses the call if no
+// generation request or page action happened within cfg.IdleQuiet (wall clock,
+// default 10 min) or while any gating family block backoff is active, and logs
+// every decision as "background_call family=… reason=… allowed=true|false".
+func (c *Client) AcquireBackground(f CallFamily, reason string) bool {
+	if reason == "" {
+		reason = "background"
+	}
+	now := nowFn().Round(0)
+	b := &c.block
+	b.mu.Lock()
+	allowed := true
+	gate := ""
+	if c.cfg.IdleQuiet > 0 && b.activeUserReqs == 0 {
+		if b.lastUserActivity.IsZero() || now.Sub(b.lastUserActivity.Round(0)) > c.cfg.IdleQuiet {
+			allowed = false
+			gate = "quiet"
+		}
+	}
 	type gated struct {
 		fb *famBlock
 		f  CallFamily
 	}
 	var active []gated
-	for _, g := range gatingFamilies(f) {
-		fb := b.fams[g]
-		if fb == nil || !fb.active() {
-			continue
+	if allowed {
+		for _, g := range gatingFamilies(f) {
+			fb := b.fams[g]
+			if fb == nil || !fb.active() {
+				continue
+			}
+			if now.Before(fb.backoffUntil.Round(0)) || now.Before(fb.probeUntil.Round(0)) {
+				allowed = false
+				gate = "blocked"
+				break
+			}
+			active = append(active, gated{fb, g})
 		}
-		if now.Before(fb.backoffUntil) || now.Before(fb.probeUntil) {
-			return false
-		}
-		active = append(active, gated{fb, g})
 	}
-	// One probe per window: the window is the family's current backoff step (at
-	// least probeWindow), so an inconclusive probe (network error, no answer) is
-	// not followed by another one before a full step (AUDIT-13 A9).
-	for _, a := range active {
-		w := probeWindow
-		if d := c.backoffFor(a.f, a.fb.level); d > w {
-			w = d
+	if allowed {
+		// One probe per window: the window is the family's current backoff step (at
+		// least probeWindow), so an inconclusive probe (network error, no answer) is
+		// not followed by another one before a full step (AUDIT-13 A9).
+		for _, a := range active {
+			w := probeWindow
+			if d := c.backoffFor(a.f, a.fb.level); d > w {
+				w = d
+			}
+			a.fb.probeUntil = now.Add(w)
 		}
-		a.fb.probeUntil = now.Add(w)
+		b.lastAllowedAt = now
+		b.lastAllowedFamily = f
+		b.lastAllowedReason = reason
 	}
-	return true
+	b.bgEvents = append(b.bgEvents, bgCallEvent{at: now, family: f, reason: reason, allowed: allowed})
+	pruneBGEventsLocked(b, now)
+	b.mu.Unlock()
+
+	attrs := []any{"family", string(f), "reason", reason, "allowed", allowed}
+	if !allowed && gate != "" {
+		attrs = append(attrs, "gate", gate)
+	}
+	c.log.Info("background_call", attrs...)
+	return allowed
+}
+
+func (c *Client) acquireBackground(f CallFamily) bool {
+	return c.AcquireBackground(f, "background")
 }
 
 // originRequest walks a redirect chain back to the request that started it.

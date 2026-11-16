@@ -200,6 +200,7 @@ func TestAuthRecoveryAfterBlockAndAnonymousStart(t *testing.T) {
 		t.Fatal("must start anonymous")
 	}
 	var recovered atomic.Int32
+	c.RecordUserActivity()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
@@ -265,6 +266,7 @@ func TestP4_AuthRecoveryLoopNeverFetchesCatalogAndEnsureAuthOnRequest(t *testing
 	}
 	// After backoff expires, a user request triggers on-demand recovery without fetching catalog.
 	now = now.Add(6 * time.Minute)
+	c.RecordUserActivity()
 	c.EnsureAuthOnRequest(context.Background())
 	if appCalls.Load() != 2 || !c.Authenticated() || batchCalls.Load() != 0 {
 		t.Fatalf("after backoff: appCalls=%d auth=%v batchCalls=%d", appCalls.Load(), c.Authenticated(), batchCalls.Load())

@@ -102,6 +102,7 @@ func TestBlockedErrorNamesTriggeringRequest(t *testing.T) {
 func TestBlockGatingByFamily(t *testing.T) {
 	now := fixedBlockTiming(t)
 	c, _ := blockClient(t, rtFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("unused") }))
+	c.RecordUserActivity()
 	c.recordBlock(&BlockedError{Family: FamilyApp, Host: "gemini.google.com", Path: "/app"})
 	if c.acquireBackground(FamilyBatch) || c.acquireBackground(FamilyApp) || !c.blockedNow(FamilyGenerate) {
 		t.Fatal("a gemini.google.com block must suspend the other gemini families")
@@ -169,6 +170,7 @@ func TestCatalogRefreshFailureWarnRateLimited(t *testing.T) {
 func TestAppProbeOncePerStep(t *testing.T) {
 	now := fixedBlockTiming(t)
 	c, _ := blockClient(t, rtFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("unused") }))
+	c.RecordUserActivity()
 	c.recordBlock(&BlockedError{Family: FamilyApp, Host: "gemini.google.com", Path: "/app"})
 	*now = now.Add(5*time.Minute + time.Second)
 	if !c.acquireBackground(FamilyApp) {
@@ -179,6 +181,7 @@ func TestAppProbeOncePerStep(t *testing.T) {
 		t.Fatal("a second probe inside the same 5 min window")
 	}
 	*now = now.Add(time.Minute + time.Second)
+	c.RecordUserActivity()
 	if !c.acquireBackground(FamilyApp) {
 		t.Fatal("next window: one probe")
 	}

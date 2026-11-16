@@ -122,6 +122,9 @@ type Config struct {
 	// AuthRecovery enables the background /app recovery polling loop when not
 	// authenticated (GEMINI_AUTH_RECOVERY, default off = false; K14 P4).
 	AuthRecovery bool
+	// IdleQuietMin refuses background Google calls when no generation request or
+	// page action happened in the last N minutes (GEMINI_IDLE_QUIET_MIN, default 10).
+	IdleQuietMin int
 	// BlockMaxBackoffMin is the top step of the anti-bot backoff
 	// (GEMINI_BLOCK_MAX_BACKOFF_MIN, default 60).
 	BlockMaxBackoffMin int
@@ -184,6 +187,7 @@ func loadConfig(envFile string) *Config {
 		ModelsRefreshHours:          nonNegative(getEnvInt("GEMINI_MODELS_REFRESH_HOURS", 0), 0),
 		CatalogRefreshAfterCookie:   getEnvBool("GEMINI_CATALOG_REFRESH_AFTER_COOKIE", false),
 		AuthRecovery:                getEnvBool("GEMINI_AUTH_RECOVERY", false),
+		IdleQuietMin:                nonNegative(getEnvInt("GEMINI_IDLE_QUIET_MIN", 10), 10),
 		BlockMaxBackoffMin:          positive(getEnvInt("GEMINI_BLOCK_MAX_BACKOFF_MIN", 60), 60),
 		StateMaxAgeMin:              positive(getEnvInt("GEMINI_STATE_MAX_AGE_MIN", 1440), 1440),
 		Gemini: gemini.Config{
@@ -208,6 +212,11 @@ func loadConfig(envFile string) *Config {
 	}
 
 	cfg.Gemini.BlockMaxBackoff = time.Duration(cfg.BlockMaxBackoffMin) * time.Minute
+	if cfg.IdleQuietMin == 0 {
+		cfg.Gemini.IdleQuiet = -time.Minute
+	} else {
+		cfg.Gemini.IdleQuiet = time.Duration(cfg.IdleQuietMin) * time.Minute
+	}
 	cfg.Gemini.StateMaxAge = time.Duration(cfg.StateMaxAgeMin) * time.Minute
 	cfg.Gemini.StateFile = stateFilePath(getEnv("GEMINI_STATE_FILE", ""), cfg.Gemini.CookieFile, cfg.Gemini.Cookie)
 	cfg.Gemini.CallsFile = callsFilePath(getEnv("GEMINI_CALLS_FILE", ""), cfg.Gemini.StateFile)

@@ -80,7 +80,16 @@ type Config struct {
 	// CookieRotation enables startup and periodic RotateCookies calls
 	// (GEMINI_COOKIE_ROTATION=on; default false = off, K14 P2).
 	CookieRotation bool
+
+	// IdleQuiet refuses background calls when no user generation or page action
+	// occurred within this wall-clock window (GEMINI_IDLE_QUIET_MIN, default 10m;
+	// < 0 disables the idle guard; K14 P5).
+	IdleQuiet time.Duration
 }
+
+// DefaultIdleQuiet is the default inactivity window after which background
+// calls are refused (K14 P5).
+const DefaultIdleQuiet = 10 * time.Minute
 
 // DefaultRotateSuspendAfter is the default consecutive no_new_token threshold.
 const DefaultRotateSuspendAfter = 3
@@ -117,5 +126,8 @@ func (c *Config) applyDefaults() {
 	}
 	if c.RotateSuspendAfter == 0 {
 		c.RotateSuspendAfter = DefaultRotateSuspendAfter
+	}
+	if c.IdleQuiet == 0 {
+		c.IdleQuiet = DefaultIdleQuiet
 	}
 }

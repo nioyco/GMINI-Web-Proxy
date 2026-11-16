@@ -133,8 +133,9 @@ touch %q
 		t.Fatal("Tick should not launch while proxy is idle")
 	}
 
-	// Active within 90m: Tick MUST launch, hot-reload cookie.txt, and unsuspend rotation.
+	// Active within 90m and within 10m quiet window: Tick MUST launch, hot-reload cookie.txt, and unsuspend rotation.
 	ar.lastActivityAt = now.Add(-5 * time.Minute)
+	c.RecordUserActivity()
 	ar.Tick()
 	waitForCondition(t, 2*time.Second, func() bool {
 		st := ar.Status()

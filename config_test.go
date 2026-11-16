@@ -310,6 +310,17 @@ func TestLot1SessionSettings(t *testing.T) {
 	if cfg.Gemini.BlockMaxBackoff != 30*time.Minute || cfg.Gemini.StateMaxAge != 24*time.Hour || cfg.ModelsRefreshHours != 24 || !cfg.CatalogRefreshAfterCookie || cfg.Gemini.StateFile != "" {
 		t.Errorf("overrides: backoff=%v stateAge=%v refresh=%d afterCookie=%v state=%q", cfg.Gemini.BlockMaxBackoff, cfg.Gemini.StateMaxAge, cfg.ModelsRefreshHours, cfg.CatalogRefreshAfterCookie, cfg.Gemini.StateFile)
 	}
+	t.Setenv("GEMINI_IDLE_QUIET_MIN", "")
+	os.Unsetenv("GEMINI_IDLE_QUIET_MIN")
+	cfg = loadConfig(filepath.Join(t.TempDir(), "none.env"))
+	if cfg.IdleQuietMin != 10 || cfg.Gemini.IdleQuiet != 10*time.Minute {
+		t.Errorf("default IdleQuiet = (%d, %v), want (10, 10m)", cfg.IdleQuietMin, cfg.Gemini.IdleQuiet)
+	}
+	t.Setenv("GEMINI_IDLE_QUIET_MIN", "0")
+	cfg = loadConfig(filepath.Join(t.TempDir(), "none.env"))
+	if cfg.IdleQuietMin != 0 || cfg.Gemini.IdleQuiet >= 0 {
+		t.Errorf("zero IdleQuiet = (%d, %v), want (0, <0)", cfg.IdleQuietMin, cfg.Gemini.IdleQuiet)
+	}
 }
 
 // The history-marker neutralization (AUDIT-13 T-04) is on by default and can be

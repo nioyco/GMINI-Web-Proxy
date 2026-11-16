@@ -121,8 +121,9 @@ func TestAcquireBackgroundGate(t *testing.T) {
 	now := time.Now()
 	nowFn = func() time.Time { return now }
 	c, _ := blockClient(t, rtFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("x") }))
+	c.RecordUserActivity()
 	if !c.acquireBackground(FamilyOther) || !c.acquireBackground(FamilyOther) {
-		t.Fatal("must allow when not blocked")
+		t.Fatal("must allow when not blocked and active")
 	}
 	c.recordBlock(&BlockedError{Host: "h", Path: "/sorry/"})
 	if c.acquireBackground(FamilyOther) {
@@ -138,5 +139,61 @@ func TestAcquireBackgroundGate(t *testing.T) {
 	c.recordGoogleOK(FamilyOther)
 	if !c.acquireBackground(FamilyOther) {
 		t.Fatal("must allow after clear")
+	}
+}
+
+func TestP5_IdleQuietGateWallClockAndLogging(t *testing.T) {
+	oldN := nowFn
+	now := time.Now()
+	nowFn = func() time.Time { return now }
+	defer func() { nowFn = oldN }()
+
+	c, logs := blockClient(t, rtFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("unused") }))
+
+	// 1. Fresh client with no user activity -> refused + logged.
+	if c.AcquireBackground(FamilyAccounts, "cookie_rotation") {
+		t.Fatal("must refuse when no user activity happened yet")
+	}
+	if !strings.Contains(logs.String(), "background_call") || !strings.Contains(logs.String(), "family=accounts") || !strings.Contains(logs.String(), "reason=cookie_rotation") || !strings.Contains(logs.String(), "allowed=false") {
+		t.Fatalf("expected structured background_call log, got:\n%s", logs.String())
+	}
+
+	// 2. Record activity -> allowed for 10 min wall clock.
+	c.RecordUserActivity()
+	now = now.Add(9 * time.Minute)
+	if !c.AcquireBackground(FamilyBatch, "catalog_after_cookie") {
+		t.Fatal("must allow within 10 min quiet window")
+	}
+	if !strings.Contains(logs.String(), "family=batchexecute") || !strings.Contains(logs.String(), "reason=catalog_after_cookie") || !strings.Contains(logs.String(), "allowed=true") {
+		t.Fatalf("expected allowed=true log, got:\n%s", logs.String())
+	}
+
+	// 3. Wall clock jumps past 10 min (e.g. Mac sleep where monotonic clock didn't move).
+	now = now.Add(2 * time.Minute).Round(0)
+	if c.AcquireBackground(FamilyApp, "auth_recovery") {
+		t.Fatal("must refuse once wall-clock inactivity exceeds 10 min")
+	}
+
+	// 4. Long in-flight generation keeps background gate open until it finishes + 10 min.
+	c.beginUserActivity()
+	now = now.Add(15 * time.Minute).Round(0)
+	if !c.AcquireBackground(FamilyApp, "session_reload") {
+		t.Fatal("must allow while generation request is in flight")
+	}
+	c.endUserActivity()
+	now = now.Add(11 * time.Minute).Round(0)
+	if c.AcquireBackground(FamilyApp, "auth_recovery") {
+		t.Fatal("must refuse 11 min after generation finished")
+	}
+
+	// 5. 24h snapshot tracks allowed calls by family & refused count, pruning >24h.
+	snap := c.BackgroundCallStatus()
+	if snap.Total24h != 2 || snap.Refused24h != 3 || snap.ByFamily24h[FamilyBatch] != 1 || snap.ByFamily24h[FamilyApp] != 1 {
+		t.Fatalf("unexpected 24h snapshot: %+v", snap)
+	}
+	now = now.Add(25 * time.Hour)
+	snap = c.BackgroundCallStatus()
+	if snap.Total24h != 0 || snap.Refused24h != 0 {
+		t.Fatalf("expected >24h events pruned, got %+v", snap)
 	}
 }

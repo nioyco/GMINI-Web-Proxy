@@ -312,7 +312,8 @@ func (c *Client) RefreshModels(ctx context.Context) error {
 	if recent {
 		return fmt.Errorf("%w: last attempt less than %s ago", ErrCatalogRefreshRefused, catalogManualMinInterval)
 	}
-	if !c.acquireBackground(FamilyBatch) {
+	c.RecordUserActivity()
+	if !c.AcquireBackground(FamilyBatch, "catalog_manual") {
 		return fmt.Errorf("%w: google block backoff in force", ErrCatalogRefreshRefused)
 	}
 	if err := c.fetchModels(ctx); err != nil {
@@ -335,7 +336,7 @@ func (c *Client) RefreshCatalogAfterCookie(ctx context.Context) error {
 	if recent {
 		return fmt.Errorf("%w: last after-cookie refresh less than %s ago", ErrCatalogRefreshRefused, catalogAfterCookieMinInterval)
 	}
-	if !c.acquireBackground(FamilyBatch) {
+	if !c.AcquireBackground(FamilyBatch, "catalog_after_cookie") {
 		return fmt.Errorf("%w: background guard refused", ErrCatalogRefreshRefused)
 	}
 	c.modelMu.Lock()

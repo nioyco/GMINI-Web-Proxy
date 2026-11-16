@@ -69,6 +69,7 @@ func TestRotationTickMakesOneCall(t *testing.T) {
 	}))
 	c.cfg.CookieRotation = true // mode on
 	c.setAt("tok")              // authenticated: the old loop called listModels after each tick
+	c.RecordUserActivity()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
 	defer cancel()
 	c.CookieRefreshLoop(ctx, 20*time.Millisecond)
@@ -178,6 +179,7 @@ func TestP3_CatalogAfterCookieThrottledTo6HoursAndBlockCooldown(t *testing.T) {
 		return resp200(r, body), nil
 	}))
 	c.setAt("tok")
+	c.RecordUserActivity()
 
 	// 1st after-cookie refresh succeeds.
 	if err := c.RefreshCatalogAfterCookie(context.Background()); err != nil {
@@ -191,8 +193,9 @@ func TestP3_CatalogAfterCookieThrottledTo6HoursAndBlockCooldown(t *testing.T) {
 	if err := c.RefreshCatalogAfterCookie(context.Background()); !errors.Is(err, ErrCatalogRefreshRefused) || log.count(FamilyBatch) != 1 {
 		t.Fatalf("within 6h: err=%v calls=%d", err, log.count(FamilyBatch))
 	}
-	// After 6h: allowed again.
+	// After 6h: allowed again if user activity occurred recently.
 	now = now.Add(61 * time.Minute)
+	c.RecordUserActivity()
 	if err := c.RefreshCatalogAfterCookie(context.Background()); err != nil || log.count(FamilyBatch) != 2 {
 		t.Fatalf("after 6h: err=%v calls=%d", err, log.count(FamilyBatch))
 	}
@@ -262,6 +265,7 @@ func TestRotationLoopRunsWithoutSession(t *testing.T) {
 		return resp200(r, ""), nil
 	}))
 	c.cfg.CookieRotation = true // mode on
+	c.RecordUserActivity()
 	if c.Authenticated() || !c.HasRotatingToken() {
 		t.Fatal("setup")
 	}

@@ -195,6 +195,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 // listModels call at most; refused without any Google call when the session is
 // not authenticated, a block is in force, or the last attempt is too recent).
 func (s *Server) handleModelsRefresh(w http.ResponseWriter, r *http.Request) {
+	s.client.RecordUserActivity()
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	err := s.client.RefreshModels(ctx)
@@ -286,6 +287,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setReqMeta(r.Context(), m.Name, req.Stream)
+	s.client.RecordUserActivity()
 	cid := apiconv.ID("chatcmpl-", 12)
 	p := m.Params(prompt)
 	p.Images = images
@@ -1804,6 +1806,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setReqMeta(r.Context(), m.Name, req.Stream)
+	s.client.RecordUserActivity()
 	p := m.Params(prompt)
 	p.Images = images
 	rid := apiconv.ID("resp_", 16)
@@ -1922,6 +1925,7 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	stream := strings.Contains(r.URL.Path, ":streamGenerateContent")
 	setReqMeta(r.Context(), m.Name, stream)
+	s.client.RecordUserActivity()
 	p := m.Params(prompt)
 	p.Images = images
 	if s.autoRefresh != nil {
@@ -2071,6 +2075,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setReqMeta(r.Context(), m.Name, req.Stream)
+	s.client.RecordUserActivity()
 	p := m.Params(prompt)
 	p.Images = images
 	msgID := apiconv.ID("msg_", 24)

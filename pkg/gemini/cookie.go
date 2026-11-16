@@ -49,8 +49,8 @@ func (c *Client) CookieRefreshLoop(ctx context.Context, interval time.Duration) 
 			}
 			// While accounts.google.com blocks us, rotation is suspended (one probe
 			// per window once the backoff elapsed).
-			if !c.acquireBackground(FamilyAccounts) {
-				c.log.Debug("cookie refresh skipped: google block backoff in force")
+			if !c.AcquireBackground(FamilyAccounts, "cookie_rotation") {
+				c.log.Debug("cookie refresh skipped: background guard refused")
 				continue
 			}
 			rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -146,7 +146,7 @@ func (c *Client) AuthRecoveryLoop(ctx context.Context, onRecovered func()) {
 				continue
 			}
 		}
-		if !c.acquireBackground(FamilyApp) {
+		if !c.AcquireBackground(FamilyApp, "auth_recovery") {
 			continue
 		}
 		lastTry = nowFn().Round(0)
@@ -199,7 +199,7 @@ func (c *Client) EnsureAuthOnRequest(ctx context.Context) {
 	c.atMu.Lock()
 	recent := !c.reauthAt.IsZero() && nowFn().Round(0).Sub(c.reauthAt.Round(0)) < reauthMinInterval
 	c.atMu.Unlock()
-	if recent || !c.acquireBackground(FamilyApp) {
+	if recent || !c.AcquireBackground(FamilyApp, "auth_on_request") {
 		return
 	}
 	c.atMu.Lock()
