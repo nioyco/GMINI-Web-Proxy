@@ -90,7 +90,7 @@ func newCookieAutoRefresher(cfg *Config, client *gemini.Client, log *slog.Logger
 		}
 	}
 	interval := time.Duration(cfg.CookieAutoRefreshMin) * time.Minute
-	now := time.Now()
+	now := time.Now().Round(0)
 	return &cookieAutoRefresher{
 		client:         client,
 		log:            log,
@@ -100,7 +100,7 @@ func newCookieAutoRefresher(cfg *Config, client *gemini.Client, log *slog.Logger
 		execTimeout:    defaultAutoRefreshExecTimeout,
 		waitTimeout:    defaultAutoRefreshWaitTimeout,
 		pollInterval:   defaultAutoRefreshPollInterval,
-		nowFn:          time.Now,
+		nowFn:          func() time.Time { return time.Now().Round(0) },
 		enabled:        len(args) > 0 && interval > 0,
 		interval:       interval,
 		startedAt:      now,
@@ -212,7 +212,7 @@ func (r *cookieAutoRefresher) canLaunchLocked(now time.Time) (bool, string) {
 	if r.client.GoogleBlockStatus().Active {
 		return false, "google_blocked"
 	}
-	if !r.lastLaunchAt.IsZero() && now.Sub(r.lastLaunchAt) < r.minSpacing {
+	if !r.lastLaunchAt.IsZero() && now.Round(0).Sub(r.lastLaunchAt.Round(0)) < r.minSpacing {
 		return false, "min_spacing"
 	}
 	return true, ""
@@ -232,8 +232,8 @@ func (r *cookieAutoRefresher) startRunLocked(now time.Time, trigger string) chan
 // token has reached the configured age.
 func (r *cookieAutoRefresher) Tick() {
 	r.mu.Lock()
-	now := r.nowFn()
-	activeRecently := !r.lastActivityAt.IsZero() && now.Sub(r.lastActivityAt) <= r.activityWindow
+	now := r.nowFn().Round(0)
+	activeRecently := !r.lastActivityAt.IsZero() && now.Sub(r.lastActivityAt.Round(0)) <= r.activityWindow
 	if !activeRecently || r.running || !r.tokenDueLocked(now) {
 		r.mu.Unlock()
 		return
@@ -251,8 +251,8 @@ func (r *cookieAutoRefresher) Tick() {
 // (capped at 45 s) before the request proceeds.
 func (r *cookieAutoRefresher) PrepareRequest(ctx context.Context, onWait func()) {
 	r.mu.Lock()
-	now := r.nowFn()
-	wasIdle := r.lastActivityAt.IsZero() || now.Sub(r.lastActivityAt) > r.activityWindow
+	now := r.nowFn().Round(0)
+	wasIdle := r.lastActivityAt.IsZero() || now.Sub(r.lastActivityAt.Round(0)) > r.activityWindow
 	r.lastActivityAt = now
 	if !wasIdle {
 		r.mu.Unlock()
@@ -306,7 +306,7 @@ func (r *cookieAutoRefresher) TriggerEarly() {
 func (r *cookieAutoRefresher) run(trigger string, done chan struct{}) {
 	defer close(done)
 
-	start := r.nowFn()
+	start := r.nowFn().Round(0)
 	execCtx, cancel := context.WithTimeout(context.Background(), r.execTimeout)
 	defer cancel()
 
@@ -339,7 +339,7 @@ func (r *cookieAutoRefresher) run(trigger string, done chan struct{}) {
 	r.mu.Lock()
 	r.running = false
 	r.runDone = nil
-	r.lastFinishAt = r.nowFn()
+	r.lastFinishAt = r.nowFn().Round(0)
 	r.lastDuration = dur
 	r.lastExitCode = exitCode
 	ok := err == nil

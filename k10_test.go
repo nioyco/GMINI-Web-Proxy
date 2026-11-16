@@ -314,3 +314,32 @@ func TestK10_UIToggleProtectedAndStatus(t *testing.T) {
 		t.Fatalf("expected enabled=false, got %+v", st)
 	}
 }
+
+func TestB8_TickUsesWallClockAcrossSleep(t *testing.T) {
+	cfg := testConfig()
+	cfg.CookieAutoRefreshMin = 90
+	cfg.CookieRefreshCmd = writeFakeScript(t, "exit 0")
+	client, err := gemini.New(cfg.Gemini, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ar := newCookieAutoRefresher(cfg, client, testLogger())
+
+	// Simulate a request served 3h13m ago in wall-clock time, with monotonic clock
+	// NOT advancing (as happens on macOS during system sleep).
+	base := time.Now()
+	ar.nowFn = func() time.Time { return base }
+	ar.PrepareRequest(context.Background(), nil)
+
+	// Wall clock jumps +3h13m, while monotonic clock only advances +10s.
+	ar.nowFn = func() time.Time {
+		return base.Round(0).Add(3*time.Hour + 13*time.Minute)
+	}
+	ar.startedAt = base.Round(0).Add(-4 * time.Hour)
+	ar.Tick()
+
+	st := ar.Status()
+	if st.Running || st.LastAttemptAt != nil {
+		t.Fatalf("expected background Tick NOT to fire after 3h13m wall-clock inactivity, got %+v", st)
+	}
+}
