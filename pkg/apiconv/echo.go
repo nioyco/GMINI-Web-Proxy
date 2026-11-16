@@ -275,3 +275,18 @@ var internalToolStatusRe = regexp.MustCompile(`(?i)(trigger(ed|ing)?\s+artifact\
 func IsInternalToolStatus(status string) bool {
 	return internalToolStatusRe.MatchString(status)
 }
+
+var cannedErrorRe = regexp.MustCompile(`(?i)^(?:i\s+seem\s+to\s+be\s+encountering\s+an\s+error|i['’]?m\s+(?:sorry,?\s+)?(?:having\s+trouble|encountering\s+an?\s+error)|something\s+went\s+wrong|an\s+error\s+occurred)\b(?:\s*[.,!]\s*(?:can\s+i\s+try\s+something\s+else\s+for\s+you|please\s+try\s+again(?:\s+later|\s+in\s+a\s+moment)?|try\s+something\s+else))?[.!?]?$`)
+
+// IsUpstreamCannedError reports whether Gemini returned a short canned
+// internal-error non-answer (B6, e.g. "I seem to be encountering an error. Can I try something else for you?").
+func IsUpstreamCannedError(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" || len(t) > 250 {
+		return false
+	}
+	if strings.Contains(t, "```") {
+		return false
+	}
+	return cannedErrorRe.MatchString(t)
+}

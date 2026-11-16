@@ -536,24 +536,34 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 	if res.earlyStopReason == "" {
 		isGlitch := !res.released && apiconv.IsUpstreamGlitch(res.rawText)
 		isToolRefusal := !res.released && len(declared) > 0 && apiconv.IsUpstreamToolRefusal(res.rawText)
-		if isGlitch || isToolRefusal {
+		isCannedErr := !res.released && apiconv.IsUpstreamCannedError(res.rawText)
+		if isGlitch || isToolRefusal || isCannedErr {
 			// Gemini sent a canned non-answer (generic refusal, "can't use Workspace",
-			// a bare widget placeholder, or claimed local tools are not declared/accessible).
-			// Nothing of it reached the client: try once more.
-			s.rlog(ctx).Warn("upstream_glitch", "bytes", len(res.rawText), "tool_refusal", isToolRefusal, "action", "retry_once")
+			// a bare widget placeholder, claimed local tools are not declared/accessible,
+			// or a canned internal error). Nothing of it reached the client: try once more.
+			if isCannedErr {
+				s.stats.cannedErrorRetries.Add(1)
+				s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(res.rawText), "action", "retry_once")
+			} else {
+				s.rlog(ctx).Warn("upstream_glitch", "bytes", len(res.rawText), "tool_refusal", isToolRefusal, "action", "retry_once")
+			}
 			if s.cfg.StreamThoughts {
 				retryMsg := "\nGemini a renvoyé un message de service au lieu de traiter la demande : nouvelle tentative…\n"
 				if isToolRefusal {
 					retryMsg = "\nGemini affirme ne pas avoir d'outils locaux : nouvelle tentative avec consigne corrective…\n"
+				} else if isCannedErr {
+					retryMsg = "\nGemini a renvoyé une erreur interne : nouvelle tentative à l'identique…\n"
 				}
 				if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, retryMsg)); err != nil {
 					s.rlog(ctx).Warn("sse write failed", "err", err)
 					return
 				}
 			}
-			retryParams := glitchRetryParams(p)
+			retryParams := p
 			if isToolRefusal {
 				retryParams = toolRefusalRetryParams(p)
+			} else if isGlitch {
+				retryParams = glitchRetryParams(p)
 			}
 			bres := s.awaitGenerate(ctx, sse, retryParams, interval)
 			switch {
@@ -562,6 +572,10 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 				s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
 			case bres.err != nil:
 				s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+bres.err.Error())), sse.done())
+			case isCannedErr && apiconv.IsUpstreamCannedError(bres.text):
+				s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(bres.text), "action", "reported")
+				msg := "GMINI : Gemini a renvoyé une erreur interne deux fois de suite ; réessayez dans un instant."
+				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
 			case isToolRefusal && apiconv.IsUpstreamToolRefusal(bres.text):
 				s.rlog(ctx).Warn("upstream_tool_refusal", "bytes", len(bres.text), "action", "reported")
 				msg := "GMINI : Gemini a affirmé deux fois qu'aucun outil local n'est déclaré ou disponible (« " +

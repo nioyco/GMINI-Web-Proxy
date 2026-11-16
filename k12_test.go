@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
 )
 
 func wrbBodyFrame(inner []any) string {
@@ -152,6 +154,86 @@ func TestB2_InternalToolActionModes(t *testing.T) {
 		joined := strings.Join(c.dataFrames, "\n")
 		if strings.Contains(joined, "Gemini lance un outil interne") {
 			t.Errorf("off mode must not emit notify note, got %s", joined)
+		}
+	})
+}
+
+func TestB6_CannedErrorDetectionAndIdenticalRetry(t *testing.T) {
+	if !apiconv.IsUpstreamCannedError("I seem to be encountering an error. Can I try something else for you?") {
+		t.Fatal("expected exact canned error to match")
+	}
+	if apiconv.IsUpstreamCannedError("Here is a long explanation about encountering an error in your Go code: " + strings.Repeat("x", 200)) {
+		t.Fatal("long response must not match canned error")
+	}
+
+	t.Run("retries identically and succeeds on second attempt", func(t *testing.T) {
+		var calls atomic.Int32
+		var bodies []string
+		_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+			n := calls.Add(1)
+			b, _ := io.ReadAll(r.Body)
+			bodies = append(bodies, string(b))
+			txt := "I seem to be encountering an error. Can I try something else for you?"
+			if n == 2 {
+				txt = "Recovered answer."
+			}
+			body := fakeStreamServed(txt, "", "e6fa609c3fa255c0", "3.1 Pro")
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+		}))
+		cfg := testConfig()
+		cfg.StreamToolsProgress = true
+		cfg.StreamThoughts = true
+		cfg.SSEKeepaliveSec = 1
+		s := newServer(cfg, client, testLogger())
+		s.keepaliveOverride = 50 * time.Millisecond
+		ts := httptest.NewServer(s.handler())
+		defer ts.Close()
+
+		c := readSSE(t, context.Background(), ts.URL, k9ChatToolsBody)
+		assertProgressStream(t, c)
+		if calls.Load() != 2 {
+			t.Fatalf("calls = %d, want 2", calls.Load())
+		}
+		if strings.Contains(bodies[1], "Retry instruction") {
+			t.Errorf("canned error retry must be identical (no Retry instruction added)")
+		}
+		if !strings.Contains(strings.Join(c.dataFrames, "\n"), "Recovered answer.") {
+			t.Errorf("expected Recovered answer, got %v", c.dataFrames)
+		}
+		stRec := uiDo(s.handler(), "GET", "/_status", "127.0.0.1:5000", "")
+		var st struct {
+			Counters map[string]int64 `json:"counters"`
+		}
+		json.Unmarshal(stRec.Body.Bytes(), &st)
+		if st.Counters["canned_error_retries"] != 1 {
+			t.Errorf("canned_error_retries = %d, want 1", st.Counters["canned_error_retries"])
+		}
+	})
+
+	t.Run("two canned errors in a row emits clear French message", func(t *testing.T) {
+		var calls atomic.Int32
+		_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			body := fakeStreamServed("I seem to be encountering an error. Can I try something else for you?", "", "e6fa609c3fa255c0", "3.1 Pro")
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+		}))
+		cfg := testConfig()
+		cfg.StreamToolsProgress = true
+		cfg.StreamThoughts = true
+		cfg.SSEKeepaliveSec = 1
+		s := newServer(cfg, client, testLogger())
+		s.keepaliveOverride = 50 * time.Millisecond
+		ts := httptest.NewServer(s.handler())
+		defer ts.Close()
+
+		c := readSSE(t, context.Background(), ts.URL, k9ChatToolsBody)
+		assertProgressStream(t, c)
+		if calls.Load() != 2 {
+			t.Fatalf("calls = %d, want 2", calls.Load())
+		}
+		joined := strings.Join(c.dataFrames, "\n")
+		if !strings.Contains(joined, "Gemini a renvoyé une erreur interne deux fois de suite") {
+			t.Errorf("expected clear French error message, got %s", joined)
 		}
 	})
 }

@@ -243,6 +243,7 @@ type statsCounters struct {
 	toolNameInferred     atomic.Int64
 	internalToolDetected atomic.Int64
 	limitBannerDetected  atomic.Int64
+	cannedErrorRetries   atomic.Int64
 	earlyStop            atomic.Int64
 	earlyStopMarker      atomic.Int64
 	earlyStopSize        atomic.Int64

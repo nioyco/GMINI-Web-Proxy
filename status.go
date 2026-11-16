@@ -194,6 +194,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			"tool_name_inferred":        s.stats.toolNameInferred.Load(),
 			"internal_tool_detected":    s.stats.internalToolDetected.Load(),
 			"limit_banner_detected":     s.stats.limitBannerDetected.Load(),
+			"canned_error_retries":      s.stats.cannedErrorRetries.Load(),
 			"early_stop":                s.stats.earlyStop.Load(),
 			"early_stop_marker":         s.stats.earlyStopMarker.Load(),
 			"early_stop_size":           s.stats.earlyStopSize.Load(),
