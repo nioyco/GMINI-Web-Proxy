@@ -19,10 +19,10 @@ func TestIsUpstreamGlitch(t *testing.T) {
 	yes := []string{
 		"I can't use Workspace because required Gmail settings are off. Turn on these settings to continue.",
 		`<GenerateWidget component_placeholder_id="GenerateWidget_c_7b_r_56_0" type="artifact"/>` + "\n",
-		"I'm having a hard time fulfilling your request. Can I help you with something else instead?",
 	}
 	no := []string{"", "Voici le rapport.", "```tool_call\n{\"name\":\"a\",\"arguments\":{}}\n```",
-		"Le texte <GenerateWidget x/> est cité ici dans une phrase."}
+		"Le texte <GenerateWidget x/> est cité ici dans une phrase.",
+		"I'm having a hard time fulfilling your request. Can I help you with something else instead?"}
 	for _, s := range yes {
 		if !apiconv.IsUpstreamGlitch(s) {
 			t.Errorf("not detected: %q", s)

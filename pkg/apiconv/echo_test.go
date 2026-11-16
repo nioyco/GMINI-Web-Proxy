@@ -136,3 +136,33 @@ func TestToolTurnRenderedInHistory(t *testing.T) {
 		t.Errorf("tool turn not rendered in order (call=%d result=%d):\n%s", call, res, p)
 	}
 }
+
+func TestN1_IsUpstreamCannedError(t *testing.T) {
+	yes := []string{
+		"I seem to be encountering an error. Can I try something else for you?",
+		"I'm having a hard time fulfilling your request. Can I help you with something else instead?",
+		"I encountered an error doing what you asked. Could you try again?",
+		"Sorry, something went wrong. Please try your request again.",
+	}
+	for _, s := range yes {
+		if !IsUpstreamCannedError(s) {
+			t.Errorf("IsUpstreamCannedError(%q) = false, want true", s)
+		}
+		if IsUpstreamGlitch(s) {
+			t.Errorf("IsUpstreamGlitch(%q) = true, want false", s)
+		}
+	}
+	no := []string{
+		"",
+		"I encountered an error doing what you asked because the file was locked, here is the fix.",
+		"Sorry, something went wrong in test_foo.go line 42: unexpected EOF.",
+		"I'm having a hard time fulfilling your request because the directory is missing.",
+		"```text\nSorry, something went wrong. Please try your request again.\n```",
+		"I encountered an error doing what you asked. " + strings.Repeat("x", 220),
+	}
+	for _, s := range no {
+		if IsUpstreamCannedError(s) {
+			t.Errorf("IsUpstreamCannedError(%q) = true, want false", s)
+		}
+	}
+}

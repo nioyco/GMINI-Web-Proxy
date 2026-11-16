@@ -231,14 +231,15 @@ var glitchRe = regexp.MustCompile(`(?i)can['’]t use workspace because|turn on 
 var widgetOnlyRe = regexp.MustCompile(`^(\s*<GenerateWidget\b[^>]*/>\s*)+$`)
 
 // IsUpstreamGlitch reports whether text is a canned non-answer of Gemini web:
-// the generic refusal, the "can't use Workspace" sentence, or a reply made only
-// of widget placeholders. Only short replies qualify.
+// the "can't use Workspace" sentence or a reply made only of widget
+// placeholders. Generic canned errors ("I'm having a hard time fulfilling your
+// request...") are handled by IsUpstreamCannedError. Only short replies qualify.
 func IsUpstreamGlitch(text string) bool {
 	t := strings.TrimSpace(text)
 	if t == "" || len(t) > 400 {
 		return false
 	}
-	return refusalRe.MatchString(t) || glitchRe.MatchString(t) || widgetOnlyRe.MatchString(t)
+	return glitchRe.MatchString(t) || widgetOnlyRe.MatchString(t)
 }
 
 var (
@@ -276,10 +277,10 @@ func IsInternalToolStatus(status string) bool {
 	return internalToolStatusRe.MatchString(status)
 }
 
-var cannedErrorRe = regexp.MustCompile(`(?i)^(?:i\s+seem\s+to\s+be\s+encountering\s+an\s+error|i['’]?m\s+(?:sorry,?\s+)?(?:having\s+trouble|encountering\s+an?\s+error)|something\s+went\s+wrong|an\s+error\s+occurred)\b(?:\s*[.,!]\s*(?:can\s+i\s+try\s+something\s+else\s+for\s+you|please\s+try\s+again(?:\s+later|\s+in\s+a\s+moment)?|try\s+something\s+else))?[.!?]?$`)
+var cannedErrorRe = regexp.MustCompile(`(?i)^(?:i\s+seem\s+to\s+be\s+encountering\s+an\s+error|i\s+encountered\s+an\s+error(?:\s+doing\s+what\s+you\s+asked)?|i['’]?m\s+(?:sorry,?\s+)?(?:having\s+trouble|encountering\s+an?\s+error)|i['’]?m\s+having\s+a\s+hard\s+time\s+(?:fulfilling|completing|processing)\s+(?:your|that|this)\s+request|(?:sorry,?\s+)?something\s+went\s+wrong|an\s+error\s+occurred)\b(?:\s*[.,!]\s*(?:can\s+i\s+try\s+something\s+else\s+for\s+you|can\s+i\s+help\s+you\s+with\s+something\s+else(?:\s+instead)?|could\s+you\s+try\s+again(?:\s+later|\s+in\s+a\s+moment)?|please\s+try\s+(?:your\s+request\s+)?again(?:\s+later|\s+in\s+a\s+moment)?|try\s+something\s+else))?[.!?]?$`)
 
 // IsUpstreamCannedError reports whether Gemini returned a short canned
-// internal-error non-answer (B6, e.g. "I seem to be encountering an error. Can I try something else for you?").
+// internal-error non-answer (B6/N1, e.g. "I seem to be encountering an error. Can I try something else for you?").
 func IsUpstreamCannedError(text string) bool {
 	t := strings.TrimSpace(text)
 	if t == "" || len(t) > 250 {

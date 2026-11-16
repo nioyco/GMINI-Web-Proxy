@@ -534,9 +534,9 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 	}
 
 	if res.earlyStopReason == "" {
-		isGlitch := !res.released && apiconv.IsUpstreamGlitch(res.rawText)
-		isToolRefusal := !res.released && len(declared) > 0 && apiconv.IsUpstreamToolRefusal(res.rawText)
 		isCannedErr := !res.released && apiconv.IsUpstreamCannedError(res.rawText)
+		isGlitch := !res.released && !isCannedErr && apiconv.IsUpstreamGlitch(res.rawText)
+		isToolRefusal := !res.released && !isCannedErr && len(declared) > 0 && apiconv.IsUpstreamToolRefusal(res.rawText)
 		if isGlitch || isToolRefusal || isCannedErr {
 			// Gemini sent a canned non-answer (generic refusal, "can't use Workspace",
 			// a bare widget placeholder, claimed local tools are not declared/accessible,
