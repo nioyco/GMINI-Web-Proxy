@@ -46,6 +46,8 @@ type Server struct {
 	heldNoteOverride           time.Duration
 	statusNoteOverride         time.Duration
 	cannedRetryTimeoutOverride time.Duration
+	noContentTimeoutOverride   time.Duration
+	noContentNoteOverride      time.Duration
 	// uiToken protects the API of the local management page (ui.go); empty: page off.
 	uiToken string
 
@@ -484,6 +486,17 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 		s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, res.earlyStopMsg, nil)), sse.done())
 		return
 	}
+	if res.noContentTimedOut {
+		s.recordModelFailure(model)
+		sec := int(res.noContentElapsed.Round(time.Second).Seconds())
+		if sec < 1 && s.cfg.NoContentSec > 0 {
+			sec = s.cfg.NoContentSec
+		}
+		s.rlog(ctx).Warn("upstream_no_content_timeout", "elapsed_sec", sec, "heartbeats", res.heartbeats)
+		msg := noContentTimeoutMessage(model, p, sec)
+		s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
+		return
+	}
 	if res.internalToolRetry {
 		if s.cfg.StreamThoughts {
 			if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, "\nGemini a tenté d'utiliser un outil interne : nouvelle tentative avec rappel renforcé…\n")); err != nil {
@@ -762,6 +775,9 @@ type streamToolsResult struct {
 	internalToolRetry   bool
 	internalToolName    string
 	cannedRetryTimedOut bool
+	noContentTimedOut   bool
+	noContentElapsed    time.Duration
+	heartbeats          int
 	genErr              error
 	forwarded           bool
 	released            bool
@@ -783,6 +799,8 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	defer cancel(nil)
 
 	type event struct {
+		opened       bool
+		heartbeat    bool
 		text         string
 		thought      string
 		status       string
@@ -801,6 +819,8 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	}
 	ri := reqFrom(ctx)
 	h := gemini.StreamHandlers{
+		Opened:       func() { push(event{opened: true}) },
+		Heartbeat:    func() { push(event{heartbeat: true}) },
 		Text:         func(d string) { push(event{text: d}) },
 		Status:       func(st string) { push(event{status: st}) },
 		InternalTool: func(name string) { push(event{internalTool: name}) },
@@ -844,6 +864,14 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	completeToolCalls, lastCompleteEnd := 0, 0
 	lastHeldNoteBytes := 0
 	internalToolNotified := false
+	var streamOpenedAt, lastNoContentNoteAt time.Time
+	hasContent := false
+	heartbeats := 0
+	noContentTimeout := s.noContentTimeout()
+	if hooks != nil && hooks.cannedRetryTimeout > 0 {
+		noContentTimeout = 0
+	}
+	noContentNoteWait := s.noContentNoteInterval()
 
 	write := func(err error) bool {
 		if err != nil {
@@ -853,6 +881,18 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			return false
 		}
 		lastWrite = time.Now()
+		return true
+	}
+	emitWaitNote := func(elapsed time.Duration) bool {
+		sec := int(elapsed.Round(time.Second).Seconds())
+		note := fmt.Sprintf("Google n'a encore envoyé aucune pensée ni réponse (%d s d'attente ; %d battement(s) reçu(s)).", sec, heartbeats)
+		if ri != nil {
+			ri.setStatusNote(note)
+		}
+		if hooks != nil && hooks.progressive && s.cfg.StreamThoughts {
+			res.forwarded = true
+			return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, "\n"+note+"\n")))
+		}
 		return true
 	}
 	keepalive := func() bool {
@@ -927,6 +967,24 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	}
 
 	handle := func(e event) bool {
+		if e.opened {
+			if streamOpenedAt.IsZero() {
+				streamOpenedAt = time.Now()
+			}
+			return true
+		}
+		if e.heartbeat {
+			heartbeats++
+			res.heartbeats = heartbeats
+			if streamOpenedAt.IsZero() {
+				streamOpenedAt = time.Now()
+			}
+			if noContentTimeout == 0 && !hasContent && (lastNoContentNoteAt.IsZero() || time.Since(lastNoContentNoteAt) >= noContentNoteWait/2) {
+				lastNoContentNoteAt = time.Now()
+				return emitWaitNote(time.Since(streamOpenedAt))
+			}
+			return true
+		}
 		if e.internalTool != "" {
 			return onInternalTool(e.internalTool)
 		}
@@ -971,6 +1029,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			return true
 		}
 		if e.status != "" {
+			hasContent = true
 			lastFrameTime = time.Now()
 			silenceWarned = false
 			if ri != nil {
@@ -991,6 +1050,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			return true
 		}
 		if e.thought != "" {
+			hasContent = true
 			thoughtBytes += len(e.thought)
 			lastFrameTime = time.Now()
 			if ri != nil {
@@ -1002,6 +1062,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			}
 			return true
 		}
+		hasContent = true
 		lastFrameTime = time.Now()
 		if silenceWarned && ri != nil {
 			ri.setStatusNote("")
@@ -1099,6 +1160,12 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	if hooks != nil && hooks.cannedRetryTimeout > 0 && hooks.cannedRetryTimeout/4 > 0 && hooks.cannedRetryTimeout/4 < tick {
 		tick = hooks.cannedRetryTimeout / 4
 	}
+	if noContentTimeout > 0 && noContentTimeout/4 > 0 && noContentTimeout/4 < tick {
+		tick = noContentTimeout / 4
+	}
+	if noContentTimeout == 0 && noContentNoteWait > 0 && noContentNoteWait/4 > 0 && noContentNoteWait/4 < tick {
+		tick = noContentNoteWait / 4
+	}
 	if tick < 5*time.Millisecond {
 		tick = 5 * time.Millisecond
 	}
@@ -1176,6 +1243,22 @@ loop:
 				cancel(errCannedRetryTimeout)
 				break loop
 			}
+			if !hasContent && !streamOpenedAt.IsZero() {
+				elapsed := time.Since(streamOpenedAt)
+				if noContentTimeout > 0 && elapsed >= noContentTimeout {
+					res.noContentTimedOut = true
+					res.noContentElapsed = elapsed
+					cancel(errNoContentTimeout)
+					break loop
+				}
+				if noContentTimeout == 0 && noContentNoteWait > 0 && elapsed >= noContentNoteWait &&
+					(lastNoContentNoteAt.IsZero() || time.Since(lastNoContentNoteAt) >= noContentNoteWait) {
+					lastNoContentNoteAt = time.Now()
+					if !emitWaitNote(elapsed) {
+						return res
+					}
+				}
+			}
 			heldBytes := raw.Len() - rawAtLastUsefulTx
 			if maxHeldDur > 0 && heldBytes > 0 && !heldSince.IsZero() && time.Since(heldSince) >= maxHeldDur {
 				triggerCap("duration", heldBytes)
@@ -1246,6 +1329,17 @@ func (s *Server) awaitStreamOrGenerate(ctx context.Context, sse *sseStream, p ge
 	if res.earlyStopReason != "" {
 		return kaResult{text: res.rawText}
 	}
+	if res.noContentTimedOut {
+		if p.Model != nil {
+			s.recordModelFailure(p.Model.Name)
+		}
+		sec := int(res.noContentElapsed.Round(time.Second).Seconds())
+		if sec < 1 && s.cfg.NoContentSec > 0 {
+			sec = s.cfg.NoContentSec
+		}
+		s.rlog(ctx).Warn("upstream_no_content_timeout", "elapsed_sec", sec, "heartbeats", res.heartbeats)
+		return kaResult{text: noContentTimeoutMessage("", p, sec)}
+	}
 	if res.internalToolRetry {
 		return s.awaitGenerate(ctx, sse, internalToolRetryParams(p), interval)
 	}
@@ -1298,7 +1392,31 @@ func internalToolRetryParams(p gemini.GenParams) gemini.GenParams {
 	return p
 }
 
-var errCannedRetryTimeout = errors.New("canned_retry_timeout")
+var (
+	errCannedRetryTimeout = errors.New("canned_retry_timeout")
+	errNoContentTimeout   = errors.New("no_content_timeout")
+)
+
+func (s *Server) noContentTimeout() time.Duration {
+	if s.noContentTimeoutOverride > 0 {
+		return s.noContentTimeoutOverride
+	}
+	if s.cfg.NoContentSec <= 0 {
+		return 0
+	}
+	return time.Duration(s.cfg.NoContentSec) * time.Second
+}
+
+func (s *Server) noContentNoteInterval() time.Duration {
+	if s.noContentNoteOverride > 0 {
+		return s.noContentNoteOverride
+	}
+	return 65 * time.Second
+}
+
+func noContentTimeoutMessage(model string, p gemini.GenParams, sec int) string {
+	return fmt.Sprintf("GMINI : %s ne répond pas (Google n'envoie que des signaux d'attente depuis %d s). Réessayez plus tard ou changez de modèle.", modelDisplayLabel(model, p), sec)
+}
 
 func (s *Server) cannedErrorRetryTimeout() time.Duration {
 	if s.cannedRetryTimeoutOverride > 0 {

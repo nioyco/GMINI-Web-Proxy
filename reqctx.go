@@ -418,6 +418,7 @@ func (s *Server) withTracking(next http.Handler) http.Handler {
 				"upstream_attempts", m.Attempts.Load(), "upstream_retries", m.Retries.Load(),
 				"retry_wait_ms", m.RetryWaitMS.Load(), "first_byte_ms", m.FirstByteMS.Load(),
 				"upstream_ms", m.UpstreamMS.Load(), "upstream_resp_bytes", m.RespBytes.Load(),
+				"upstream_heartbeats", m.Heartbeats.Load(),
 				"resp_bytes", sw.bytes)
 		}()
 		next.ServeHTTP(sw, r.WithContext(ctx))

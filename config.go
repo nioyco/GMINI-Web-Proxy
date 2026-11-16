@@ -89,6 +89,10 @@ type Config struct {
 	// SilenceWarningSec warns in stream thoughts if thoughts have arrived but no
 	// answer text follows for this duration (GEMINI_SILENCE_WARN_SEC, default 45).
 	SilenceWarningSec int
+	// NoContentSec cancels an open upstream stream after N seconds when no
+	// thought, text, or body[2]["7"] status frame arrived (GEMINI_NO_CONTENT_SEC,
+	// default 0 = disabled; emits a wait note instead).
+	NoContentSec int
 	// MaxHeldBytes and MaxHeldSec cap a retained stream+tools response when no
 	// runaway marker appears (GEMINI_MAX_HELD_BYTES default 256 KiB, GEMINI_MAX_HELD_SEC
 	// default 120 s; 0 disables via -1).
@@ -159,6 +163,7 @@ func loadConfig(envFile string) *Config {
 		StreamToolsProgress:         getEnvBool("GEMINI_STREAM_TOOLS_PROGRESS", true),
 		StreamThoughts:              getEnvBool("GEMINI_STREAM_THOUGHTS", true),
 		SilenceWarningSec:           nonNegative(getEnvInt("GEMINI_SILENCE_WARN_SEC", 45), 45),
+		NoContentSec:                nonNegative(getEnvInt("GEMINI_NO_CONTENT_SEC", 0), 0),
 		MaxHeldBytes:                capWithDisable(getEnvInt("GEMINI_MAX_HELD_BYTES", 256*1024), 256*1024),
 		MaxHeldSec:                  capWithDisable(getEnvInt("GEMINI_MAX_HELD_SEC", 120), 120),
 		DefaultThinkingLevel:        strings.ToLower(strings.TrimSpace(getEnv("GEMINI_THINKING_LEVEL", ""))),

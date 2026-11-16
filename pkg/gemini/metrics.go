@@ -19,6 +19,7 @@ type CallMetrics struct {
 	FirstByteMS atomic.Int64 // first attempt: time to first upstream byte (response headers / first data)
 	UpstreamMS  atomic.Int64 // total time spent talking to upstream (attempt durations, no retry sleeps)
 	RespBytes   atomic.Int64 // upstream response bytes read
+	Heartbeats  atomic.Int64 // Google wait heartbeat frames ([{"37":[n]}])
 	fbSet       atomic.Bool
 }
 
@@ -74,4 +75,11 @@ func (m *CallMetrics) retryWait(d time.Duration) {
 		return
 	}
 	m.RetryWaitMS.Add(d.Milliseconds())
+}
+
+func (m *CallMetrics) heartbeat() {
+	if m == nil {
+		return
+	}
+	m.Heartbeats.Add(1)
 }

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -277,5 +279,127 @@ func TestN3_ModelFailureMemorySkipsRetryAndResetsOnSuccess(t *testing.T) {
 	now = now.Add(16 * time.Minute)
 	if s.shouldSkipCannedRetry("gemini-everyday-help") || len(s.modelFailures()) != 0 {
 		t.Fatalf("expected failure older than 15m to expire, got %+v", s.modelFailures())
+	}
+}
+
+func TestN4_DefaultZeroEmitsWaitNoteAndCountsHeartbeats(t *testing.T) {
+	t.Setenv("GEMINI_NO_CONTENT_SEC", "")
+	cfgLoad := loadConfig(filepath.Join(t.TempDir(), "missing.env"))
+	if cfgLoad.NoContentSec != 0 {
+		t.Fatalf("default GEMINI_NO_CONTENT_SEC = %d, want 0", cfgLoad.NoContentSec)
+	}
+
+	_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			defer pw.Close()
+			_, _ = pw.Write([]byte(")]}'\n\n36\n[[\"wrb.fr\",null,\"[{\\\"37\\\":[0]}]\"]]\n"))
+			time.Sleep(35 * time.Millisecond)
+			_, _ = pw.Write([]byte("36\n[[\"wrb.fr\",null,\"[{\\\"37\\\":[1]}]\"]]\n"))
+			time.Sleep(35 * time.Millisecond)
+			_, _ = pw.Write([]byte(fakeStreamServed("Réponse après 2 battements.", "", "56fdd199312815e2", "4 Hydrogen")))
+		}()
+		return &http.Response{StatusCode: 200, Body: pr}, nil
+	}))
+	var logBuf bytes.Buffer
+	cfg := testConfig()
+	cfg.StreamToolsProgress = true
+	cfg.StreamThoughts = true
+	cfg.SSEKeepaliveSec = 1
+	cfg.NoContentSec = 0
+	s := newServer(cfg, client, slog.New(slog.NewTextHandler(&logBuf, nil)))
+	s.keepaliveOverride = 20 * time.Millisecond
+	s.noContentNoteOverride = 30 * time.Millisecond
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	c := readSSE(t, context.Background(), ts.URL, k9ChatToolsBody)
+	assertProgressStream(t, c)
+	content, reasoning := sseContentAndReasoning(t, c)
+	if !strings.Contains(reasoning, "aucune pensée ni réponse") {
+		t.Fatalf("expected wait note in reasoning, got %q", reasoning)
+	}
+	if !strings.Contains(content, "Réponse après 2 battements.") {
+		t.Fatalf("expected final answer not cut when NoContentSec=0, got %q", content)
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, "upstream_heartbeats=2") {
+		t.Fatalf("expected upstream_heartbeats=2 in request_end log, got:\n%s", logs)
+	}
+}
+
+func TestN4_PositiveNoContentSecCancelsAndRecordsFailure(t *testing.T) {
+	canceled := make(chan struct{}, 1)
+	_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			defer pw.Close()
+			_, _ = pw.Write([]byte(")]}'\n\n36\n[[\"wrb.fr\",null,\"[{\\\"37\\\":[0]}]\"]]\n"))
+			<-r.Context().Done()
+			select {
+			case canceled <- struct{}{}:
+			default:
+			}
+		}()
+		return &http.Response{StatusCode: 200, Body: pr}, nil
+	}))
+	cfg := testConfig()
+	cfg.StreamToolsProgress = true
+	cfg.StreamThoughts = true
+	cfg.SSEKeepaliveSec = 1
+	cfg.NoContentSec = 75
+	s := newServer(cfg, client, testLogger())
+	s.keepaliveOverride = 20 * time.Millisecond
+	s.noContentTimeoutOverride = 60 * time.Millisecond
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	c := readSSE(t, context.Background(), ts.URL, k9ChatToolsBody)
+	assertProgressStream(t, c)
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("expected upstream request to be canceled on N4 timeout")
+	}
+	content, _ := sseContentAndReasoning(t, c)
+	if !strings.Contains(content, "GMINI : 4 Hydrogen ne répond pas (Google n'envoie que des signaux d'attente depuis") {
+		t.Fatalf("unexpected timeout content: %q", content)
+	}
+	if f := s.modelFailures(); len(f) != 1 || f[0].Count != 1 {
+		t.Fatalf("expected N4 timeout to record model failure for N3, got %+v", f)
+	}
+}
+
+func TestN4_Body2StatusPreventsNoContentCutoff(t *testing.T) {
+	_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			defer pw.Close()
+			_, _ = pw.Write([]byte(")]}'\n\n"))
+			time.Sleep(15 * time.Millisecond)
+			b2 := make([]any, 5)
+			b2[2] = map[string]any{"7": []any{nil, nil, nil, nil, nil, []any{"Analyzing user requests"}}}
+			_, _ = pw.Write([]byte(wrbBodyFrame(b2)))
+			time.Sleep(80 * time.Millisecond)
+			_, _ = pw.Write([]byte(fakeStreamServed("Réponse après statut.", "", "56fdd199312815e2", "4 Hydrogen")))
+		}()
+		return &http.Response{StatusCode: 200, Body: pr}, nil
+	}))
+	cfg := testConfig()
+	cfg.StreamToolsProgress = true
+	cfg.StreamThoughts = true
+	cfg.SSEKeepaliveSec = 1
+	cfg.NoContentSec = 75
+	s := newServer(cfg, client, testLogger())
+	s.keepaliveOverride = 20 * time.Millisecond
+	s.noContentTimeoutOverride = 50 * time.Millisecond
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	c := readSSE(t, context.Background(), ts.URL, k9ChatToolsBody)
+	assertProgressStream(t, c)
+	content, _ := sseContentAndReasoning(t, c)
+	if !strings.Contains(content, "Réponse après statut.") {
+		t.Fatalf("body[2][7] status should disarm N4 timeout, got %q", content)
 	}
 }

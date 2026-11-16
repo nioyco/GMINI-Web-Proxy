@@ -783,6 +783,9 @@ func (c *Client) generateAttempts(ctx context.Context, p GenParams, images []upl
 							}
 							rawLines = append(rawLines, line)
 							scan.add(line)
+							if isHeartbeatFrame(line) {
+								met.heartbeat()
+							}
 							if fr, ok := parseFrame(line); ok {
 								shape.add(fr, elapsed)
 							}
@@ -861,6 +864,8 @@ type StreamHandlers struct {
 	InternalTool func(name string)                 // internal Google tool detected in body[11]/body[24][0] (B1)
 	LimitBanner  func(msg string)                  // explicit Google quota/limit banner from body[52] (B1)
 	Identity     func(servedID, servedName string) // reported as soon as position 39 is read
+	Opened       func()                            // upstream HTTP 200 stream opened (N4)
+	Heartbeat    func()                            // Google wait heartbeat frame [{"37":[n]}] received (N4)
 	Progress     func(textBytes, thoughtBytes int) // incremental bytes received and heartbeat
 }
 
@@ -976,6 +981,9 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 		return runErr
 	}
 	defer resp.Body.Close()
+	if h.Opened != nil {
+		h.Opened()
+	}
 
 	// ReadString grows its buffer as needed, unlike bufio.Scanner which caps at 64KB;
 	// batchexecute lines routinely exceed that.
@@ -1006,6 +1014,12 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 				rawBytes += len(line)
 				rawLines = append(rawLines, line)
 				rawTimesMS = append(rawTimesMS, time.Since(t0).Milliseconds())
+			}
+			if isHeartbeatFrame(line) {
+				met.heartbeat()
+				if h.Heartbeat != nil {
+					h.Heartbeat()
+				}
 			}
 			fr, ok := parseFrame(line)
 			if ok {
@@ -1114,6 +1128,38 @@ func latestText(line string) (string, bool) {
 		}
 	}
 	return best, best != ""
+}
+
+// isHeartbeatFrame reports whether a streamed line is a Google wait-heartbeat
+// frame of the form [["wrb.fr",null,"[{\"37\":[n]}]"]].
+func isHeartbeatFrame(line string) bool {
+	if !strings.Contains(line, `"wrb.fr"`) || len(line) > 256 || !strings.Contains(line, "37") {
+		return false
+	}
+	var arr []any
+	if json.Unmarshal([]byte(line), &arr) != nil {
+		return false
+	}
+	first, ok := indexSlice(arr, 0)
+	if !ok {
+		return false
+	}
+	innerStr, ok := indexString(first, 2)
+	if !ok || len(innerStr) < 2 {
+		return false
+	}
+	var inner []any
+	if json.Unmarshal([]byte(innerStr), &inner) != nil {
+		return false
+	}
+	for _, elem := range inner {
+		if m, ok := elem.(map[string]any); ok {
+			if _, has37 := m["37"]; has37 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // wrbInner2 decodes a batchexecute "wrb.fr" response line and returns its

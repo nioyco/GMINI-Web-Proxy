@@ -40,6 +40,7 @@ type statusResponse struct {
 	InternalToolAction  string                  `json:"internal_tool_action"`       // GEMINI_INTERNAL_TOOL_ACTION (notify|retry|off)
 	CannedErrorRetry    string                  `json:"canned_error_retry"`         // GEMINI_CANNED_ERROR_RETRY (off|once)
 	CannedErrorRetrySec int                     `json:"canned_error_retry_sec"`     // GEMINI_CANNED_ERROR_RETRY_SEC (default 25)
+	NoContentSec        int                     `json:"no_content_sec"`             // GEMINI_NO_CONTENT_SEC (default 0)
 	TraceEnabled        bool                    `json:"content_trace_enabled"`      // GEMINI_TRACE_DIR set (files hold conversation content)
 	TemporaryChat       bool                    `json:"temporary_chat"`             // GEMINI_TEMPORARY_CHAT
 	IgnoredFields       ignoredFields           `json:"ignored_request_fields"`
@@ -192,6 +193,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		InternalToolAction:  normalizeInternalToolAction(s.cfg.InternalToolAction),
 		CannedErrorRetry:    normalizeCannedErrorRetry(s.cfg.CannedErrorRetry),
 		CannedErrorRetrySec: positive(s.cfg.CannedErrorRetrySec, 25),
+		NoContentSec:        nonNegative(s.cfg.NoContentSec, 0),
 		Counters: map[string]int64{
 			"requests_total":            s.stats.requests.Load(),
 			"responses_2xx":             s.stats.status2xx.Load(),
