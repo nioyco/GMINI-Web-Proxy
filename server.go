@@ -1093,7 +1093,7 @@ func (s *Server) maxHeldBytes() int {
 		return 0
 	}
 	if s.cfg.MaxHeldBytes == 0 {
-		return 64 * 1024
+		return 256 * 1024
 	}
 	return s.cfg.MaxHeldBytes
 }

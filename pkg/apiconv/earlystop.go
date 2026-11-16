@@ -130,9 +130,15 @@ func ScanToolCalls(text string, declared []DeclaredTool) ToolScanResult {
 				res.LastCallEnd = offset + int(dec.InputOffset())
 			}
 			if res.CompleteCalls > 0 && res.LastCallEnd < len(text) {
-				if m := findRunawayMarker(text[res.LastCallEnd:]); m >= 0 {
-					res.CutAt = res.LastCallEnd + m
-					res.HasMarker = true
+				remLead := strings.TrimLeft(text[res.LastCallEnd:], " \t\r\n")
+				// An incomplete trailing bare JSON object/array is still streaming
+				// (e.g. a second bare write_file whose content quotes a marker).
+				isStreamingJSON := remLead != "" && (remLead[0] == '{' || (remLead[0] == '[' && findRunawayMarker(remLead) != 0))
+				if !isStreamingJSON {
+					if m := findRunawayMarker(text[res.LastCallEnd:]); m >= 0 {
+						res.CutAt = res.LastCallEnd + m
+						res.HasMarker = true
+					}
 				}
 			}
 		}

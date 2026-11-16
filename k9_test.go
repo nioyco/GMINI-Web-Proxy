@@ -161,6 +161,7 @@ func TestK9_ThreeConsecutiveToolCallsDelivered(t *testing.T) {
 	cfg := testConfig()
 	cfg.StreamToolsProgress = true
 	cfg.SSEKeepaliveSec = 1
+	cfg.MaxHeldBytes = 64 * 1024
 	s := newServer(cfg, client, testLogger())
 	s.keepaliveOverride = 50 * time.Millisecond
 	ts := httptest.NewServer(s.handler())
@@ -205,6 +206,7 @@ func TestK9_EndlessTextWithoutToolCallCutAtSizeCap(t *testing.T) {
 	cfg := testConfig()
 	cfg.StreamToolsProgress = true
 	cfg.SSEKeepaliveSec = 1
+	cfg.MaxHeldBytes = 64 * 1024
 	s := newServer(cfg, client, testLogger())
 	s.keepaliveOverride = 50 * time.Millisecond
 	ts := httptest.NewServer(s.handler())
@@ -292,6 +294,7 @@ func TestK9_LongWriteFile50KBNotCut(t *testing.T) {
 	cfg := testConfig()
 	cfg.StreamToolsProgress = true
 	cfg.SSEKeepaliveSec = 1
+	cfg.MaxHeldBytes = 64 * 1024
 	s := newServer(cfg, client, testLogger())
 	s.keepaliveOverride = 50 * time.Millisecond
 	ts := httptest.NewServer(s.handler())
@@ -314,6 +317,48 @@ func TestK9_LongWriteFile50KBNotCut(t *testing.T) {
 	json.Unmarshal(stRec.Body.Bytes(), &st)
 	if st.Counters["early_stop"] != 0 {
 		t.Errorf("expected early_stop=0 for 50 KiB write_file, got %+v", st.Counters)
+	}
+}
+
+// Normal long response (> 64 KiB, e.g. 80 KiB write_file): NOT cut under default 256 KiB cap.
+func TestK9_LongWriteFile80KBNotCut(t *testing.T) {
+	payload := strings.Repeat("y", 80*1024)
+	_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			defer pw.Close()
+			acc := "```tool_call\n{\"name\":\"write_file\",\"arguments\":{\"path\":\"huge.txt\",\"content\":\""
+			pw.Write([]byte(fakeStreamServed(acc, "", "e6fa609c3fa255c0", "3.1 Pro")))
+			for off := 0; off < len(payload); off += 8192 {
+				end := off + 8192
+				if end > len(payload) {
+					end = len(payload)
+				}
+				acc += payload[off:end]
+				pw.Write([]byte(fakeStreamServed(acc, "", "e6fa609c3fa255c0", "3.1 Pro")))
+			}
+			acc += "\"}}\n```"
+			pw.Write([]byte(fakeStreamServed(acc, "", "e6fa609c3fa255c0", "3.1 Pro")))
+		}()
+		return &http.Response{StatusCode: 200, Body: pr}, nil
+	}))
+	cfg := testConfig()
+	cfg.StreamToolsProgress = true
+	cfg.SSEKeepaliveSec = 1
+	s := newServer(cfg, client, testLogger())
+	s.keepaliveOverride = 50 * time.Millisecond
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	c := readSSE(t, context.Background(), ts.URL, k9ChatToolsBody)
+	assertProgressStream(t, c)
+	vs := views(t, c)
+	last := vs[len(vs)-1].Choices[0]
+	if len(last.Delta.ToolCalls) != 1 || last.Delta.ToolCalls[0].Function.Name != "write_file" {
+		t.Fatalf("expected 1 write_file call, got %v", c.dataFrames)
+	}
+	if len(last.Delta.ToolCalls[0].Function.Arguments) < 80*1024 {
+		t.Errorf("arguments truncated: len=%d", len(last.Delta.ToolCalls[0].Function.Arguments))
 	}
 }
 

@@ -78,7 +78,7 @@ type Config struct {
 	// answer text follows for this duration (GEMINI_SILENCE_WARN_SEC, default 45).
 	SilenceWarningSec int
 	// MaxHeldBytes and MaxHeldSec cap a retained stream+tools response when no
-	// runaway marker appears (GEMINI_MAX_HELD_BYTES default 64 KiB, GEMINI_MAX_HELD_SEC
+	// runaway marker appears (GEMINI_MAX_HELD_BYTES default 256 KiB, GEMINI_MAX_HELD_SEC
 	// default 120 s; 0 disables via -1).
 	MaxHeldBytes int
 	MaxHeldSec   int
@@ -143,7 +143,7 @@ func loadConfig(envFile string) *Config {
 		StreamToolsProgress:         getEnvBool("GEMINI_STREAM_TOOLS_PROGRESS", true),
 		StreamThoughts:              getEnvBool("GEMINI_STREAM_THOUGHTS", true),
 		SilenceWarningSec:           nonNegative(getEnvInt("GEMINI_SILENCE_WARN_SEC", 45), 45),
-		MaxHeldBytes:                capWithDisable(getEnvInt("GEMINI_MAX_HELD_BYTES", 64*1024), 64*1024),
+		MaxHeldBytes:                capWithDisable(getEnvInt("GEMINI_MAX_HELD_BYTES", 256*1024), 256*1024),
 		MaxHeldSec:                  capWithDisable(getEnvInt("GEMINI_MAX_HELD_SEC", 120), 120),
 		DefaultThinkingLevel:        strings.ToLower(strings.TrimSpace(getEnv("GEMINI_THINKING_LEVEL", ""))),
 		ThinkingModes:               parseModeCodes(getEnv("GEMINI_THINKING_MODE_CODES", defaultThinkingModeCodes)),

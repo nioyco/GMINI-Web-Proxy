@@ -99,10 +99,44 @@ func fenceClose(text string, bodyStart int) (bodyEnd, end int) {
 			return bodyEnd, len(text)
 		}
 	}
-	if c := strings.Index(text[searchFrom:], "```"); c >= 0 {
-		return searchFrom + c, searchFrom + c + 3
+	remLead := strings.TrimLeft(text[searchFrom:], " \t\r\n")
+	if c := findClosingFence(text, searchFrom, remLead != "" && (remLead[0] == '{' || remLead[0] == '[')); c >= 0 {
+		return c, c + 3
 	}
 	return len(text), len(text)
+}
+
+// findClosingFence locates the next ``` at or after searchFrom. When jsonBody is
+// true and searchFrom starts inside an incomplete JSON value, ``` occurrences
+// inside a JSON string literal are skipped so an embedded Markdown code block
+// in a write_file payload never prematurely closes the fence.
+func findClosingFence(text string, searchFrom int, jsonBody bool) int {
+	if !jsonBody {
+		if c := strings.Index(text[searchFrom:], "```"); c >= 0 {
+			return searchFrom + c
+		}
+		return -1
+	}
+	inStr := false
+	for i := searchFrom; i < len(text); i++ {
+		c := text[i]
+		if inStr {
+			if c == '\\' {
+				i++
+			} else if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		if c == '"' {
+			inStr = true
+			continue
+		}
+		if c == '`' && strings.HasPrefix(text[i:], "```") {
+			return i
+		}
+	}
+	return -1
 }
 
 func isJSONSpace(c byte) bool {

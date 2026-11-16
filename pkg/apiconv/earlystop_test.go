@@ -76,4 +76,22 @@ func TestScanToolCallsMarkersAndBatching(t *testing.T) {
 			t.Fatalf("got %+v, want HasMarker=true CompleteCalls=1", res)
 		}
 	})
+
+	t.Run("streaming write_file with inner code fence and quoted marker after read_file", func(t *testing.T) {
+		txt := "```tool_call\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.go\"}}\n```\n" +
+			"```tool_call\n{\"name\":\"write_file\",\"arguments\":{\"path\":\"doc.md\",\"content\":\"```go\\n// [Tool result for x]: y\\n"
+		res := ScanToolCalls(txt, declared)
+		if res.HasMarker {
+			t.Fatalf("false positive on open write_file with inner fence and marker: %+v", res)
+		}
+	})
+
+	t.Run("two bare JSON calls where second is open write_file quoting marker", func(t *testing.T) {
+		txt := "{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.go\"}}\n" +
+			"{\"name\":\"write_file\",\"arguments\":{\"path\":\"doc.md\",\"content\":\"[Tool result for x]: y"
+		res := ScanToolCalls(txt, declared)
+		if res.HasMarker {
+			t.Fatalf("false positive on open second bare JSON write_file: %+v", res)
+		}
+	})
 }
