@@ -91,9 +91,11 @@ type uiModel struct {
 	Withdrawn   string `json:"withdrawn_since"` // RFC 3339; "" = listed by Google now
 	Family      string `json:"family"`
 	// Journal figures (successful streamed calls among the recent ones).
-	Calls          int    `json:"calls"`
-	WithThoughts   int    `json:"with_thoughts"`
-	MedianFirstMS  int64  `json:"median_first_text_ms"` // -1: no data
+	Calls               int    `json:"calls"`
+	WithThoughts        int    `json:"with_thoughts"`
+	MedianFirstMS       int64  `json:"median_first_text_ms"`    // -1: no data
+	MedianFirstSignMS   int64  `json:"median_first_sign_ms"`    // -1: no data (min of first_thought_ms, first_text_ms)
+	MedianFirstThoughtM int64  `json:"median_first_thought_ms"` // -1: no data
 	LastTime       string `json:"last_time"`
 	LastIdentity   string `json:"last_identity"`
 	LastSuspect    string `json:"last_suspect"`
@@ -186,9 +188,9 @@ func (s *Server) uiModels() []uiModel {
 	out := make([]uiModel, 0, len(list))
 	for _, m := range list {
 		u := uiModel{Name: m.Name, ModelID: m.ModelID, DisplayName: m.DisplayName, Description: m.Description,
-			Default: m.Name == def, MedianFirstMS: -1, MenuLabel: m.MenuLabel, Family: m.Family,
+			Default: m.Name == def, MedianFirstMS: -1, MedianFirstSignMS: -1, MedianFirstThoughtM: -1, MenuLabel: m.MenuLabel, Family: m.Family,
 			MismatchSince: identByModel[m.Name]}
-		var firsts []int64
+		var firsts, firstSigns, firstThoughts []int64
 		for _, c := range all {
 			if c.Model != m.Name {
 				continue
@@ -218,17 +220,35 @@ func (s *Server) uiModels() []uiModel {
 			if c.FirstTextMS >= 0 {
 				firsts = append(firsts, c.FirstTextMS)
 			}
+			if c.FirstThoughtMS >= 0 {
+				firstThoughts = append(firstThoughts, c.FirstThoughtMS)
+			}
+			sign := c.FirstTextMS
+			if c.FirstThoughtMS >= 0 && (sign < 0 || c.FirstThoughtMS < sign) {
+				sign = c.FirstThoughtMS
+			}
+			if sign >= 0 {
+				firstSigns = append(firstSigns, sign)
+			}
 		}
 		if len(firsts) > 0 {
 			sort.Slice(firsts, func(i, j int) bool { return firsts[i] < firsts[j] })
 			u.MedianFirstMS = firsts[len(firsts)/2]
+		}
+		if len(firstSigns) > 0 {
+			sort.Slice(firstSigns, func(i, j int) bool { return firstSigns[i] < firstSigns[j] })
+			u.MedianFirstSignMS = firstSigns[len(firstSigns)/2]
+		}
+		if len(firstThoughts) > 0 {
+			sort.Slice(firstThoughts, func(i, j int) bool { return firstThoughts[i] < firstThoughts[j] })
+			u.MedianFirstThoughtM = firstThoughts[len(firstThoughts)/2]
 		}
 		out = append(out, u)
 	}
 	for _, wd := range s.client.WithdrawnModels() {
 		out = append(out, uiModel{Name: wd.Model.Name, ModelID: wd.Model.ModelID, DisplayName: wd.Model.DisplayName,
 			Description: wd.Model.Description, MenuLabel: wd.Model.MenuLabel, Family: wd.Model.Family,
-			MedianFirstMS: -1, Withdrawn: wd.Since.Format(time.RFC3339)})
+			MedianFirstMS: -1, MedianFirstSignMS: -1, MedianFirstThoughtM: -1, Withdrawn: wd.Since.Format(time.RFC3339)})
 	}
 	return out
 }
