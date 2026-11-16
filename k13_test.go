@@ -4,15 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
 )
 
 func sseContentAndReasoning(t *testing.T, c *sseCapture) (content string, reasoning string) {
@@ -430,5 +434,117 @@ func TestN5_WaitAndRetryNotesExplicitlyTimestamped(t *testing.T) {
 	_, reasoning := sseContentAndReasoning(t, c)
 	if !strings.Contains(reasoning, "[21:05:09] GMINI (pas le modèle — attente technique) :") {
 		t.Fatalf("expected timestamped GMINI (not model) note, got %q", reasoning)
+	}
+}
+
+func TestN7_ManualCookieRefreshRouteGuardrailsAndHotReload(t *testing.T) {
+	c, cookieFile, _ := newCookieTestClient(t, "SAPISID=s1; __Secure-1PSIDTS=t1", 2*time.Hour)
+	marker := filepath.Join(t.TempDir(), "ran_manual")
+	script := writeFakeScript(t, fmt.Sprintf(`
+echo "MANUAL_SECRET_STDOUT"
+echo "MANUAL_SECRET_STDERR" >&2
+printf "SAPISID=s1; __Secure-1PSIDTS=t_manual_new\n" > %q
+touch %q
+`, cookieFile, marker))
+
+	var logBuf bytes.Buffer
+	cfg := testConfig()
+	cfg.UIEnabled = true
+	cfg.CookieAutoRefreshMin = 0 // disabled auto-refresh!
+	cfg.CookieRefreshCmd = script
+	s := newServer(cfg, c, slog.New(slog.NewTextHandler(&logBuf, nil)))
+	now := time.Date(2026, 11, 16, 21, 0, 0, 0, time.UTC)
+	s.autoRefresh.nowFn = func() time.Time { return now }
+	h := s.handler()
+
+	// Auth checks identical to /toggle
+	if w := uiDo(h, http.MethodPost, "/_ui/api/cookie-refresh/run", "10.0.0.5:1234", s.uiToken); w.Code != http.StatusForbidden {
+		t.Fatalf("remote status = %d, want 403", w.Code)
+	}
+	if w := uiDo(h, http.MethodPost, "/_ui/api/cookie-refresh/run", "127.0.0.1:1234", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token status = %d, want 401", w.Code)
+	}
+
+	// Refuse while an in-flight generation request exists
+	inflightRI := &reqInfo{id: "req_inflight", model: "gemini-3.1-pro", start: now}
+	s.active.add(inflightRI)
+	wBusy := uiDo(h, http.MethodPost, "/_ui/api/cookie-refresh/run", "127.0.0.1:1234", s.uiToken)
+	if wBusy.Code != http.StatusConflict || !strings.Contains(wBusy.Body.String(), "requests_in_flight") {
+		t.Fatalf("expected requests_in_flight refusal, got %d %s", wBusy.Code, wBusy.Body.String())
+	}
+	s.active.remove(inflightRI)
+
+	// Run manual refresh while auto-refresh is disabled
+	wRun := uiDo(h, http.MethodPost, "/_ui/api/cookie-refresh/run", "127.0.0.1:1234", s.uiToken)
+	if wRun.Code != http.StatusOK {
+		t.Fatalf("manual run status = %d body=%s", wRun.Code, wRun.Body.String())
+	}
+	waitForCondition(t, 2*time.Second, func() bool { return !s.autoRefresh.Status().Running })
+
+	st := s.autoRefresh.Status()
+	if st.Enabled || !st.Configured || st.LastOK == nil || !*st.LastOK || st.LastTrigger != "manual" {
+		t.Fatalf("unexpected status after manual run: %+v", st)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("manual script did not run: %v", err)
+	}
+	logs := logBuf.String()
+	if strings.Contains(logs, "MANUAL_SECRET_") {
+		t.Fatalf("script output leaked to logs: %s", logs)
+	}
+	if !strings.Contains(logs, "cookie_auto_refresh") || !strings.Contains(logs, "trigger=manual") {
+		t.Fatalf("expected trigger=manual log, got:\n%s", logs)
+	}
+
+	// Cooldown < 10 min refuses with remaining seconds
+	now = now.Add(3 * time.Minute)
+	wCool := uiDo(h, http.MethodPost, "/_ui/api/cookie-refresh/run", "127.0.0.1:1234", s.uiToken)
+	if wCool.Code != http.StatusConflict || !strings.Contains(wCool.Body.String(), "cooldown") || !strings.Contains(wCool.Body.String(), `"cooldown_sec":420`) {
+		t.Fatalf("expected 420s cooldown refusal, got %d %s", wCool.Code, wCool.Body.String())
+	}
+
+	// Google block refuses
+	now = now.Add(11 * time.Minute)
+	c.SetTransport(roundTripFn(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 429, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("sorry")), Request: r}, nil
+	}))
+	_, _ = c.Generate(context.Background(), gemini.GenParams{Prompt: "p"})
+	wBlk := uiDo(h, http.MethodPost, "/_ui/api/cookie-refresh/run", "127.0.0.1:1234", s.uiToken)
+	if wBlk.Code != http.StatusConflict || !strings.Contains(wBlk.Body.String(), "google_blocked") {
+		t.Fatalf("expected google_blocked refusal, got %d %s", wBlk.Code, wBlk.Body.String())
+	}
+
+	// Manual failures do NOT increment consecutive_failures or trigger auto-refresh pause
+	c2, _, _ := newCookieTestClient(t, "SAPISID=s1; __Secure-1PSIDTS=t1", 2*time.Hour)
+	failScript := writeFakeScript(t, "exit 2")
+	arFail := newCookieAutoRefresher(&Config{CookieAutoRefreshMin: 90, CookieRefreshCmd: failScript}, c2, nil)
+	t0 := now
+	arFail.nowFn = func() time.Time { return t0 }
+	arFail.manualMinSpacing = 0
+	for i := 0; i < 3; i++ {
+		_, code, reason := arFail.RunManual(0)
+		if code != http.StatusOK || reason != "" {
+			t.Fatalf("run %d refused: %d %s", i, code, reason)
+		}
+		waitForCondition(t, 2*time.Second, func() bool { return !arFail.Status().Running })
+		t0 = t0.Add(time.Minute)
+	}
+	stFail := arFail.Status()
+	if stFail.Paused || stFail.ConsecutiveFailures != 0 || stFail.LastExitCode == nil || *stFail.LastExitCode != 2 {
+		t.Fatalf("manual failures must not pause auto-refresh or count towards 2 failures: %+v", stFail)
+	}
+
+	// Verify UI page texts
+	wHTML := uiDo(h, http.MethodGet, "/_ui", "127.0.0.1:1234", "")
+	html := wHTML.Body.String()
+	for _, want := range []string{
+		"Actualiser le cookie maintenant",
+		"commande non réglée — ajouter GEMINI_COOKIE_REFRESH_CMD dans .env",
+		"pensez à actualiser",
+		"/_ui/api/cookie-refresh/run",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("ui.html missing %q", want)
+		}
 	}
 }

@@ -169,6 +169,45 @@ func (s *Server) handleUICookieRefreshToggle(w http.ResponseWriter, r *http.Requ
 	sendJSON(w, http.StatusOK, st)
 }
 
+func (s *Server) handleUICookieRefreshRun(w http.ResponseWriter, r *http.Request) {
+	if !s.uiAllowed(w, r, true) {
+		return
+	}
+	if s.autoRefresh == nil {
+		sendError(w, http.StatusServiceUnavailable, "cookie auto-refresh unavailable")
+		return
+	}
+	inFlight := len(s.inFlightRequests())
+	st, code, reason := s.autoRefresh.RunManual(inFlight)
+	if reason != "" {
+		msg := reason
+		switch reason {
+		case "not_configured":
+			msg = "commande non réglée — ajouter GEMINI_COOKIE_REFRESH_CMD dans .env"
+		case "already_running":
+			msg = "actualisation déjà en cours"
+		case "google_blocked":
+			msg = "refus : un blocage Google est actif"
+		case "requests_in_flight":
+			msg = "refus : une demande est en cours"
+		case "cooldown":
+			msg = "refus : actualisation récente — attendre encore"
+		}
+		sendJSON(w, code, map[string]any{
+			"started":      false,
+			"reason":       reason,
+			"error":        msg,
+			"cooldown_sec": st.ManualCooldownSec,
+			"status":       st,
+		})
+		return
+	}
+	sendJSON(w, code, map[string]any{
+		"started": true,
+		"status":  st,
+	})
+}
+
 func (s *Server) uiModels() []uiModel {
 	all := s.client.RecentCalls() // newest first
 	byID := map[string]string{}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"os/exec"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 const (
 	defaultAutoRefreshActivityWindow = 90 * time.Minute
 	defaultAutoRefreshMinSpacing     = 60 * time.Minute
+	defaultManualRefreshMinSpacing   = 10 * time.Minute
 	defaultAutoRefreshExecTimeout    = 60 * time.Second
 	defaultAutoRefreshWaitTimeout    = 45 * time.Second
 	defaultAutoRefreshPollInterval   = time.Minute
@@ -40,6 +42,7 @@ type cookieAutoRefreshStatus struct {
 	LastOK              *bool   `json:"last_ok,omitempty"`
 	NextRefreshAt       *string `json:"next_refresh_at,omitempty"`
 	NextRefreshInSec    *int64  `json:"next_refresh_in_sec,omitempty"`
+	ManualCooldownSec   int64   `json:"manual_cooldown_sec,omitempty"`
 }
 
 // cookieAutoRefresher runs an external cookie-refresh command (no shell) only
@@ -50,13 +53,14 @@ type cookieAutoRefresher struct {
 	client *gemini.Client
 	log    *slog.Logger
 
-	cmdArgs        []string
-	activityWindow time.Duration
-	minSpacing     time.Duration
-	execTimeout    time.Duration
-	waitTimeout    time.Duration
-	pollInterval   time.Duration
-	nowFn          func() time.Time
+	cmdArgs          []string
+	activityWindow   time.Duration
+	minSpacing       time.Duration
+	manualMinSpacing time.Duration
+	execTimeout      time.Duration
+	waitTimeout      time.Duration
+	pollInterval     time.Duration
+	nowFn            func() time.Time
 
 	mu                  sync.Mutex
 	enabled             bool
@@ -92,18 +96,19 @@ func newCookieAutoRefresher(cfg *Config, client *gemini.Client, log *slog.Logger
 	interval := time.Duration(cfg.CookieAutoRefreshMin) * time.Minute
 	now := time.Now().Round(0)
 	return &cookieAutoRefresher{
-		client:         client,
-		log:            log,
-		cmdArgs:        args,
-		activityWindow: defaultAutoRefreshActivityWindow,
-		minSpacing:     defaultAutoRefreshMinSpacing,
-		execTimeout:    defaultAutoRefreshExecTimeout,
-		waitTimeout:    defaultAutoRefreshWaitTimeout,
-		pollInterval:   defaultAutoRefreshPollInterval,
-		nowFn:          func() time.Time { return time.Now().Round(0) },
-		enabled:        len(args) > 0 && interval > 0,
-		interval:       interval,
-		startedAt:      now,
+		client:           client,
+		log:              log,
+		cmdArgs:          args,
+		activityWindow:   defaultAutoRefreshActivityWindow,
+		minSpacing:       defaultAutoRefreshMinSpacing,
+		manualMinSpacing: defaultManualRefreshMinSpacing,
+		execTimeout:      defaultAutoRefreshExecTimeout,
+		waitTimeout:      defaultAutoRefreshWaitTimeout,
+		pollInterval:     defaultAutoRefreshPollInterval,
+		nowFn:            func() time.Time { return time.Now().Round(0) },
+		enabled:          len(args) > 0 && interval > 0,
+		interval:         interval,
+		startedAt:        now,
 	}
 }
 
@@ -347,7 +352,7 @@ func (r *cookieAutoRefresher) run(trigger string, done chan struct{}) {
 	if ok {
 		r.consecutiveFailures = 0
 		r.paused = false
-	} else {
+	} else if trigger != "manual" {
 		r.consecutiveFailures++
 		if r.consecutiveFailures >= autoRefreshMaxConsecutiveFails {
 			r.paused = true
@@ -373,6 +378,37 @@ func (r *cookieAutoRefresher) run(trigger string, done chan struct{}) {
 			"consecutive_failures", failures,
 			"paused", paused)
 	}
+}
+
+// RunManual launches a manual cookie refresh ("manual") if all guardrails allow
+// it: command configured, not already running, no active Google block, no
+// generation requests in flight, and >=10 min since any previous refresh.
+func (r *cookieAutoRefresher) RunManual(activeInFlight int) (cookieAutoRefreshStatus, int, string) {
+	r.mu.Lock()
+	now := r.nowFn().Round(0)
+	if len(r.cmdArgs) == 0 {
+		r.mu.Unlock()
+		return r.Status(), http.StatusConflict, "not_configured"
+	}
+	if r.running {
+		r.mu.Unlock()
+		return r.Status(), http.StatusConflict, "already_running"
+	}
+	if r.client.GoogleBlockStatus().Active {
+		r.mu.Unlock()
+		return r.Status(), http.StatusConflict, "google_blocked"
+	}
+	if activeInFlight > 0 {
+		r.mu.Unlock()
+		return r.Status(), http.StatusConflict, "requests_in_flight"
+	}
+	if !r.lastLaunchAt.IsZero() && r.manualMinSpacing > 0 && now.Sub(r.lastLaunchAt.Round(0)) < r.manualMinSpacing {
+		r.mu.Unlock()
+		return r.Status(), http.StatusConflict, "cooldown"
+	}
+	r.startRunLocked(now, "manual")
+	r.mu.Unlock()
+	return r.Status(), http.StatusOK, ""
 }
 
 // Toggle flips or sets the enabled state (used by the UI switch).
@@ -424,6 +460,11 @@ func (r *cookieAutoRefresher) Status() cookieAutoRefreshStatus {
 		ec := r.lastExitCode
 		st.LastDurationMS = &ms
 		st.LastExitCode = &ec
+	}
+	if !r.lastLaunchAt.IsZero() && r.manualMinSpacing > 0 {
+		if rem := r.manualMinSpacing - now.Round(0).Sub(r.lastLaunchAt.Round(0)); rem > 0 {
+			st.ManualCooldownSec = int64(rem.Seconds() + 0.999)
+		}
 	}
 	if st.Configured && st.Enabled && !st.Paused && !st.Running && r.interval > 0 {
 		var rem time.Duration

@@ -137,6 +137,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /_ui/api/state", s.handleUIState)
 	mux.HandleFunc("POST /_ui/api/models/refresh", s.handleUIRefresh)
 	mux.HandleFunc("POST /_ui/api/cookie-refresh/toggle", s.handleUICookieRefreshToggle)
+	mux.HandleFunc("POST /_ui/api/cookie-refresh/run", s.handleUICookieRefreshRun)
 	mux.HandleFunc("POST /_ui/api/antigravity/launch", s.handleUILaunch)
 	mux.HandleFunc("/", s.handleNotFound)
 	return s.withTracking(s.withHostCheck(s.withCORS(mux)))
