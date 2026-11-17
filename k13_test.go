@@ -432,8 +432,8 @@ func TestN5_WaitAndRetryNotesExplicitlyTimestamped(t *testing.T) {
 	c := readSSE(t, context.Background(), ts.URL, k9ChatToolsBody)
 	assertProgressStream(t, c)
 	_, reasoning := sseContentAndReasoning(t, c)
-	if !strings.Contains(reasoning, "[21:05:09] GMINI (pas le modèle — attente technique) :") {
-		t.Fatalf("expected timestamped GMINI (not model) note, got %q", reasoning)
+	if !strings.Contains(reasoning, "**[21:05:09] GMINI —") || !strings.Contains(reasoning, "GMINI (pas le modèle — attente technique) :") {
+		t.Fatalf("expected timestamped bold GMINI (not model) note, got %q", reasoning)
 	}
 }
 

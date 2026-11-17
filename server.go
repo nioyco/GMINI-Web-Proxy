@@ -48,6 +48,7 @@ type Server struct {
 	cannedRetryTimeoutOverride time.Duration
 	noContentTimeoutOverride   time.Duration
 	noContentNoteOverride      time.Duration
+	initialWaitNoteOverride    time.Duration
 	codeRefWaitOverride        time.Duration
 	// uiToken protects the API of the local management page (ui.go); empty: page off.
 	uiToken string
@@ -83,7 +84,7 @@ func (s *Server) codeRefWaitThreshold() time.Duration {
 	if s.codeRefWaitOverride > 0 {
 		return s.codeRefWaitOverride
 	}
-	return 10 * time.Second
+	return 3 * time.Second
 }
 
 func (s *Server) recordCodeRefStat(model string, pauseMS int64) {
@@ -985,12 +986,14 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	var streamOpenedAt, lastNoContentNoteAt time.Time
 	hasContent := false
 	hasCandidate := false
+	initialWaitNoteSent := false
 	heartbeats := 0
 	noContentTimeout := s.noContentTimeout()
 	if hooks != nil && hooks.cannedRetryTimeout > 0 {
 		noContentTimeout = 0
 	}
 	noContentNoteWait := s.noContentNoteInterval()
+	initialWaitNoteWait := s.initialWaitNoteDelay()
 
 	write := func(err error) bool {
 		if err != nil {
@@ -1011,6 +1014,21 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		if hooks != nil && hooks.progressive && s.cfg.StreamThoughts {
 			res.forwarded = true
 			return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, proxyWaitNote(s.currentNow(), note))))
+		}
+		return true
+	}
+	emitInitialWaitNote := func() bool {
+		modelName := ""
+		if hooks != nil {
+			modelName = hooks.model
+		}
+		title := fmt.Sprintf("Demande envoyée à %s (%d Ko), en attente de Google…", modelDisplayLabel(modelName, p), koCount(len(p.Prompt)))
+		if ri != nil {
+			ri.setStatusNote(title)
+		}
+		if hooks != nil && hooks.progressive && s.cfg.StreamThoughts {
+			res.forwarded = true
+			return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, proxyWaitNoteWithTitle(s.currentNow(), title, "En attente de la première réponse de Google."))))
 		}
 		return true
 	}
@@ -1374,6 +1392,9 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	if noContentTimeout == 0 && noContentNoteWait > 0 && noContentNoteWait/4 > 0 && noContentNoteWait/4 < tick {
 		tick = noContentNoteWait / 4
 	}
+	if initialWaitNoteWait > 0 && initialWaitNoteWait/4 > 0 && initialWaitNoteWait/4 < tick {
+		tick = initialWaitNoteWait / 4
+	}
 	if codeRefWaitThresh > 0 && codeRefWaitThresh/4 > 0 && codeRefWaitThresh/4 < tick {
 		tick = codeRefWaitThresh / 4
 	}
@@ -1480,8 +1501,15 @@ loop:
 					cancel(errNoContentTimeout)
 					break loop
 				}
-				if noContentTimeout == 0 && noContentNoteWait > 0 && elapsed >= noContentNoteWait &&
+				if !initialWaitNoteSent && initialWaitNoteWait > 0 && elapsed >= initialWaitNoteWait {
+					initialWaitNoteSent = true
+					lastNoContentNoteAt = time.Now()
+					if !emitInitialWaitNote() {
+						return res
+					}
+				} else if noContentTimeout == 0 && noContentNoteWait > 0 && elapsed >= noContentNoteWait &&
 					(lastNoContentNoteAt.IsZero() || time.Since(lastNoContentNoteAt) >= noContentNoteWait) {
+					initialWaitNoteSent = true
 					lastNoContentNoteAt = time.Now()
 					if !emitWaitNote(elapsed) {
 						return res
@@ -1654,17 +1682,70 @@ func (s *Server) noContentNoteInterval() time.Duration {
 	if s.noContentNoteOverride > 0 {
 		return s.noContentNoteOverride
 	}
-	return 65 * time.Second
+	if s.cfg.WaitNoteSec < 0 {
+		return 0
+	}
+	if s.cfg.WaitNoteSec == 0 {
+		return 15 * time.Second
+	}
+	return time.Duration(s.cfg.WaitNoteSec) * time.Second
+}
+
+func (s *Server) initialWaitNoteDelay() time.Duration {
+	if s.initialWaitNoteOverride > 0 {
+		return s.initialWaitNoteOverride
+	}
+	return 2 * time.Second
 }
 
 func noContentTimeoutMessage(model string, p gemini.GenParams, sec int) string {
 	return fmt.Sprintf("GMINI : %s ne répond pas (Google n'envoie que des signaux d'attente depuis %d s). Réessayez plus tard ou changez de modèle.", modelDisplayLabel(model, p), sec)
 }
 
-// proxyWaitNote formats a timestamped technical note so proxy wait/retry status
-// lines in reasoning_content are clearly distinguished from the model's thoughts.
+func shortWaitTitle(msg string) string {
+	switch {
+	case strings.Contains(msg, "aucune pensée ni réponse"):
+		return "En attente de Google…"
+	case strings.Contains(msg, "outil interne : nouvelle tentative"):
+		return "Nouvelle tentative (outil interne)…"
+	case strings.Contains(msg, "erreur interne : nouvelle tentative"):
+		return "Nouvelle tentative (erreur interne)…"
+	case strings.Contains(msg, "outil interne d'exécution de code"):
+		return "Outil interne d'exécution de code…"
+	case strings.Contains(msg, "lance un outil interne"):
+		return "Outil interne Google en cours…"
+	case strings.Contains(msg, "appel d'outil reçu"):
+		return "Appel d'outil reçu, suite en cours…"
+	case strings.Contains(msg, "Préparation d'un appel d'outil"):
+		return "Préparation d'un appel d'outil…"
+	case strings.Contains(msg, "ne répond plus"):
+		return "Silence Google (outil interne probable)…"
+	}
+	s := strings.TrimSpace(msg)
+	if idx := strings.IndexAny(s, ";.\n"); idx > 0 && idx <= 56 {
+		s = strings.TrimSpace(s[:idx])
+	}
+	if len(s) > 56 {
+		return s[:53] + "…"
+	}
+	if s == "" {
+		return "Attente technique…"
+	}
+	return s
+}
+
+// proxyWaitNote formats a timestamped technical note with a bold first-line
+// header so Antigravity displays the live step on the thinking-box title and
+// clearly distinguishes proxy notes from the model's thoughts.
 func proxyWaitNote(now time.Time, msg string) string {
-	return fmt.Sprintf("\n[%s] GMINI (pas le modèle — attente technique) : %s\n", now.Format("15:04:05"), msg)
+	return proxyWaitNoteWithTitle(now, shortWaitTitle(msg), msg)
+}
+
+func proxyWaitNoteWithTitle(now time.Time, title, msg string) string {
+	if title == "" {
+		title = "Attente technique…"
+	}
+	return fmt.Sprintf("\n**[%s] GMINI — %s**\nGMINI (pas le modèle — attente technique) : %s\n", now.Format("15:04:05"), title, msg)
 }
 
 func (s *Server) cannedErrorRetryTimeout() time.Duration {

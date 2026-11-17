@@ -131,3 +131,58 @@ func TestK18_T1_CodeRefBashAndTriggerCap(t *testing.T) {
 		}
 	})
 }
+
+// K18 T2: GEMINI_WAIT_NOTE_SEC defaults to 15s, an initial bold wait note is emitted
+// 2s after stream open when !hasContent, and codeRefWaitThreshold defaults to 3s.
+func TestK18_T2_WaitNoteFrom2sAndFormat(t *testing.T) {
+	if cfg := loadConfig(""); cfg.WaitNoteSec != 15 {
+		t.Fatalf("default WaitNoteSec = %d, want 15", cfg.WaitNoteSec)
+	}
+	t.Setenv("GEMINI_WAIT_NOTE_SEC", "0")
+	if cfg := loadConfig(""); cfg.WaitNoteSec >= 0 {
+		t.Fatalf("GEMINI_WAIT_NOTE_SEC=0 should disable wait notes, got %d", cfg.WaitNoteSec)
+	}
+
+	_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			// Delay 130ms before sending final text so initial + periodic wait notes fire.
+			time.Sleep(130 * time.Millisecond)
+			pw.Write([]byte(fakeStreamBody24("Bonjour !", "")))
+			pw.Close()
+		}()
+		return &http.Response{StatusCode: 200, Body: pr}, nil
+	}))
+
+	cfg := testConfig()
+	cfg.StreamToolsProgress = true
+	cfg.StreamThoughts = true
+	cfg.SSEKeepaliveSec = 1
+	s := newServer(cfg, client, testLogger())
+	s.keepaliveOverride = 20 * time.Millisecond
+	s.initialWaitNoteOverride = 25 * time.Millisecond
+	s.noContentNoteOverride = 70 * time.Millisecond
+	s.warnNow = func() time.Time { return time.Date(2026, 11, 17, 9, 15, 0, 0, time.UTC) }
+
+	if got := s.codeRefWaitThreshold(); got != 3*time.Second {
+		t.Fatalf("codeRefWaitThreshold() = %v, want 3s", got)
+	}
+
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	c := readSSE(t, context.Background(), ts.URL, k9ChatToolsBody)
+	content, reasoning := sseContentAndReasoning(t, c)
+	if !strings.Contains(content, "Bonjour !") {
+		t.Fatalf("expected final content, got %q", content)
+	}
+	if !strings.Contains(reasoning, "**[09:15:00] GMINI — Demande envoyée à") {
+		t.Fatalf("expected initial bold wait note at 2s, got %q", reasoning)
+	}
+	if !strings.Contains(reasoning, "**[09:15:00] GMINI — En attente de Google…**") {
+		t.Fatalf("expected periodic bold wait note, got %q", reasoning)
+	}
+	if !strings.Contains(reasoning, "GMINI (pas le modèle — attente technique) :") {
+		t.Fatalf("expected technical wait attribution, got %q", reasoning)
+	}
+}
