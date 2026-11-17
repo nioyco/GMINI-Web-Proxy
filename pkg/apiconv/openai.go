@@ -261,33 +261,49 @@ func SetToolPromptReminder(on bool) { toolPromptReminder.Store(on) }
 // ToolPromptReminder reports whether the short end-of-prompt reminder is active.
 func ToolPromptReminder() bool { return toolPromptReminder.Load() }
 
+// noInternalCodeExecRule controls the explicit rule against built-in code execution
+// and code_reference blocks when a command tool is declared (S2, default on).
+var noInternalCodeExecRule atomic.Bool
+
+func init() { noInternalCodeExecRule.Store(true) }
+
+// SetNoInternalCodeExecRule enables or disables the anti-code_reference rule.
+func SetNoInternalCodeExecRule(on bool) { noInternalCodeExecRule.Store(on) }
+
+// NoInternalCodeExecRule reports whether the anti-code_reference rule is active.
+func NoInternalCodeExecRule() bool { return noInternalCodeExecRule.Load() }
+
 const shortToolPromptReminder = "Reminder: use ONLY the provided tools above.\n" +
 	"NEVER trigger Gemini internal artifacts, Canvas, widgets, web search, or Google extensions.\n" +
 	"Reply directly in plain text when no tool is needed."
 
 // insertToolPromptReminder places the short B3 reminder just before the last
 // user request (before <USER_REQUEST> if present, or before the last user part).
-func insertToolPromptReminder(parts []string, lastUserIdx int) []string {
+func insertToolPromptReminder(parts []string, lastUserIdx int, cmdToolName string) []string {
 	if !toolPromptReminder.Load() || !toolPromptRules.Load() {
 		return parts
+	}
+	reminder := shortToolPromptReminder
+	if cmdToolName != "" && noInternalCodeExecRule.Load() {
+		reminder += "\nNEVER use built-in code execution or write a code_reference block; call \"" + cmdToolName + "\" directly."
 	}
 	if lastUserIdx >= 0 && lastUserIdx < len(parts) {
 		if pos := strings.LastIndex(parts[lastUserIdx], "<USER_REQUEST>"); pos >= 0 {
 			u := parts[lastUserIdx]
-			parts[lastUserIdx] = u[:pos] + shortToolPromptReminder + "\n" + u[pos:]
+			parts[lastUserIdx] = u[:pos] + reminder + "\n" + u[pos:]
 			return parts
 		}
 		out := make([]string, 0, len(parts)+1)
 		out = append(out, parts[:lastUserIdx]...)
-		out = append(out, shortToolPromptReminder)
+		out = append(out, reminder)
 		out = append(out, parts[lastUserIdx:]...)
 		return out
 	}
-	return append(parts, shortToolPromptReminder)
+	return append(parts, reminder)
 }
 
-// toolSpecificRules formats environment instructions for specific active tools (K8).
-func toolSpecificRules(hasWriteFile, hasSearchWeb bool) string {
+// toolSpecificRules formats environment instructions for specific active tools (K8, K17 S2).
+func toolSpecificRules(hasWriteFile, hasSearchWeb bool, cmdToolName string) string {
 	var extra []string
 	if hasWriteFile {
 		extra = append(extra, "- The word \"artifact\" in instructions refers to a local file to write with the provided \"write_file\" tool, never Gemini's built-in artifact, Canvas or skills features.")
@@ -295,10 +311,39 @@ func toolSpecificRules(hasWriteFile, hasSearchWeb bool) string {
 	if hasSearchWeb {
 		extra = append(extra, "- Web searches must be performed only using the provided \"search_web\" tool, never built-in web search.")
 	}
+	if cmdToolName != "" && noInternalCodeExecRule.Load() {
+		extra = append(extra, "- Never use built-in code execution or write a code_reference block; to run any command, call the provided \""+cmdToolName+"\" tool directly.")
+	}
 	if len(extra) == 0 {
 		return ""
 	}
 	return strings.Join(extra, "\n") + "\n"
+}
+
+func commandToolNameFromDefs(defs []toolDef) string {
+	declared := make([]DeclaredTool, 0, len(defs))
+	for _, d := range defs {
+		if d.Name != "" {
+			declared = append(declared, declaredFromSchema(d.Name, d.Parameters))
+		}
+	}
+	if ct, ok := FindCommandTool(declared); ok {
+		return ct.Name
+	}
+	return ""
+}
+
+func commandToolNameFromGoogleDefs(defs []googleToolDef) string {
+	declared := make([]DeclaredTool, 0, len(defs))
+	for _, d := range defs {
+		if d.Name != "" {
+			declared = append(declared, declaredFromSchema(d.Name, d.Parameters))
+		}
+	}
+	if ct, ok := FindCommandTool(declared); ok {
+		return ct.Name
+	}
+	return ""
 }
 
 // openAIToolRules is the text between the "output ONLY the tool_call block(s)"
@@ -316,7 +361,7 @@ func openAIToolRules(defs []toolDef) string {
 			hasSearchWeb = true
 		}
 	}
-	return toolNameRule + "\n" + noEchoRules + toolSpecificRules(hasWriteFile, hasSearchWeb) + "\n\n"
+	return toolNameRule + "\n" + noEchoRules + toolSpecificRules(hasWriteFile, hasSearchWeb, commandToolNameFromDefs(defs)) + "\n\n"
 }
 
 // googleToolRules is the same for the Google function_call prompt.
@@ -333,7 +378,7 @@ func googleToolRules(toolDefs []googleToolDef) string {
 			hasSearchWeb = true
 		}
 	}
-	return "- " + toolNameRule + "\n" + noEchoRules + toolSpecificRules(hasWriteFile, hasSearchWeb) + "\n\n"
+	return "- " + toolNameRule + "\n" + noEchoRules + toolSpecificRules(hasWriteFile, hasSearchWeb, commandToolNameFromGoogleDefs(toolDefs)) + "\n\n"
 }
 
 // toolNameRule makes the "name" field explicit: the model once answered with the
@@ -411,7 +456,7 @@ func messagesToPrompt(messages []Message, tools []Tool, tc toolChoiceMode) strin
 	}
 
 	if len(tools) > 0 && tc.mode != "none" {
-		parts = insertToolPromptReminder(parts, lastUserIdx)
+		parts = insertToolPromptReminder(parts, lastUserIdx, commandToolNameFromDefs(normalizeTools(tools)))
 	}
 
 	return joinNonEmpty(parts, "\n\n")

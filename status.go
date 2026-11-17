@@ -30,7 +30,8 @@ type statusResponse struct {
 	CookieAutoRefresh   cookieAutoRefreshStatus `json:"cookie_auto_refresh"`
 	GoogleBlock         googleBlock             `json:"google_block"`
 	UpstreamParams      gemini.UpstreamParams   `json:"upstream_params"`
-	ToolPromptRules     bool                    `json:"tool_prompt_noecho_rules"`   // GEMINI_TOOL_PROMPT_NOECHO_RULES
+	ToolPromptRules        bool                    `json:"tool_prompt_noecho_rules"`   // GEMINI_TOOL_PROMPT_NOECHO_RULES
+	NoInternalCodeExecRule bool                    `json:"no_internal_code_exec_rule"` // GEMINI_NO_INTERNAL_CODE_EXEC_RULE
 	MarkerNeutralized   bool                    `json:"neutralize_history_markers"` // GEMINI_NEUTRALIZE_HISTORY_MARKERS
 	StreamProgress      bool                    `json:"stream_tools_progress"`      // GEMINI_STREAM_TOOLS_PROGRESS
 	StreamThoughts      bool                    `json:"stream_thoughts"`            // GEMINI_STREAM_THOUGHTS
@@ -324,6 +325,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	resp.UpstreamParams = s.client.UpstreamParams()
 	resp.ToolPromptRules = apiconv.ToolPromptRules()
+	resp.NoInternalCodeExecRule = apiconv.NoInternalCodeExecRule()
 	resp.MarkerNeutralized = apiconv.MarkerNeutralization()
 	resp.StreamProgress, resp.StreamThoughts = s.cfg.StreamToolsProgress, s.cfg.StreamThoughts
 	resp.ThinkingLevel, resp.MaxPromptBytes = s.cfg.DefaultThinkingLevel, s.cfg.MaxPromptBytes

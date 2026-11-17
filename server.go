@@ -109,6 +109,7 @@ func (s *Server) keepaliveInterval() time.Duration {
 func newServer(cfg *Config, client *gemini.Client, logger *slog.Logger) *Server {
 	apiconv.SetToolPromptRules(!cfg.DisableToolPromptRules)
 	apiconv.SetToolPromptReminder(cfg.ToolPromptReminder)
+	apiconv.SetNoInternalCodeExecRule(cfg.NoInternalCodeExecRule)
 	apiconv.SetMarkerNeutralization(!cfg.DisableMarkerNeutralization)
 	apiconv.SetDropTextAfterToolCall(!cfg.KeepTextAfterToolCall)
 	srv := &Server{cfg: cfg, client: client, log: logger, generate: client.Generate, started: time.Now()}

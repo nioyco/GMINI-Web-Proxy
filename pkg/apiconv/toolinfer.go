@@ -19,9 +19,10 @@ import (
 
 // DeclaredTool is a tool declared by the client: its name and parameter schema keys.
 type DeclaredTool struct {
-	Name     string
-	Props    map[string]bool // property names of the parameters schema
-	Required []string
+	Name      string
+	Props     map[string]bool   // property names of the parameters schema
+	PropTypes map[string]string // property name -> JSON schema type (when present)
+	Required  []string
 }
 
 // Unparsed describes a tool-intent fence that could not be turned into a call. It
@@ -48,11 +49,16 @@ type ParseReport struct {
 
 // declaredFromSchema builds a DeclaredTool from a JSON-schema-like value.
 func declaredFromSchema(name string, params any) DeclaredTool {
-	d := DeclaredTool{Name: name, Props: map[string]bool{}}
+	d := DeclaredTool{Name: name, Props: map[string]bool{}, PropTypes: map[string]string{}}
 	if m, ok := params.(map[string]any); ok {
 		if props, ok := m["properties"].(map[string]any); ok {
-			for k := range props {
+			for k, rawProp := range props {
 				d.Props[k] = true
+				if pm, ok := rawProp.(map[string]any); ok {
+					if typ, ok := pm["type"].(string); ok {
+						d.PropTypes[k] = strings.ToLower(strings.TrimSpace(typ))
+					}
+				}
 			}
 		}
 		if req, ok := m["required"].([]any); ok {
@@ -64,6 +70,43 @@ func declaredFromSchema(name string, params any) DeclaredTool {
 		}
 	}
 	return d
+}
+
+// commandPropKey returns the command-line property name of a command tool schema, if any.
+func commandPropKey(d DeclaredTool) string {
+	for _, k := range []string{"CommandLine", "command", "cmd", "script"} {
+		if d.Props[k] {
+			return k
+		}
+	}
+	for k := range d.Props {
+		switch strings.ToLower(k) {
+		case "commandline", "command", "cmd":
+			return k
+		}
+	}
+	return ""
+}
+
+// FindCommandTool returns the declared shell/command execution tool, if any.
+// It matches "run_command" (and common command tool names) or any tool whose
+// parameter schema declares a command property (CommandLine, command, cmd).
+func FindCommandTool(declared []DeclaredTool) (DeclaredTool, bool) {
+	for _, d := range declared {
+		if d.Name == "run_command" {
+			return d, true
+		}
+	}
+	for _, d := range declared {
+		switch strings.ToLower(d.Name) {
+		case "bash", "shell", "execute_command", "exec_command", "run_shell", "terminal":
+			return d, true
+		}
+		if commandPropKey(d) != "" {
+			return d, true
+		}
+	}
+	return DeclaredTool{}, false
 }
 
 func declaredFromTools(tools []Tool) []DeclaredTool {

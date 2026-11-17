@@ -163,7 +163,7 @@ func googleContentsToPrompt(req *GenerateContentRequest) string {
 	}
 
 	if len(toolDefs) > 0 {
-		parts = insertToolPromptReminder(parts, lastUserIdx)
+		parts = insertToolPromptReminder(parts, lastUserIdx, commandToolNameFromGoogleDefs(toolDefs))
 	}
 
 	return joinNonEmpty(parts, "\n\n")
