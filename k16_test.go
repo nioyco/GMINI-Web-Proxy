@@ -302,3 +302,97 @@ func TestK16_A3_StaleTokenAlertInStreamInFlightAndUI(t *testing.T) {
 		}
 	}
 }
+
+func TestK16_B2_UpstreamEmptyReplyNoRetryAndMetrics(t *testing.T) {
+	var upstreamCalls int
+	empty186 := ")]}'\n\n177\n[[\"wrb.fr\",null,\"[null,[\\\"c_1\\\",\\\"r_1\\\"],{\\\"18\\\":\\\"r_1\\\",\\\"21\\\":[\\\"tok\\\"],\\\"44\\\":true}]\"]]\n"
+	_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+		upstreamCalls++
+		return &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{},
+			Body:       io.NopCloser(strings.NewReader(empty186)),
+			Request:    r,
+		}, nil
+	}))
+	var logBuf bytes.Buffer
+	cfg := testConfig()
+	cfg.UIEnabled = true
+	cfg.StreamToolsProgress = true
+	cfg.StreamThoughts = true
+	cfg.SSEKeepaliveSec = 1
+	s := newServer(cfg, client, slog.New(slog.NewTextHandler(&logBuf, nil)))
+	s.keepaliveOverride = 50 * time.Millisecond
+	s.generate = func(context.Context, gemini.GenParams) (string, error) {
+		t.Fatal("B2 must not fall back or retry via Generate on empty stream close")
+		return "", nil
+	}
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	bigPrompt := strings.Repeat("a", 10*1024)
+	reqBody := fmt.Sprintf(`{
+		"model":"gemini-3.1-pro","stream":true,
+		"messages":[{"role":"user","content":%q}],
+		"tools":[{"type":"function","function":{"name":"read_file","parameters":{"type":"object"}}}]
+	}`, bigPrompt)
+
+	// 1st empty reply
+	sse1 := readSSE(t, context.Background(), ts.URL, reqBody)
+	if upstreamCalls != 1 {
+		t.Fatalf("expected exactly 1 upstream call (no retry), got %d", upstreamCalls)
+	}
+	joined := strings.Join(sse1.dataFrames, "\n")
+	if !strings.Contains(joined, "GMINI : Google a renvoyé une réponse vide sur 3.1 Pro (prompt de ") ||
+		!strings.Contains(joined, "Ko). Réessayez, raccourcissez la conversation ou changez de modèle.") {
+		t.Fatalf("unexpected client message on empty reply:\n%s", joined)
+	}
+	if !strings.Contains(logBuf.String(), "upstream_empty_reply") || !strings.Contains(logBuf.String(), "prompt_bytes=") {
+		t.Fatalf("expected upstream_empty_reply log with prompt_bytes, got:\n%s", logBuf.String())
+	}
+
+	// 2nd empty reply -> N3 failure memory marks model unresponsive (2 failures)
+	_ = readSSE(t, context.Background(), ts.URL, reqBody)
+	if upstreamCalls != 2 {
+		t.Fatalf("expected exactly 2 upstream calls total (no retry), got %d", upstreamCalls)
+	}
+
+	rr := httptest.NewRecorder()
+	s.handler().ServeHTTP(rr, newReq(http.MethodGet, "/_status", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("/_status code = %d", rr.Code)
+	}
+	var st struct {
+		Counters      map[string]int64     `json:"counters"`
+		ModelFailures []modelFailureStatus `json:"model_failures"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Counters["upstream_empty_reply"] != 2 {
+		t.Fatalf("upstream_empty_reply counter = %d, want 2", st.Counters["upstream_empty_reply"])
+	}
+	if len(st.ModelFailures) != 1 || st.ModelFailures[0].Model != "gemini-3.1-pro" ||
+		st.ModelFailures[0].ConsecutiveFailures != 2 || !st.ModelFailures[0].Unresponsive {
+		t.Fatalf("unexpected model_failures = %+v", st.ModelFailures)
+	}
+
+	wHTML := uiDo(s.handler(), http.MethodGet, "/_ui", "127.0.0.1:5000", "")
+	if !strings.Contains(wHTML.Body.String(), "Réponses vides Google") {
+		t.Error("ui.html missing Réponses vides Google tile")
+	}
+
+	// Stream with thoughts only (no text) must NOT trigger upstream_empty_reply.
+	_, clientThought := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+		body := fakeStreamServed("", "Pensée seule.", "e6fa609c3fa255c0", "3.1 Pro")
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	}))
+	sThought := newServer(cfg, clientThought, testLogger())
+	sThought.keepaliveOverride = 50 * time.Millisecond
+	tsThought := httptest.NewServer(sThought.handler())
+	defer tsThought.Close()
+	sseThought := readSSE(t, context.Background(), tsThought.URL, reqBody)
+	if strings.Contains(strings.Join(sseThought.dataFrames, "\n"), "Google a renvoyé une réponse vide") {
+		t.Fatalf("stream with candidate/thought must not be classified as upstream_empty_reply")
+	}
+}

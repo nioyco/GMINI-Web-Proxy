@@ -871,6 +871,7 @@ type StreamHandlers struct {
 	ErrorMarker  func()                            // reported when inner[31]=true is read
 	Opened       func()                            // upstream HTTP 200 stream opened (N4)
 	Heartbeat    func()                            // Google wait heartbeat frame [{"37":[n]}] received (N4)
+	Candidate    func()                            // at least one candidate frame inner[4] was received (K16 B2)
 	Progress     func(textBytes, thoughtBytes int) // incremental bytes received and heartbeat
 }
 
@@ -998,7 +999,7 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 	// batchexecute lines routinely exceed that.
 	reader := bufio.NewReader(resp.Body)
 	emitted, thoughtEmitted := false, false
-	identEmitted, errMarkerEmitted := false, false
+	identEmitted, errMarkerEmitted, candidateEmitted := false, false, false
 	for {
 		if ctx.Err() != nil {
 			if cerr, ok := earlyCause(); ok {
@@ -1039,6 +1040,12 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 			fr, ok := parseFrame(line)
 			if ok {
 				shape.add(fr, time.Since(t0))
+				if fr.hasCandidate && !candidateEmitted {
+					candidateEmitted = true
+					if h.Candidate != nil {
+						h.Candidate()
+					}
+				}
 				if h.Progress != nil {
 					h.Progress(len(prevText), len(prevThought))
 				}
@@ -1248,6 +1255,7 @@ const thoughtIndex = 37
 type frame struct {
 	text         string
 	thought      string
+	hasCandidate bool        // true when inner2[4] carries >=1 candidate (K16 B2)
 	status       string      // Google progress status from body[2]["7"] (K11)
 	internalTool string      // internal Google tool from body[11] or body[24][0] (B1)
 	limitBanner  string      // Google limit banner from body[52] (B1)
@@ -1425,6 +1433,7 @@ func parseFrame(line string) (frame, bool) {
 		return frame{}, false
 	}
 	var fr frame
+	fr.hasCandidate = len(cands) > 0
 	fr.status = status
 	fr.internalTool = internalTool
 	fr.limitBanner = limitBanner

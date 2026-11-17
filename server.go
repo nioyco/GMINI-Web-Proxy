@@ -388,16 +388,35 @@ func (s *Server) streamChat(ctx context.Context, w http.ResponseWriter, cid, mod
 	}
 	emit, finish := s.echoEmitter(ctx, emitRaw, &acc)
 
-	err := s.client.GenerateStream(gctx, p, emit)
+	var hasCandidate, hasThought bool
+	err := s.client.GenerateStreamEvents(gctx, p, gemini.StreamHandlers{
+		Text:      emit,
+		Thought:   func(string) { hasThought = true },
+		Candidate: func() { hasCandidate = true },
+	})
 	finish()
 	if sse == nil {
 		// Nothing was streamed yet, so a normal HTTP error status is still possible.
-		// No deltas and no error means the upstream produced no content.
+		// If Google closed the stream with no candidate, text, or thought, return
+		// an explicit explanation in text without retrying (K16 B2).
 		switch {
 		case noFlush:
 			sendError(w, http.StatusInternalServerError, "streaming unsupported")
 		case err != nil:
 			sendError(w, http.StatusBadGateway, "upstream error: "+err.Error())
+		case !hasCandidate && !hasThought:
+			var ok bool
+			if sse, ok = openSSE(w); !ok {
+				sendError(w, http.StatusInternalServerError, "streaming unsupported")
+				return
+			}
+			if ri := reqFrom(ctx); ri != nil {
+				if note := ri.takeStaleStreamNote(); note != "" && s.cfg.StreamThoughts {
+					_ = sse.data(apiconv.ChatChunkReasoning(cid, created, model, "\n"+note+"\n"))
+				}
+			}
+			msg := s.recordEmptyReply(ctx, model, p)
+			s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
 		default:
 			sendError(w, http.StatusBadGateway, gemini.ErrEmptyResponse.Error())
 		}
@@ -543,6 +562,11 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 			text, toolCalls := s.finishText(ctx, bres.text, true, declared)
 			s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
 		}
+		return
+	}
+	if res.emptyReply {
+		msg := s.recordEmptyReply(ctx, model, p)
+		s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
 		return
 	}
 	if res.earlyStopReason == "" && (res.genErr != nil || res.rawText == "") {
@@ -798,6 +822,7 @@ type streamToolsResult struct {
 	noContentTimedOut   bool
 	noContentElapsed    time.Duration
 	heartbeats          int
+	emptyReply          bool
 	genErr              error
 	forwarded           bool
 	released            bool
@@ -822,6 +847,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	type event struct {
 		opened       bool
 		heartbeat    bool
+		candidate    bool
 		text         string
 		thought      string
 		status       string
@@ -843,6 +869,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	h := gemini.StreamHandlers{
 		Opened:       func() { push(event{opened: true}) },
 		Heartbeat:    func() { push(event{heartbeat: true}) },
+		Candidate:    func() { push(event{candidate: true}) },
 		Text:         func(d string) { push(event{text: d}) },
 		Status:       func(st string) { push(event{status: st}) },
 		InternalTool: func(name string) { push(event{internalTool: name}) },
@@ -890,6 +917,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	codeRefHandled := false
 	var streamOpenedAt, lastNoContentNoteAt time.Time
 	hasContent := false
+	hasCandidate := false
 	heartbeats := 0
 	noContentTimeout := s.noContentTimeout()
 	if hooks != nil && hooks.cannedRetryTimeout > 0 {
@@ -988,6 +1016,10 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			if streamOpenedAt.IsZero() {
 				streamOpenedAt = time.Now()
 			}
+			return true
+		}
+		if e.candidate {
+			hasCandidate = true
 			return true
 		}
 		if e.heartbeat {
@@ -1363,6 +1395,10 @@ loop:
 	}
 	if res.earlyStopReason == "" {
 		res.rawText = raw.String()
+		if res.genErr == nil && !res.aborted && !res.noContentTimedOut && !res.cannedRetryTimedOut &&
+			!res.internalToolRetry && !hasCandidate && raw.Len() == 0 && thoughtBytes == 0 {
+			res.emptyReply = true
+		}
 	}
 	res.early = early.String()
 	return res
@@ -1401,6 +1437,13 @@ func (s *Server) awaitStreamOrGenerate(ctx context.Context, sse *sseStream, p ge
 	}
 	if res.internalToolRetry {
 		return s.awaitGenerate(ctx, sse, internalToolRetryParams(p), interval)
+	}
+	if res.emptyReply {
+		model := ""
+		if p.Model != nil {
+			model = p.Model.Name
+		}
+		return kaResult{text: s.recordEmptyReply(ctx, model, p)}
 	}
 	if res.genErr != nil || res.rawText == "" {
 		if res.genErr == nil || (gemini.Retryable(res.genErr) && !errors.Is(res.genErr, gemini.ErrSessionAuth)) {
@@ -1502,6 +1545,21 @@ func modelDisplayLabel(model string, p gemini.GenParams) string {
 
 func cannedErrorMessage(model string, p gemini.GenParams) string {
 	return fmt.Sprintf("GMINI : Gemini a renvoyé une erreur interne sur %s (pas une réponse du modèle). Réessayez, ou changez de modèle.", modelDisplayLabel(model, p))
+}
+
+func emptyReplyMessage(model string, p gemini.GenParams) string {
+	return fmt.Sprintf("GMINI : Google a renvoyé une réponse vide sur %s (prompt de %d Ko). Réessayez, raccourcissez la conversation ou changez de modèle.",
+		modelDisplayLabel(model, p), koCount(len(p.Prompt)))
+}
+
+func (s *Server) recordEmptyReply(ctx context.Context, model string, p gemini.GenParams) string {
+	s.stats.upstreamEmptyReply.Add(1)
+	s.recordModelFailure(model)
+	s.rlog(ctx).Warn("upstream_empty_reply",
+		"model", model,
+		"prompt_bytes", len(p.Prompt),
+		"prompt_kb", koCount(len(p.Prompt)))
+	return emptyReplyMessage(model, p)
 }
 
 func (s *Server) isCannedRetryText(ctx context.Context, text string) bool {
@@ -2120,7 +2178,12 @@ func (s *Server) streamGoogle(ctx context.Context, w http.ResponseWriter, model 
 	}
 	emit, finish := s.echoEmitter(ctx, emitRaw, &full)
 
-	err := s.client.GenerateStream(gctx, p, emit)
+	var hasCandidate, hasThought bool
+	err := s.client.GenerateStreamEvents(gctx, p, gemini.StreamHandlers{
+		Text:      emit,
+		Thought:   func(string) { hasThought = true },
+		Candidate: func() { hasCandidate = true },
+	})
 	finish()
 	if sse == nil {
 		switch {
@@ -2128,6 +2191,19 @@ func (s *Server) streamGoogle(ctx context.Context, w http.ResponseWriter, model 
 			sendError(w, http.StatusInternalServerError, "streaming unsupported")
 		case err != nil:
 			sendError(w, http.StatusBadGateway, "upstream error: "+err.Error())
+		case !hasCandidate && !hasThought:
+			var ok bool
+			if sse, ok = openSSE(w); !ok {
+				sendError(w, http.StatusInternalServerError, "streaming unsupported")
+				return
+			}
+			if ri := reqFrom(ctx); ri != nil {
+				if note := ri.takeStaleStreamNote(); note != "" {
+					_ = sse.comment(note)
+				}
+			}
+			msg := s.recordEmptyReply(ctx, model, p)
+			s.sseTail(ctx, sse, sse.data(apiconv.GoogleStreamFinal(model, p.Prompt, msg)))
 		default:
 			sendError(w, http.StatusBadGateway, gemini.ErrEmptyResponse.Error())
 		}
@@ -2299,16 +2375,28 @@ func (s *Server) streamMessages(ctx context.Context, w http.ResponseWriter, msgI
 	}
 	emit, finish := s.echoEmitter(ctx, emitRaw, &acc)
 
-	err := s.client.GenerateStream(gctx, p, emit)
+	var hasCandidate, hasThought bool
+	err := s.client.GenerateStreamEvents(gctx, p, gemini.StreamHandlers{
+		Text:      emit,
+		Thought:   func(string) { hasThought = true },
+		Candidate: func() { hasCandidate = true },
+	})
 	finish()
 	if sse == nil {
 		// Nothing was streamed yet, so a normal HTTP error status is still possible.
-		// No deltas and no error means the upstream produced no content.
 		switch {
 		case noFlush:
 			sendAnthropicError(w, http.StatusInternalServerError, "streaming unsupported")
 		case err != nil:
 			sendAnthropicError(w, http.StatusBadGateway, "upstream error: "+err.Error())
+		case !hasCandidate && !hasThought:
+			var ok bool
+			if sse, ok = openSSE(w); !ok {
+				sendAnthropicError(w, http.StatusInternalServerError, "streaming unsupported")
+				return
+			}
+			msg := s.recordEmptyReply(ctx, model, p)
+			s.streamMessagesFull(ctx, sse, msgID, model, p.Prompt, msg, nil)
 		default:
 			sendAnthropicError(w, http.StatusBadGateway, gemini.ErrEmptyResponse.Error())
 		}

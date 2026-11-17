@@ -147,10 +147,12 @@ func TestProgressivePlainAnswer(t *testing.T) {
 	}
 }
 
-// An empty or failed stream before anything was forwarded falls back to the
-// buffered path (which retries); a failure after text was forwarded is reported.
+// A failed stream before anything was forwarded falls back to the buffered path
+// (which retries); a failure after text was forwarded is reported.
 func TestProgressiveFallbackAndError(t *testing.T) {
-	f := progressServer(t, func(context.Context, gemini.GenParams, gemini.StreamHandlers) error { return nil })
+	f := progressServer(t, func(context.Context, gemini.GenParams, gemini.StreamHandlers) error {
+		return errors.New("stream reset")
+	})
 	f.srv.generate = func(context.Context, gemini.GenParams) (string, error) {
 		return "```tool_call\n{\"name\": \"run\", \"arguments\": {\"cmd\": \"pwd\"}}\n```", nil
 	}
