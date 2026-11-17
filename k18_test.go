@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -301,5 +302,77 @@ func TestK18_T4_AutoRefreshPersistAndEnv(t *testing.T) {
 	s4 := newServer(cfgEnv, c3, testLogger())
 	if !s4.autoRefresh.Status().Enabled {
 		t.Fatal("expected GEMINI_COOKIE_AUTO_REFRESH_ENABLED=true to enable auto-refresh")
+	}
+}
+
+// K18 T5: detect .env modification since startup via os.Stat (without exposing secrets)
+// and hot-reload non-secret settings via POST /_ui/api/config/reload.
+func TestK18_T5_EnvModifiedAndReload(t *testing.T) {
+	envPath := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envPath, []byte("GEMINI_CODE_REF_FASTPATH=true\nGEMINI_WAIT_NOTE_SEC=15\nGEMINI_COOKIE=SUPER_SECRET_COOKIE_VALUE\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Now().Add(-5 * time.Minute)
+	_ = os.Chtimes(envPath, t0, t0)
+
+	cfg := loadConfig(envPath)
+	cfg.UIEnabled = true
+	_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(""))}, nil
+	}))
+	s := newServer(cfg, client, testLogger())
+
+	// Initially not modified.
+	stRec1 := uiDo(s.handler(), http.MethodGet, "/_status", "127.0.0.1:12345", "")
+	if stRec1.Code != http.StatusOK {
+		t.Fatalf("/_status code=%d", stRec1.Code)
+	}
+	if strings.Contains(stRec1.Body.String(), "SUPER_SECRET_COOKIE_VALUE") {
+		t.Fatal("secret from .env leaked in /_status")
+	}
+	var st1 statusResponse
+	if err := json.Unmarshal(stRec1.Body.Bytes(), &st1); err != nil {
+		t.Fatal(err)
+	}
+	if st1.EnvModifiedSinceStart || st1.ConfigLoadedAt == "" || st1.WaitNoteSec != 15 {
+		t.Fatalf("unexpected initial status: modified=%v loadedAt=%q waitNote=%d", st1.EnvModifiedSinceStart, st1.ConfigLoadedAt, st1.WaitNoteSec)
+	}
+
+	// Modify .env on disk after startup.
+	if err := os.WriteFile(envPath, []byte("GEMINI_CODE_REF_FASTPATH=false\nGEMINI_WAIT_NOTE_SEC=22\nGEMINI_COOKIE=SUPER_SECRET_COOKIE_VALUE\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t1 := time.Now().Add(time.Second)
+	_ = os.Chtimes(envPath, t1, t1)
+
+	stRec2 := uiDo(s.handler(), http.MethodGet, "/_status", "127.0.0.1:12345", "")
+	var st2 statusResponse
+	if err := json.Unmarshal(stRec2.Body.Bytes(), &st2); err != nil {
+		t.Fatal(err)
+	}
+	if !st2.EnvModifiedSinceStart {
+		t.Fatal("expected env_modified_since_start=true after .env modification")
+	}
+
+	// Reload via POST /_ui/api/config/reload (requires valid UI token).
+	if wBad := uiDo(s.handler(), http.MethodPost, "/_ui/api/config/reload", "127.0.0.1:12345", ""); wBad.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without UI token, got %d", wBad.Code)
+	}
+	wReload := uiDo(s.handler(), http.MethodPost, "/_ui/api/config/reload", "127.0.0.1:12345", s.uiToken)
+	if wReload.Code != http.StatusOK {
+		t.Fatalf("reload status=%d body=%s", wReload.Code, wReload.Body.String())
+	}
+	if strings.Contains(wReload.Body.String(), "SUPER_SECRET_COOKIE_VALUE") {
+		t.Fatal("secret leaked in reload response")
+	}
+
+	// After reload: env_modified_since_start is false and non-secret settings updated.
+	stRec3 := uiDo(s.handler(), http.MethodGet, "/_status", "127.0.0.1:12345", "")
+	var st3 statusResponse
+	if err := json.Unmarshal(stRec3.Body.Bytes(), &st3); err != nil {
+		t.Fatal(err)
+	}
+	if st3.EnvModifiedSinceStart || st3.CodeRefFastpath || st3.WaitNoteSec != 22 {
+		t.Fatalf("unexpected post-reload status: modified=%v fastpath=%v waitNote=%d", st3.EnvModifiedSinceStart, st3.CodeRefFastpath, st3.WaitNoteSec)
 	}
 }

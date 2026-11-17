@@ -149,6 +149,9 @@ type Config struct {
 	// default "<cookie file>.state.json", "off" to disable; always off for an
 	// inline cookie) and its reuse threshold (GEMINI_STATE_MAX_AGE_MIN, default 1440 = 24h).
 	StateMaxAgeMin int
+	EnvFilePath    string
+	ConfigLoadedAt time.Time
+	EnvFileModTime time.Time
 	Gemini         gemini.Config
 }
 
@@ -163,8 +166,16 @@ func loadConfig(envFile string) *Config {
 		envFile = ".env"
 	}
 	loadDotenv(envFile)
+	loadedAt := time.Now()
+	var envModTime time.Time
+	if info, err := os.Stat(envFile); err == nil {
+		envModTime = info.ModTime()
+	}
 
 	cfg := &Config{
+		EnvFilePath:                 envFile,
+		ConfigLoadedAt:              loadedAt,
+		EnvFileModTime:              envModTime,
 		Listen:                      normalizeListen(getEnv("GEMINI_LISTEN", defaultListen)),
 		LogRequests:                 getEnvBool("GEMINI_LOG_REQUESTS", false),
 		LogFormat:                   strings.ToLower(strings.TrimSpace(getEnv("GEMINI_LOG_FORMAT", "text"))),
@@ -384,9 +395,18 @@ func validateStartup(cfg *Config) error {
 // loadDotenv parses a simple KEY=VALUE file and sets variables that are not
 // already present in the process environment (standard dotenv precedence).
 func loadDotenv(path string) {
+	for k, v := range parseDotenvMap(path) {
+		if _, exists := os.LookupEnv(k); !exists {
+			_ = os.Setenv(k, v)
+		}
+	}
+}
+
+func parseDotenvMap(path string) map[string]string {
+	out := map[string]string{}
 	f, err := os.Open(path)
 	if err != nil {
-		return // missing .env is not an error
+		return out // missing .env is not an error
 	}
 	defer f.Close()
 
@@ -402,15 +422,90 @@ func loadDotenv(path string) {
 			continue
 		}
 		key = strings.TrimSpace(key)
-		val = strings.TrimSpace(val)
-		val = unquote(val)
-		if key == "" {
-			continue
-		}
-		if _, exists := os.LookupEnv(key); !exists {
-			_ = os.Setenv(key, val)
+		val = unquote(strings.TrimSpace(val))
+		if key != "" {
+			out[key] = val
 		}
 	}
+	return out
+}
+
+func parseBoolStr(v string, def bool) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return def
+	}
+}
+
+func parseIntStr(v string, def int) int {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+// reloadNonSecretDotenv reloads safe non-secret runtime settings from .env
+// without exposing or logging any secrets (K18 T5).
+func reloadNonSecretDotenv(path string, cfg *Config) (time.Time, error) {
+	if path == "" {
+		path = ".env"
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}, err
+	}
+	vals := parseDotenvMap(path)
+	if v, ok := vals["GEMINI_CODE_REF_FASTPATH"]; ok {
+		cfg.CodeRefFastpath = parseBoolStr(v, true)
+	}
+	if v, ok := vals["GEMINI_NO_INTERNAL_CODE_EXEC_RULE"]; ok {
+		cfg.NoInternalCodeExecRule = parseBoolStr(v, true)
+	}
+	if v, ok := vals["GEMINI_WAIT_NOTE_SEC"]; ok {
+		cfg.WaitNoteSec = capWithDisable(parseIntStr(v, 15), 15)
+	}
+	if v, ok := vals["GEMINI_INTERNAL_TOOL_ACTION"]; ok {
+		cfg.InternalToolAction = normalizeInternalToolAction(v)
+	}
+	if v, ok := vals["GEMINI_CANNED_ERROR_RETRY"]; ok {
+		cfg.CannedErrorRetry = normalizeCannedErrorRetry(v)
+	}
+	if v, ok := vals["GEMINI_CANNED_ERROR_RETRY_SEC"]; ok {
+		cfg.CannedErrorRetrySec = positive(parseIntStr(v, 25), 25)
+	}
+	if v, ok := vals["GEMINI_MAX_HELD_BYTES"]; ok {
+		cfg.MaxHeldBytes = capWithDisable(parseIntStr(v, 256*1024), 256*1024)
+	}
+	if v, ok := vals["GEMINI_MAX_HELD_SEC"]; ok {
+		cfg.MaxHeldSec = capWithDisable(parseIntStr(v, 120), 120)
+	}
+	if v, ok := vals["GEMINI_PROMPT_WARN_KB"]; ok {
+		cfg.PromptWarnKB = capWithDisable(parseIntStr(v, 300), 300)
+	}
+	if v, ok := vals["GEMINI_THINKING_LEVEL"]; ok {
+		cfg.DefaultThinkingLevel = strings.ToLower(strings.TrimSpace(v))
+	}
+	if v, ok := vals["GEMINI_STREAM_TOOLS_PROGRESS"]; ok {
+		cfg.StreamToolsProgress = parseBoolStr(v, true)
+	}
+	if v, ok := vals["GEMINI_STREAM_THOUGHTS"]; ok {
+		cfg.StreamThoughts = parseBoolStr(v, true)
+	}
+	if v, ok := vals["GEMINI_SILENCE_WARN_SEC"]; ok {
+		cfg.SilenceWarningSec = nonNegative(parseIntStr(v, 45), 45)
+	}
+	if v, ok := vals["GEMINI_NO_CONTENT_SEC"]; ok {
+		cfg.NoContentSec = nonNegative(parseIntStr(v, 0), 0)
+	}
+	now := time.Now()
+	cfg.ConfigLoadedAt = now
+	cfg.EnvFileModTime = info.ModTime()
+	return now, nil
 }
 
 // unquote removes a single matching pair of surrounding single or double quotes.

@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
 )
 
 // Local management page (GET /_ui). It is served to loopback clients only and
@@ -415,4 +417,39 @@ func (s *Server) uiAntigravity(models []uiModel) uiAntigravity {
 		}
 	}
 	return out
+}
+
+func (s *Server) envModifiedSinceStart() bool {
+	path := s.cfg.EnvFilePath
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	if !s.cfg.EnvFileModTime.IsZero() {
+		return info.ModTime().After(s.cfg.EnvFileModTime)
+	}
+	if !s.cfg.ConfigLoadedAt.IsZero() {
+		return info.ModTime().After(s.cfg.ConfigLoadedAt)
+	}
+	return false
+}
+
+func (s *Server) handleUIConfigReload(w http.ResponseWriter, r *http.Request) {
+	if !s.uiAllowed(w, r, true) {
+		return
+	}
+	reloadedAt, err := reloadNonSecretDotenv(s.cfg.EnvFilePath, s.cfg)
+	if err != nil {
+		sendError(w, http.StatusBadRequest, "impossible de lire le fichier .env")
+		return
+	}
+	apiconv.SetNoInternalCodeExecRule(s.cfg.NoInternalCodeExecRule)
+	s.log.Info("config_reloaded_from_ui", "loaded_at", reloadedAt.UTC().Format(time.RFC3339))
+	sendJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"reloaded_at": reloadedAt.UTC().Format(time.RFC3339),
+	})
 }

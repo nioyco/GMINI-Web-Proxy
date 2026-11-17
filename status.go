@@ -45,6 +45,9 @@ type statusResponse struct {
 	CannedErrorRetry       string                  `json:"canned_error_retry"`         // GEMINI_CANNED_ERROR_RETRY (off|once)
 	CannedErrorRetrySec    int                     `json:"canned_error_retry_sec"`     // GEMINI_CANNED_ERROR_RETRY_SEC (default 25)
 	NoContentSec           int                     `json:"no_content_sec"`             // GEMINI_NO_CONTENT_SEC (default 0)
+	WaitNoteSec            int                     `json:"wait_note_sec"`              // GEMINI_WAIT_NOTE_SEC (default 15; K18 T2)
+	ConfigLoadedAt         string                  `json:"config_loaded_at,omitempty"` // RFC 3339 timestamp of last .env load (K18 T5)
+	EnvModifiedSinceStart  bool                    `json:"env_modified_since_start"`   // true when .env mtime > ConfigLoadedAt (K18 T5)
 	TraceEnabled           bool                    `json:"content_trace_enabled"`      // GEMINI_TRACE_DIR set (files hold conversation content)
 	TemporaryChat          bool                    `json:"temporary_chat"`             // GEMINI_TEMPORARY_CHAT
 	IgnoredFields          ignoredFields           `json:"ignored_request_fields"`
@@ -334,6 +337,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	resp.ThinkingLevel, resp.MaxPromptBytes = s.cfg.DefaultThinkingLevel, s.cfg.MaxPromptBytes
 	resp.PromptWarnKB = s.promptWarnKB()
 	resp.MaxHeldBytes, resp.MaxHeldSec = s.maxHeldBytes(), int(s.maxHeldDuration().Seconds())
+	resp.WaitNoteSec = int(s.noContentNoteInterval().Seconds())
+	if !s.cfg.ConfigLoadedAt.IsZero() {
+		resp.ConfigLoadedAt = s.cfg.ConfigLoadedAt.UTC().Format(time.RFC3339)
+	}
+	resp.EnvModifiedSinceStart = s.envModifiedSinceStart()
 	resp.TraceEnabled = s.client.TraceEnabled()
 	resp.TemporaryChat = s.cfg.Gemini.TemporaryChat
 	resp.IgnoredFields = ignoredFields{
