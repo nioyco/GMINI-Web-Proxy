@@ -1,0 +1,133 @@
+package main
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
+)
+
+// K18 T1: GEMINI_CODE_REF_FASTPATH defaults to true, BuildCommandToolCallFromCodeRef
+// converts explicit shell code_reference blocks when a unique command tool is declared
+// even without body[24][0], and triggerCap("duration") rescues a complete code_reference
+// block instead of aborting with ErrEarlyStopAborted.
+func TestK18_T1_CodeRefBashAndTriggerCap(t *testing.T) {
+	if cfg := loadConfig(""); !cfg.CodeRefFastpath {
+		t.Fatal("default CodeRefFastpath must be true")
+	}
+	t.Setenv("GEMINI_CODE_REF_FASTPATH", "false")
+	if cfg := loadConfig(""); cfg.CodeRefFastpath {
+		t.Fatal("GEMINI_CODE_REF_FASTPATH=false must disable fastpath")
+	}
+
+	runCmdChatBody := `{"model":"gemini-3.1-pro","stream":true,"messages":[{"role":"user","content":"check repo"}],"tools":[{"type":"function","function":{"name":"run_command","parameters":{"type":"object","properties":{"CommandLine":{"type":"string"},"Cwd":{"type":"string"},"WaitMsBeforeAsync":{"type":"integer"}},"required":["CommandLine","Cwd","WaitMsBeforeAsync"]}}}]}`
+	bashBlock := "```bash?code_reference&code_event_index=1\ngit -C /tmp/repo status --short && ls -la /tmp/repo/subdir\n```\n"
+
+	t.Run("BuildCommandToolCallFromCodeRef: shell tag without body24Tools", func(t *testing.T) {
+		declared := []apiconv.DeclaredTool{{
+			Name:      "run_command",
+			PropTypes: map[string]string{"CommandLine": "string", "Cwd": "string", "WaitMsBeforeAsync": "integer"},
+			Required:  []string{"CommandLine", "Cwd", "WaitMsBeforeAsync"},
+		}}
+		rawJSON, name, ok := apiconv.BuildCommandToolCallFromCodeRef(bashBlock, declared, nil)
+		if !ok || name != "run_command" || !strings.Contains(rawJSON, "git -C /tmp/repo status --short") {
+			t.Fatalf("expected direct shell conversion without body24Tools, got ok=%v name=%q raw=%q", ok, name, rawJSON)
+		}
+
+		// Non-shell tag (e.g. python) must still require body24Tools.
+		pyBlock := "```python?code_reference&code_event_index=1\nprint('hi')\n```\n"
+		if _, _, ok := apiconv.BuildCommandToolCallFromCodeRef(pyBlock, declared, nil); ok {
+			t.Fatal("python code_reference without body24Tools must not convert")
+		}
+
+		// Multiple command tools declared without body24Tools must not guess.
+		twoCmds := append(declared, apiconv.DeclaredTool{Name: "exec_shell", Props: map[string]bool{"command": true}, PropTypes: map[string]string{"command": "string"}})
+		if _, _, ok := apiconv.BuildCommandToolCallFromCodeRef(bashBlock, twoCmds, nil); ok {
+			t.Fatal("ambiguous multiple command tools without body24Tools must not convert")
+		}
+	})
+
+	t.Run("fastpath=on without body24Tools (08:30:46 case) -> delivers tool_call immediately", func(t *testing.T) {
+		var upstreamCancelled atomic.Bool
+		_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+			pr, pw := io.Pipe()
+			go func() {
+				pw.Write([]byte(fakeStreamBody24(bashBlock, "")))
+				<-r.Context().Done()
+				upstreamCancelled.Store(true)
+				pw.Close()
+			}()
+			return &http.Response{StatusCode: 200, Body: pr}, nil
+		}))
+		cfg := testConfig()
+		cfg.StreamToolsProgress = true
+		cfg.StreamThoughts = true
+		cfg.CodeRefFastpath = true
+		cfg.SSEKeepaliveSec = 1
+		s := newServer(cfg, client, testLogger())
+		s.keepaliveOverride = 50 * time.Millisecond
+		ts := httptest.NewServer(s.handler())
+		defer ts.Close()
+
+		start := time.Now()
+		c := readSSE(t, context.Background(), ts.URL, runCmdChatBody)
+		if time.Since(start) > 2*time.Second {
+			t.Fatalf("fastpath took too long: %v", time.Since(start))
+		}
+		if !upstreamCancelled.Load() {
+			t.Fatal("expected upstream request to be cancelled by fastpath")
+		}
+		joined := strings.Join(c.dataFrames, "\n")
+		if !strings.Contains(joined, `"name":"run_command"`) || !strings.Contains(joined, `git -C /tmp/repo status --short`) {
+			t.Fatalf("expected converted run_command tool_call, got: %s", joined)
+		}
+		if s.stats.codeRefFastpath.Load() != 1 {
+			t.Fatalf("codeRefFastpath counter = %d, want 1", s.stats.codeRefFastpath.Load())
+		}
+	})
+
+	t.Run("fastpath=off + triggerCap(duration) -> rescues bash code_reference instead of aborting", func(t *testing.T) {
+		var upstreamCancelled atomic.Bool
+		_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+			pr, pw := io.Pipe()
+			go func() {
+				pw.Write([]byte(fakeStreamBody24(bashBlock, "")))
+				<-r.Context().Done()
+				upstreamCancelled.Store(true)
+				pw.Close()
+			}()
+			return &http.Response{StatusCode: 200, Body: pr}, nil
+		}))
+		cfg := testConfig()
+		cfg.StreamToolsProgress = true
+		cfg.StreamThoughts = true
+		cfg.CodeRefFastpath = false
+		cfg.SSEKeepaliveSec = 1
+		s := newServer(cfg, client, testLogger())
+		s.heldDurationOverride = 120 * time.Millisecond
+		s.keepaliveOverride = 30 * time.Millisecond
+		ts := httptest.NewServer(s.handler())
+		defer ts.Close()
+
+		c := readSSE(t, context.Background(), ts.URL, runCmdChatBody)
+		if !upstreamCancelled.Load() {
+			t.Fatal("expected upstream request to be cancelled by triggerCap rescue")
+		}
+		joined := strings.Join(c.dataFrames, "\n")
+		if strings.Contains(joined, "s'emballe") {
+			t.Fatalf("must not abort with runaway message when code_reference is convertible: %s", joined)
+		}
+		if !strings.Contains(joined, `"name":"run_command"`) || !strings.Contains(joined, `git -C /tmp/repo status --short`) {
+			t.Fatalf("expected rescued run_command tool_call, got: %s", joined)
+		}
+		if s.stats.codeRefFastpath.Load() != 1 {
+			t.Fatalf("codeRefFastpath counter = %d, want 1", s.stats.codeRefFastpath.Load())
+		}
+	})
+}

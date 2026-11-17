@@ -410,24 +410,49 @@ func defaultArgForSchemaProp(key, typ string) any {
 	}
 }
 
-// BuildCommandToolCallFromCodeRef builds a synthetic JSON tool call when text
-// contains a single complete code_reference block with one exploitable command,
-// a command tool is declared, and body[24][0] names that same command tool (K17 S3).
-func BuildCommandToolCallFromCodeRef(text string, declared []DeclaredTool, body24Tools map[string]bool) (string, string, bool) {
-	cmdTool, ok := FindCommandTool(declared)
-	if !ok || len(body24Tools) == 0 {
-		return "", "", false
+func isCommandTool(d DeclaredTool) bool {
+	if d.Name == "run_command" {
+		return true
 	}
-	matchedBody24 := body24Tools[cmdTool.Name]
-	if !matchedBody24 {
-		for k, v := range body24Tools {
-			if v && strings.EqualFold(k, cmdTool.Name) {
-				matchedBody24 = true
-				break
-			}
+	switch strings.ToLower(d.Name) {
+	case "bash", "shell", "execute_command", "exec_command", "run_shell", "terminal":
+		return true
+	}
+	return commandPropKey(d) != ""
+}
+
+func countCommandTools(declared []DeclaredTool) int {
+	count := 0
+	for _, d := range declared {
+		if isCommandTool(d) {
+			count++
 		}
 	}
-	if !matchedBody24 {
+	return count
+}
+
+func isShellCodeRefTag(tag string) bool {
+	if !IsCodeReferenceTag(tag) {
+		return false
+	}
+	low := strings.ToLower(strings.TrimSpace(tag))
+	if idx := strings.IndexAny(low, "? \t;"); idx >= 0 {
+		low = low[:idx]
+	}
+	switch low {
+	case "bash", "sh", "zsh", "shell", "console":
+		return true
+	}
+	return false
+}
+
+// BuildCommandToolCallFromCodeRef builds a synthetic JSON tool call when text
+// contains a single complete code_reference block with one exploitable command,
+// a command tool is declared, and either body[24][0] names that same command tool
+// or the block is an explicit shell fence with a unique declared command tool (K17 S3, K18 T1).
+func BuildCommandToolCallFromCodeRef(text string, declared []DeclaredTool, body24Tools map[string]bool) (string, string, bool) {
+	cmdTool, ok := FindCommandTool(declared)
+	if !ok {
 		return "", "", false
 	}
 
@@ -439,6 +464,22 @@ func BuildCommandToolCallFromCodeRef(text string, declared []DeclaredTool, body2
 		}
 	}
 	if len(codeRefs) != 1 || !isClosedFence(text, codeRefs[0]) {
+		return "", "", false
+	}
+	if len(body24Tools) > 0 {
+		matchedBody24 := body24Tools[cmdTool.Name]
+		if !matchedBody24 {
+			for k, v := range body24Tools {
+				if v && strings.EqualFold(k, cmdTool.Name) {
+					matchedBody24 = true
+					break
+				}
+			}
+		}
+		if !matchedBody24 {
+			return "", "", false
+		}
+	} else if countCommandTools(declared) != 1 || !isShellCodeRefTag(codeRefs[0].tag) {
 		return "", "", false
 	}
 	cmd := strings.TrimSpace(text[codeRefs[0].bodyStart:codeRefs[0].bodyEnd])

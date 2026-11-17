@@ -60,8 +60,9 @@ type Config struct {
 	// (GEMINI_NO_INTERNAL_CODE_EXEC_RULE, default true; K17 S2).
 	NoInternalCodeExecRule bool
 	// CodeRefFastpath converts a complete code_reference block directly into a
-	// command tool call when body[24][0] names the same declared command tool,
-	// without waiting for the upstream pause (GEMINI_CODE_REF_FASTPATH, default off; K17 S3).
+	// command tool call when body[24][0] names the same declared command tool
+	// or when an explicit shell block is emitted with a unique command tool,
+	// without waiting for the upstream pause (GEMINI_CODE_REF_FASTPATH, default on; K18 T1).
 	CodeRefFastpath bool
 	// InternalToolAction controls how the proxy reacts when an internal Google tool
 	// is detected (GEMINI_INTERNAL_TOOL_ACTION = notify | retry | off; default notify).
@@ -175,7 +176,7 @@ func loadConfig(envFile string) *Config {
 		DisableToolPromptRules:      !getEnvBool("GEMINI_TOOL_PROMPT_NOECHO_RULES", true),
 		ToolPromptReminder:          getEnvBool("GEMINI_TOOL_PROMPT_REMINDER", true),
 		NoInternalCodeExecRule:      getEnvBool("GEMINI_NO_INTERNAL_CODE_EXEC_RULE", true),
-		CodeRefFastpath:             getEnvBool("GEMINI_CODE_REF_FASTPATH", false),
+		CodeRefFastpath:             getEnvBool("GEMINI_CODE_REF_FASTPATH", true),
 		InternalToolAction:          normalizeInternalToolAction(getEnv("GEMINI_INTERNAL_TOOL_ACTION", "notify")),
 		CannedErrorRetry:            normalizeCannedErrorRetry(getEnv("GEMINI_CANNED_ERROR_RETRY", "off")),
 		CannedErrorRetrySec:         positive(getEnvInt("GEMINI_CANNED_ERROR_RETRY_SEC", 25), 25),

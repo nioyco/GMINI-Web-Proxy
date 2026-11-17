@@ -1036,6 +1036,19 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		s.rlog(ctx).Warn("stream+tools cancelled by client", "err", ctx.Err(), "elapsed", time.Since(start).Round(time.Millisecond))
 	}
 	triggerCap := func(reason string, heldBytes int) {
+		if completeToolCalls == 0 && !res.released && res.transmittedBytes == 0 && len(declared) > 0 {
+			if rawJSON, toolName, ok := apiconv.BuildCommandToolCallFromCodeRef(raw.String(), declared, body24Tools); ok {
+				res.earlyStopReason = "code_ref_fastpath"
+				res.rawText = rawJSON
+				if !codeRefDetectedAt.IsZero() && codeRefPauseMS < 0 {
+					codeRefPauseMS = time.Since(codeRefDetectedAt).Milliseconds()
+				}
+				s.stats.codeRefFastpath.Add(1)
+				s.rlog(ctx).Info("code_ref_fastpath", "tool", toolName, "reason", reason, "elapsed", time.Since(start).Round(time.Millisecond))
+				cancel(gemini.ErrEarlyStop)
+				return
+			}
+		}
 		res.earlyStopReason = reason
 		s.noteEarlyStop(ctx, reason, completeToolCalls, raw.Len(), heldBytes, res.transmittedBytes, time.Since(start))
 		if completeToolCalls > 0 && lastCompleteEnd > 0 {
