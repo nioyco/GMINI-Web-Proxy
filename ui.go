@@ -91,23 +91,23 @@ type uiModel struct {
 	Withdrawn   string `json:"withdrawn_since"` // RFC 3339; "" = listed by Google now
 	Family      string `json:"family"`
 	// Journal figures (successful streamed calls among the recent ones).
-	Calls               int    `json:"calls"`
-	WithThoughts        int    `json:"with_thoughts"`
-	MedianFirstMS       int64  `json:"median_first_text_ms"`    // -1: no data
-	MedianFirstSignMS   int64  `json:"median_first_sign_ms"`    // -1: no data (min of first_thought_ms, first_text_ms)
-	MedianFirstThoughtM int64  `json:"median_first_thought_ms"` // -1: no data
-	LastTime            string `json:"last_time"`
-	LastIdentity        string `json:"last_identity"`
-	LastSuspect         string `json:"last_suspect"`
-	LastSeenModels      string `json:"last_seen_models"` // display names of catalogue ids found in the last reply
-	LastServed          string `json:"last_served"`      // model name stated by Google in the last reply
-	Calls5h              int    `json:"calls_5h"`                    // generations sent to Gemini in the last 5 hours
-	CodeRef5h            int    `json:"code_ref_5h"`                 // requests with code_reference block in the last 5 hours (K17 S4)
-	MedianCodeRefPauseMS int64  `json:"median_code_ref_pause_ms"`    // -1: no data (K17 S4)
-	MismatchSince       string `json:"mismatch_since,omitempty"`
-	FailureCount        int    `json:"failure_count,omitempty"`
-	FailureSince        string `json:"failure_since,omitempty"`
-	Unresponsive        bool   `json:"unresponsive,omitempty"`
+	Calls                int    `json:"calls"`
+	WithThoughts         int    `json:"with_thoughts"`
+	MedianFirstMS        int64  `json:"median_first_text_ms"`    // -1: no data
+	MedianFirstSignMS    int64  `json:"median_first_sign_ms"`    // -1: no data (min of first_thought_ms, first_text_ms)
+	MedianFirstThoughtM  int64  `json:"median_first_thought_ms"` // -1: no data
+	LastTime             string `json:"last_time"`
+	LastIdentity         string `json:"last_identity"`
+	LastSuspect          string `json:"last_suspect"`
+	LastSeenModels       string `json:"last_seen_models"`         // display names of catalogue ids found in the last reply
+	LastServed           string `json:"last_served"`              // model name stated by Google in the last reply
+	Calls5h              int    `json:"calls_5h"`                 // generations sent to Gemini in the last 5 hours
+	CodeRef5h            int    `json:"code_ref_5h"`              // requests with code_reference block in the last 5 hours (K17 S4)
+	MedianCodeRefPauseMS int64  `json:"median_code_ref_pause_ms"` // -1: no data (K17 S4)
+	MismatchSince        string `json:"mismatch_since,omitempty"`
+	FailureCount         int    `json:"failure_count,omitempty"`
+	FailureSince         string `json:"failure_since,omitempty"`
+	Unresponsive         bool   `json:"unresponsive,omitempty"`
 }
 
 type uiAntigravity struct {

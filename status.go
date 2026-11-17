@@ -12,46 +12,46 @@ import (
 // statusResponse is the read-only diagnostic payload of GET /_status. It never
 // contains secrets: no cookie, key, token or prompt content.
 type statusResponse struct {
-	Version             string                  `json:"version"`
-	Commit              string                  `json:"commit"`
-	Dirty               bool                    `json:"dirty"`
-	GoVersion           string                  `json:"go_version"`
-	UptimeSec           int64                   `json:"uptime_sec"`
-	Authenticated       bool                    `json:"authenticated"`
-	CookieRotationAgeS  *int64                  `json:"cookie_last_rotation_age_sec"` // null: no rotation yet in this process
-	ModelsSource        string                  `json:"models_source"`                // dynamic | fallback | static | persisted
-	ModelsCount         int                     `json:"models_count"`
-	DefaultModel        string                  `json:"default_model"`
-	ActiveRequests      int                     `json:"active_requests"` // includes this /_status request
-	SSEKeepaliveSec     int                     `json:"sse_keepalive_sec"`
-	ShutdownGraceSec    int                     `json:"shutdown_grace_sec"`
-	Counters            map[string]int64        `json:"counters"`
-	CookieRotation      rotationStatus          `json:"cookie_rotation"`
-	CookieAutoRefresh   cookieAutoRefreshStatus `json:"cookie_auto_refresh"`
-	GoogleBlock         googleBlock             `json:"google_block"`
-	UpstreamParams      gemini.UpstreamParams   `json:"upstream_params"`
+	Version                string                  `json:"version"`
+	Commit                 string                  `json:"commit"`
+	Dirty                  bool                    `json:"dirty"`
+	GoVersion              string                  `json:"go_version"`
+	UptimeSec              int64                   `json:"uptime_sec"`
+	Authenticated          bool                    `json:"authenticated"`
+	CookieRotationAgeS     *int64                  `json:"cookie_last_rotation_age_sec"` // null: no rotation yet in this process
+	ModelsSource           string                  `json:"models_source"`                // dynamic | fallback | static | persisted
+	ModelsCount            int                     `json:"models_count"`
+	DefaultModel           string                  `json:"default_model"`
+	ActiveRequests         int                     `json:"active_requests"` // includes this /_status request
+	SSEKeepaliveSec        int                     `json:"sse_keepalive_sec"`
+	ShutdownGraceSec       int                     `json:"shutdown_grace_sec"`
+	Counters               map[string]int64        `json:"counters"`
+	CookieRotation         rotationStatus          `json:"cookie_rotation"`
+	CookieAutoRefresh      cookieAutoRefreshStatus `json:"cookie_auto_refresh"`
+	GoogleBlock            googleBlock             `json:"google_block"`
+	UpstreamParams         gemini.UpstreamParams   `json:"upstream_params"`
 	ToolPromptRules        bool                    `json:"tool_prompt_noecho_rules"`   // GEMINI_TOOL_PROMPT_NOECHO_RULES
 	NoInternalCodeExecRule bool                    `json:"no_internal_code_exec_rule"` // GEMINI_NO_INTERNAL_CODE_EXEC_RULE
 	CodeRefFastpath        bool                    `json:"code_ref_fastpath"`          // GEMINI_CODE_REF_FASTPATH
-	MarkerNeutralized   bool                    `json:"neutralize_history_markers"` // GEMINI_NEUTRALIZE_HISTORY_MARKERS
-	StreamProgress      bool                    `json:"stream_tools_progress"`      // GEMINI_STREAM_TOOLS_PROGRESS
-	StreamThoughts      bool                    `json:"stream_thoughts"`            // GEMINI_STREAM_THOUGHTS
-	ThinkingLevel       string                  `json:"thinking_level_default"`     // GEMINI_THINKING_LEVEL ("" = not sent)
-	MaxPromptBytes      int                     `json:"max_prompt_bytes"`           // GEMINI_MAX_PROMPT_BYTES (0 = no limit)
-	PromptWarnKB        int                     `json:"prompt_warn_kb"`             // GEMINI_PROMPT_WARN_KB (default 300; 0 = off)
-	MaxHeldBytes        int                     `json:"max_held_bytes"`             // GEMINI_MAX_HELD_BYTES (0 = no limit)
-	MaxHeldSec          int                     `json:"max_held_sec"`               // GEMINI_MAX_HELD_SEC (0 = no limit)
-	InternalToolAction  string                  `json:"internal_tool_action"`       // GEMINI_INTERNAL_TOOL_ACTION (notify|retry|off)
-	CannedErrorRetry    string                  `json:"canned_error_retry"`         // GEMINI_CANNED_ERROR_RETRY (off|once)
-	CannedErrorRetrySec int                     `json:"canned_error_retry_sec"`     // GEMINI_CANNED_ERROR_RETRY_SEC (default 25)
-	NoContentSec        int                     `json:"no_content_sec"`             // GEMINI_NO_CONTENT_SEC (default 0)
-	TraceEnabled        bool                    `json:"content_trace_enabled"`      // GEMINI_TRACE_DIR set (files hold conversation content)
-	TemporaryChat       bool                    `json:"temporary_chat"`             // GEMINI_TEMPORARY_CHAT
-	IgnoredFields       ignoredFields           `json:"ignored_request_fields"`
-	SessionState        sessionState            `json:"session_state"`
-	ModelIdentities     []modelIdentity         `json:"model_identities"`
-	ModelFailures       []modelFailureStatus    `json:"model_failures"`
-	BackgroundCalls     backgroundCallsStatus   `json:"background_calls"`
+	MarkerNeutralized      bool                    `json:"neutralize_history_markers"` // GEMINI_NEUTRALIZE_HISTORY_MARKERS
+	StreamProgress         bool                    `json:"stream_tools_progress"`      // GEMINI_STREAM_TOOLS_PROGRESS
+	StreamThoughts         bool                    `json:"stream_thoughts"`            // GEMINI_STREAM_THOUGHTS
+	ThinkingLevel          string                  `json:"thinking_level_default"`     // GEMINI_THINKING_LEVEL ("" = not sent)
+	MaxPromptBytes         int                     `json:"max_prompt_bytes"`           // GEMINI_MAX_PROMPT_BYTES (0 = no limit)
+	PromptWarnKB           int                     `json:"prompt_warn_kb"`             // GEMINI_PROMPT_WARN_KB (default 300; 0 = off)
+	MaxHeldBytes           int                     `json:"max_held_bytes"`             // GEMINI_MAX_HELD_BYTES (0 = no limit)
+	MaxHeldSec             int                     `json:"max_held_sec"`               // GEMINI_MAX_HELD_SEC (0 = no limit)
+	InternalToolAction     string                  `json:"internal_tool_action"`       // GEMINI_INTERNAL_TOOL_ACTION (notify|retry|off)
+	CannedErrorRetry       string                  `json:"canned_error_retry"`         // GEMINI_CANNED_ERROR_RETRY (off|once)
+	CannedErrorRetrySec    int                     `json:"canned_error_retry_sec"`     // GEMINI_CANNED_ERROR_RETRY_SEC (default 25)
+	NoContentSec           int                     `json:"no_content_sec"`             // GEMINI_NO_CONTENT_SEC (default 0)
+	TraceEnabled           bool                    `json:"content_trace_enabled"`      // GEMINI_TRACE_DIR set (files hold conversation content)
+	TemporaryChat          bool                    `json:"temporary_chat"`             // GEMINI_TEMPORARY_CHAT
+	IgnoredFields          ignoredFields           `json:"ignored_request_fields"`
+	SessionState           sessionState            `json:"session_state"`
+	ModelIdentities        []modelIdentity         `json:"model_identities"`
+	ModelFailures          []modelFailureStatus    `json:"model_failures"`
+	BackgroundCalls        backgroundCallsStatus   `json:"background_calls"`
 }
 
 type backgroundCallsStatus struct {

@@ -43,7 +43,7 @@ func TestK17_S2_NoInternalCodeExecRule(t *testing.T) {
 
 	// 2. Equivalent command tool detected by schema -> rule uses its name.
 	reqEquiv := apiconv.ChatRequest{
-		Messages: []apiconv.Message{{Role: "user", Content: json.RawMessage(`"test"`)}} ,
+		Messages: []apiconv.Message{{Role: "user", Content: json.RawMessage(`"test"`)}},
 		Tools: []apiconv.Tool{
 			{Type: "function", Function: &apiconv.ToolFunction{Name: "exec_shell", Parameters: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`)}},
 		},
@@ -58,7 +58,7 @@ func TestK17_S2_NoInternalCodeExecRule(t *testing.T) {
 
 	// 3. No command tool declared -> rule absent.
 	reqNoCmd := apiconv.ChatRequest{
-		Messages: []apiconv.Message{{Role: "user", Content: json.RawMessage(`"test"`)}} ,
+		Messages: []apiconv.Message{{Role: "user", Content: json.RawMessage(`"test"`)}},
 		Tools: []apiconv.Tool{
 			{Type: "function", Function: &apiconv.ToolFunction{Name: "read_file", Parameters: json.RawMessage(`{"type":"object","properties":{"Path":{"type":"string"}}}`)}},
 		},
