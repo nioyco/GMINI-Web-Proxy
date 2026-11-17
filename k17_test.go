@@ -237,3 +237,103 @@ func TestK17_S3_CodeRefFastpath(t *testing.T) {
 		}
 	})
 }
+
+// K17 S4: When a code_reference block is detected and the next frame takes longer than
+// 10s (overridden in test), emit a single GMINI note in the stream, update in-flight
+// status_note, and record per-model 5h count & median pause on the UI state.
+func TestK17_S4_CodeRefWaitNoteAndModelStats(t *testing.T) {
+	runCmdChatBody := `{"model":"gemini-3.1-pro","stream":true,"messages":[{"role":"user","content":"check"}],"tools":[{"type":"function","function":{"name":"run_command","parameters":{"type":"object","properties":{"CommandLine":{"type":"string"}}}}}]}`
+
+	noteSeenInFlight := make(chan string, 1)
+	_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			pw.Write([]byte(fakeStreamBody24("```bash?code_reference&code_event_index=1\nls -la\n```\n", "run_command")))
+			time.Sleep(220 * time.Millisecond)
+			pw.Write([]byte(fakeStreamBody24("```bash?code_reference&code_event_index=1\nls -la\n```\n```tool_call\n{\"name\":\"run_command\",\"arguments\":{\"CommandLine\":\"ls -la\"}}\n```\n", "run_command")))
+			pw.Close()
+		}()
+		return &http.Response{StatusCode: 200, Body: pr}, nil
+	}))
+	cfg := testConfig()
+	cfg.AllowNoAuth = true
+	cfg.UIEnabled = true
+	cfg.StreamToolsProgress = true
+	cfg.StreamThoughts = true
+	cfg.SSEKeepaliveSec = 1
+	s := newServer(cfg, client, testLogger())
+	s.keepaliveOverride = 50 * time.Millisecond
+	s.codeRefWaitOverride = 80 * time.Millisecond
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	// Poll /_ui/api/state during the pause to verify in-flight status_note.
+	go func() {
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			rec := uiDo(s.handler(), http.MethodGet, "/_ui/api/state", "127.0.0.1:12345", s.uiToken)
+			var st struct {
+				InFlight []InFlightRequest `json:"in_flight"`
+			}
+			if json.Unmarshal(rec.Body.Bytes(), &st) == nil {
+				for _, req := range st.InFlight {
+					if strings.Contains(req.StatusNote, "Gemini tente son outil interne d'exécution de code") {
+						select {
+						case noteSeenInFlight <- req.StatusNote:
+						default:
+						}
+						return
+					}
+				}
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+	}()
+
+	c := readSSE(t, context.Background(), ts.URL, runCmdChatBody)
+	joined := strings.Join(c.dataFrames, "\n")
+	wantMsg := "Gemini tente son outil interne d'exécution de code ; l'appel d'outil suit en général sous 10 à 60 s."
+	if n := strings.Count(joined, wantMsg); n != 1 {
+		t.Fatalf("expected GMINI code_ref wait note once in stream, got %d in: %s", n, joined)
+	}
+	if !strings.Contains(joined, "GMINI (pas le modèle") {
+		t.Fatalf("expected K13 GMINI note format, got: %s", joined)
+	}
+	select {
+	case gotNote := <-noteSeenInFlight:
+		if !strings.Contains(gotNote, "exécution de code") {
+			t.Fatalf("unexpected in-flight note: %s", gotNote)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("did not observe code_reference wait note in in-flight state")
+	}
+
+	// Verify per-model 5h count & median pause in /_ui/api/state.
+	stateRec := uiDo(s.handler(), http.MethodGet, "/_ui/api/state", "127.0.0.1:12345", s.uiToken)
+	var uiSt struct {
+		Models []uiModel `json:"models"`
+	}
+	if err := json.Unmarshal(stateRec.Body.Bytes(), &uiSt); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, m := range uiSt.Models {
+		if m.Name == "gemini-3.1-pro" {
+			found = true
+			if m.CodeRef5h != 1 {
+				t.Fatalf("gemini-3.1-pro code_ref_5h = %d, want 1", m.CodeRef5h)
+			}
+			if m.MedianCodeRefPauseMS < 150 {
+				t.Fatalf("gemini-3.1-pro median_code_ref_pause_ms = %d, want >= 150", m.MedianCodeRefPauseMS)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("gemini-3.1-pro missing from /_ui/api/state models")
+	}
+
+	uiRec := uiDo(s.handler(), http.MethodGet, "/_ui", "127.0.0.1:12345", "")
+	if !strings.Contains(uiRec.Body.String(), "code_reference (5 h)") {
+		t.Fatal("UI page missing code_reference (5 h) column")
+	}
+}

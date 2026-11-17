@@ -48,6 +48,7 @@ type Server struct {
 	cannedRetryTimeoutOverride time.Duration
 	noContentTimeoutOverride   time.Duration
 	noContentNoteOverride      time.Duration
+	codeRefWaitOverride        time.Duration
 	// uiToken protects the API of the local management page (ui.go); empty: page off.
 	uiToken string
 
@@ -66,7 +67,54 @@ type Server struct {
 	staleWarnMu sync.Mutex
 	staleWarnAt time.Time
 
+	codeRefMu    sync.Mutex
+	codeRefStats []codeRefStat
+
 	autoRefresh *cookieAutoRefresher
+}
+
+type codeRefStat struct {
+	at      time.Time
+	model   string
+	pauseMS int64 // -1 when no tool_call followed
+}
+
+func (s *Server) codeRefWaitThreshold() time.Duration {
+	if s.codeRefWaitOverride > 0 {
+		return s.codeRefWaitOverride
+	}
+	return 10 * time.Second
+}
+
+func (s *Server) recordCodeRefStat(model string, pauseMS int64) {
+	if model == "" {
+		return
+	}
+	now := s.currentNow()
+	cutoff := now.Add(-5 * time.Hour)
+	s.codeRefMu.Lock()
+	defer s.codeRefMu.Unlock()
+	kept := s.codeRefStats[:0]
+	for _, st := range s.codeRefStats {
+		if !st.at.Before(cutoff) {
+			kept = append(kept, st)
+		}
+	}
+	s.codeRefStats = append(kept, codeRefStat{at: now, model: model, pauseMS: pauseMS})
+}
+
+func (s *Server) codeRefStats5h() map[string][]int64 {
+	now := s.currentNow()
+	cutoff := now.Add(-5 * time.Hour)
+	s.codeRefMu.Lock()
+	defer s.codeRefMu.Unlock()
+	out := map[string][]int64{}
+	for _, st := range s.codeRefStats {
+		if !st.at.Before(cutoff) {
+			out[st.model] = append(out[st.model], st.pauseMS)
+		}
+	}
+	return out
 }
 
 type suspectWarnState struct {
@@ -918,6 +966,21 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	lastHeldNoteBytes := 0
 	internalToolNotified := false
 	codeRefHandled := false
+	var codeRefDetectedAt time.Time
+	codeRefWaitNoted := false
+	codeRefPauseMS := int64(-1)
+	codeRefWaitThresh := s.codeRefWaitThreshold()
+	statModelName := ""
+	if p.Model != nil && p.Model.Name != "" {
+		statModelName = p.Model.Name
+	} else if hooks != nil {
+		statModelName = hooks.model
+	}
+	defer func() {
+		if !codeRefDetectedAt.IsZero() {
+			s.recordCodeRefStat(statModelName, codeRefPauseMS)
+		}
+	}()
 	body24Tools := map[string]bool{}
 	var streamOpenedAt, lastNoContentNoteAt time.Time
 	hasContent := false
@@ -994,6 +1057,9 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		}
 		res.earlyStopReason = "code_ref_fastpath"
 		res.rawText = rawJSON
+		if !codeRefDetectedAt.IsZero() && codeRefPauseMS < 0 {
+			codeRefPauseMS = time.Since(codeRefDetectedAt).Milliseconds()
+		}
 		s.stats.codeRefFastpath.Add(1)
 		s.rlog(ctx).Info("code_ref_fastpath", "tool", toolName, "elapsed", time.Since(start).Round(time.Millisecond))
 		cancel(gemini.ErrEarlyStop)
@@ -1156,6 +1222,12 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		}
 
 		scan := apiconv.ScanToolCalls(raw.String(), declared)
+		if scan.HasCodeRef && codeRefDetectedAt.IsZero() {
+			codeRefDetectedAt = time.Now()
+		}
+		if scan.CompleteCalls > 0 && !codeRefDetectedAt.IsZero() && codeRefPauseMS < 0 {
+			codeRefPauseMS = time.Since(codeRefDetectedAt).Milliseconds()
+		}
 		if scan.CompleteCalls == 0 && tryCodeRefFastpath() {
 			return false
 		}
@@ -1289,6 +1361,9 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	if noContentTimeout == 0 && noContentNoteWait > 0 && noContentNoteWait/4 > 0 && noContentNoteWait/4 < tick {
 		tick = noContentNoteWait / 4
 	}
+	if codeRefWaitThresh > 0 && codeRefWaitThresh/4 > 0 && codeRefWaitThresh/4 < tick {
+		tick = codeRefWaitThresh / 4
+	}
 	if tick < 5*time.Millisecond {
 		tick = 5 * time.Millisecond
 	}
@@ -1351,6 +1426,24 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		}
 		return true
 	}
+	checkCodeRefWait := func() bool {
+		if codeRefWaitNoted || codeRefDetectedAt.IsZero() || completeToolCalls > 0 {
+			return true
+		}
+		if time.Since(codeRefDetectedAt) < codeRefWaitThresh {
+			return true
+		}
+		codeRefWaitNoted = true
+		note := "Gemini tente son outil interne d'exécution de code ; l'appel d'outil suit en général sous 10 à 60 s."
+		if ri != nil {
+			ri.setStatusNote(note)
+		}
+		if hooks != nil && hooks.progressive && s.cfg.StreamThoughts {
+			res.forwarded = true
+			return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, proxyWaitNote(s.currentNow(), note))))
+		}
+		return true
+	}
 
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
@@ -1391,6 +1484,9 @@ loop:
 				return res
 			}
 			if !checkSilence() {
+				return res
+			}
+			if !checkCodeRefWait() {
 				return res
 			}
 			if time.Since(lastWrite) >= interval && !keepalive() {

@@ -101,7 +101,9 @@ type uiModel struct {
 	LastSuspect         string `json:"last_suspect"`
 	LastSeenModels      string `json:"last_seen_models"` // display names of catalogue ids found in the last reply
 	LastServed          string `json:"last_served"`      // model name stated by Google in the last reply
-	Calls5h             int    `json:"calls_5h"`         // generations sent to Gemini in the last 5 hours
+	Calls5h              int    `json:"calls_5h"`                    // generations sent to Gemini in the last 5 hours
+	CodeRef5h            int    `json:"code_ref_5h"`                 // requests with code_reference block in the last 5 hours (K17 S4)
+	MedianCodeRefPauseMS int64  `json:"median_code_ref_pause_ms"`    // -1: no data (K17 S4)
 	MismatchSince       string `json:"mismatch_since,omitempty"`
 	FailureCount        int    `json:"failure_count,omitempty"`
 	FailureSince        string `json:"failure_since,omitempty"`
@@ -233,6 +235,7 @@ func (s *Server) uiModels() []uiModel {
 	for _, mf := range s.modelFailures() {
 		failByModel[mf.Model] = mf
 	}
+	codeRefByModel := s.codeRefStats5h()
 	out := make([]uiModel, 0, len(list))
 	for _, m := range list {
 		mf := failByModel[m.Name]
@@ -240,8 +243,21 @@ func (s *Server) uiModels() []uiModel {
 		if !mf.Since.IsZero() {
 			failSince = mf.Since.UTC().Format(time.RFC3339)
 		}
+		crList := codeRefByModel[m.Name]
+		var crPauses []int64
+		for _, p := range crList {
+			if p >= 0 {
+				crPauses = append(crPauses, p)
+			}
+		}
+		crMedian := int64(-1)
+		if len(crPauses) > 0 {
+			sort.Slice(crPauses, func(i, j int) bool { return crPauses[i] < crPauses[j] })
+			crMedian = crPauses[len(crPauses)/2]
+		}
 		u := uiModel{Name: m.Name, ModelID: m.ModelID, DisplayName: m.DisplayName, Description: m.Description,
 			Default: m.Name == def, MedianFirstMS: -1, MedianFirstSignMS: -1, MedianFirstThoughtM: -1, MenuLabel: m.MenuLabel, Family: m.Family,
+			Calls5h: 0, CodeRef5h: len(crList), MedianCodeRefPauseMS: crMedian,
 			MismatchSince: identByModel[m.Name], FailureCount: mf.Count, FailureSince: failSince, Unresponsive: mf.Unresponsive}
 		var firsts, firstSigns, firstThoughts []int64
 		for _, c := range all {
