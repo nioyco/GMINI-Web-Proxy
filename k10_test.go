@@ -75,8 +75,12 @@ func TestK10_ConfigAndSplitCommandArgs(t *testing.T) {
 	t.Setenv("GEMINI_COOKIE_AUTO_REFRESH_MIN", "")
 	t.Setenv("GEMINI_COOKIE_REFRESH_CMD", "")
 	cfg := loadConfig(filepath.Join(t.TempDir(), "missing.env"))
-	if cfg.CookieAutoRefreshMin != 0 || cfg.CookieRefreshCmd != "" {
-		t.Fatalf("defaults = (%d, %q), want (0, \"\")", cfg.CookieAutoRefreshMin, cfg.CookieRefreshCmd)
+	if cfg.CookieAutoRefreshMin != 90 || cfg.CookieRefreshCmd != "" {
+		t.Fatalf("defaults = (%d, %q), want (90, \"\")", cfg.CookieAutoRefreshMin, cfg.CookieRefreshCmd)
+	}
+	t.Setenv("GEMINI_COOKIE_AUTO_REFRESH_MIN", "0")
+	if got := loadConfig(filepath.Join(t.TempDir(), "missing.env")).CookieAutoRefreshMin; got != 90 {
+		t.Fatalf("zero GEMINI_COOKIE_AUTO_REFRESH_MIN = %d, want 90", got)
 	}
 
 	args, err := splitCommandArgs(`node "/tmp/dir with spaces/tool.mjs" refresh`)
@@ -121,6 +125,12 @@ touch %q
 		CookieAutoRefreshMin: 90,
 		CookieRefreshCmd:     script,
 	}, c, logger)
+	// Starts disabled even with CookieAutoRefreshMin=90; must be toggled on explicitly.
+	if ar.Status().Enabled {
+		t.Fatal("auto-refresh must start disabled")
+	}
+	on := true
+	ar.Toggle(&on)
 	// Token age is unknown (no state file), so advance clock past 90m.
 	now := time.Now()
 	ar.nowFn = func() time.Time { return now }
@@ -166,6 +176,8 @@ func TestK10_OnDemandWaitProgressNoteAndTimeout(t *testing.T) {
 	s.autoRefresh.nowFn = func() time.Time { return now }
 	s.autoRefresh.startedAt = now.Add(-2 * time.Hour)
 	s.autoRefresh.waitTimeout = 2 * time.Second
+	on := true
+	s.autoRefresh.Toggle(&on)
 
 	s.streamEvents = func(ctx context.Context, p gemini.GenParams, h gemini.StreamHandlers) error {
 		h.Text("OK")
@@ -200,6 +212,7 @@ func TestK10_OnDemandWaitProgressNoteAndTimeout(t *testing.T) {
 	ar2.startedAt = now.Add(-2 * time.Hour)
 	ar2.waitTimeout = 40 * time.Millisecond
 	ar2.execTimeout = 150 * time.Millisecond
+	ar2.Toggle(&on)
 
 	t0 := time.Now()
 	waited := false
@@ -220,6 +233,8 @@ func TestK10_GuardrailsPauseResumeAndEarlyTrigger(t *testing.T) {
 
 	ar := newCookieAutoRefresher(&Config{CookieAutoRefreshMin: 90, CookieRefreshCmd: failScript}, c, nil)
 	ar.minSpacing = 20 * time.Millisecond
+	on := true
+	ar.Toggle(&on)
 
 	// 2 consecutive failures -> paused.
 	ar.TriggerEarly()
@@ -297,7 +312,27 @@ func TestK10_UIToggleProtectedAndStatus(t *testing.T) {
 		t.Fatalf("missing token status = %d, want 401", rec.Code)
 	}
 
-	// Valid token -> toggles off, then on.
+	// Starts disabled, valid token toggles on then off and logs source=ui.
+	if s.autoRefresh.Status().Enabled {
+		t.Fatal("expected enabled=false at startup")
+	}
+	req = httptest.NewRequest(http.MethodPost, "/_ui/api/cookie-refresh/toggle", strings.NewReader(`{"enabled":true}`))
+	req.Host = "127.0.0.1:8081"
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("X-GMINI-UI", s.uiToken)
+	rec = httptest.NewRecorder()
+	s.handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("toggle on status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	var st cookieAutoRefreshStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if !st.Enabled {
+		t.Fatalf("expected enabled=true, got %+v", st)
+	}
+
 	req = httptest.NewRequest(http.MethodPost, "/_ui/api/cookie-refresh/toggle", strings.NewReader(`{"enabled":false}`))
 	req.Host = "127.0.0.1:8081"
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -307,7 +342,6 @@ func TestK10_UIToggleProtectedAndStatus(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("toggle status = %d body = %s", rec.Code, rec.Body.String())
 	}
-	var st cookieAutoRefreshStatus
 	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
 		t.Fatal(err)
 	}
@@ -325,6 +359,8 @@ func TestB8_TickUsesWallClockAcrossSleep(t *testing.T) {
 		t.Fatal(err)
 	}
 	ar := newCookieAutoRefresher(cfg, client, testLogger())
+	on := true
+	ar.Toggle(&on)
 
 	// Simulate a request served 3h13m ago in wall-clock time, with monotonic clock
 	// NOT advancing (as happens on macOS during system sleep).
@@ -449,8 +485,8 @@ func TestP7_AutoRefreshDisabledZeroProcessesAndPassesThroughP5(t *testing.T) {
 		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
 	}))
 
-	// Case A: interval=0 (disabled by default even with command set).
-	arZero := newCookieAutoRefresher(&Config{CookieAutoRefreshMin: 0, CookieRefreshCmd: script}, c, logger)
+	// Case A: interval=90 at startup (disabled by default even with command set).
+	arZero := newCookieAutoRefresher(&Config{CookieAutoRefreshMin: 90, CookieRefreshCmd: script}, c, logger)
 	now := time.Now()
 	arZero.nowFn = func() time.Time { return now }
 	arZero.startedAt = now.Add(-4 * time.Hour)
@@ -460,11 +496,13 @@ func TestP7_AutoRefreshDisabledZeroProcessesAndPassesThroughP5(t *testing.T) {
 	arZero.TriggerEarly()
 	time.Sleep(40 * time.Millisecond)
 
-	// Case B: interval=90 but toggled off.
+	// Case B: interval=90 toggled on then toggled off.
 	arToggledOff := newCookieAutoRefresher(&Config{CookieAutoRefreshMin: 90, CookieRefreshCmd: script}, c, logger)
 	arToggledOff.nowFn = func() time.Time { return now }
 	arToggledOff.startedAt = now.Add(-4 * time.Hour)
+	on := true
 	off := false
+	arToggledOff.Toggle(&on)
 	arToggledOff.Toggle(&off)
 	arToggledOff.lastActivityAt = now.Add(-2 * time.Minute)
 	arToggledOff.Tick()
@@ -478,8 +516,8 @@ func TestP7_AutoRefreshDisabledZeroProcessesAndPassesThroughP5(t *testing.T) {
 	if googleCalls != 0 {
 		t.Fatalf("disabled auto-refresh made %d Google calls, want 0", googleCalls)
 	}
-	if strings.Contains(logBuf.String(), "background_call") || strings.Contains(logBuf.String(), "cookie_auto_refresh") {
-		t.Fatalf("disabled auto-refresh emitted unexpected logs:\n%s", logBuf.String())
+	if strings.Contains(logBuf.String(), "background_call") || strings.Contains(logBuf.String(), "cookie_auto_refresh\"") {
+		t.Fatalf("disabled auto-refresh emitted unexpected run logs:\n%s", logBuf.String())
 	}
 
 	// 2. Enabled auto-refresh passes through P5:
@@ -500,6 +538,8 @@ func TestP7_AutoRefreshDisabledZeroProcessesAndPassesThroughP5(t *testing.T) {
 		t.Fatal(err)
 	}
 	arOn := newCookieAutoRefresher(&Config{CookieAutoRefreshMin: 90, CookieRefreshCmd: script}, cIdle, idleLogger)
+	onIdle := true
+	arOn.Toggle(&onIdle)
 	arOn.nowFn = func() time.Time { return now }
 	arOn.startedAt = now.Add(-4 * time.Hour)
 	arOn.lastActivityAt = now.Add(-20 * time.Minute) // inside 90m K10 window, but no cIdle.RecordUserActivity() within 10m!

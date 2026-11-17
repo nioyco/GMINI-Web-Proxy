@@ -166,7 +166,7 @@ func (s *Server) handleUICookieRefreshToggle(w http.ResponseWriter, r *http.Requ
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
-	st := s.autoRefresh.Toggle(req.Enabled)
+	st := s.autoRefresh.ToggleFrom(req.Enabled, "ui")
 	sendJSON(w, http.StatusOK, st)
 }
 

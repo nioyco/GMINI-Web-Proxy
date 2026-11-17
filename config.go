@@ -27,9 +27,10 @@ type Config struct {
 	LogFormat      string // "text" (default) or "json" (GEMINI_LOG_FORMAT)
 	CookieRotation bool   // GEMINI_COOKIE_ROTATION: off (default) or on
 	CookieRefresh  int    // minutes between __Secure-1PSIDTS rotations (0 = off)
-	// CookieAutoRefreshMin and CookieRefreshCmd drive external session refresh
-	// (e.g. headless Chrome script) when the token ages (GEMINI_COOKIE_AUTO_REFRESH_MIN,
-	// default 0 = off; GEMINI_COOKIE_REFRESH_CMD, no shell interpretation).
+	// CookieAutoRefreshMin sets the token-age interval in minutes (default 90 if
+	// unset or <=0) used once auto-refresh is turned on via the UI toggle; it
+	// never enables auto-refresh on startup. CookieRefreshCmd is the external
+	// command executed without a shell.
 	CookieAutoRefreshMin int
 	CookieRefreshCmd     string
 	APIKeys              []string // allowed client keys; empty means open access
@@ -153,7 +154,7 @@ func loadConfig(envFile string) *Config {
 		LogFormat:            strings.ToLower(strings.TrimSpace(getEnv("GEMINI_LOG_FORMAT", "text"))),
 		CookieRotation:       getEnvBool("GEMINI_COOKIE_ROTATION", false),
 		CookieRefresh:        getEnvInt("GEMINI_COOKIE_REFRESH_MIN", 9),
-		CookieAutoRefreshMin: nonNegative(getEnvInt("GEMINI_COOKIE_AUTO_REFRESH_MIN", 0), 0),
+		CookieAutoRefreshMin: positive(getEnvInt("GEMINI_COOKIE_AUTO_REFRESH_MIN", 90), 90),
 		CookieRefreshCmd:     strings.TrimSpace(getEnv("GEMINI_COOKIE_REFRESH_CMD", "")),
 		APIKeys:              splitKeys(getEnv("GEMINI_API_KEYS", "")),
 

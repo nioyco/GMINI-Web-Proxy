@@ -94,7 +94,11 @@ func newCookieAutoRefresher(cfg *Config, client *gemini.Client, log *slog.Logger
 			args = parsed
 		}
 	}
-	interval := time.Duration(cfg.CookieAutoRefreshMin) * time.Minute
+	intervalMin := cfg.CookieAutoRefreshMin
+	if intervalMin <= 0 {
+		intervalMin = 90
+	}
+	interval := time.Duration(intervalMin) * time.Minute
 	now := time.Now().Round(0)
 	return &cookieAutoRefresher{
 		client:             client,
@@ -108,7 +112,7 @@ func newCookieAutoRefresher(cfg *Config, client *gemini.Client, log *slog.Logger
 		waitTimeout:        defaultAutoRefreshWaitTimeout,
 		pollInterval:       defaultAutoRefreshPollInterval,
 		nowFn:              func() time.Time { return time.Now().Round(0) },
-		enabled:            len(args) > 0 && interval > 0,
+		enabled:            false,
 		interval:           interval,
 		startedAt:          now,
 	}
@@ -236,6 +240,10 @@ func (r *cookieAutoRefresher) startRunLocked(now time.Time, trigger string) chan
 // token has reached the configured age.
 func (r *cookieAutoRefresher) Tick() {
 	r.mu.Lock()
+	if !r.enabled {
+		r.mu.Unlock()
+		return
+	}
 	now := r.nowFn().Round(0)
 	activeRecently := !r.lastActivityAt.IsZero() && now.Sub(r.lastActivityAt.Round(0)) <= r.activityWindow
 	if !activeRecently || r.running || !r.tokenDueLocked(now) {
@@ -254,16 +262,16 @@ func (r *cookieAutoRefresher) Tick() {
 	r.mu.Unlock()
 }
 
-// PrepareRequest records request activity and, if the proxy was idle and the
-// token is older than the configured interval, runs a synchronous refresh
-// (capped at 45 s) before the request proceeds.
+// PrepareRequest records request activity and, if auto-refresh was explicitly
+// enabled via the UI toggle, the proxy was idle, and the token is older than
+// the configured interval, runs a synchronous refresh (capped at 45 s).
 func (r *cookieAutoRefresher) PrepareRequest(ctx context.Context, onWait func()) {
 	r.client.RecordUserActivity()
 	r.mu.Lock()
 	now := r.nowFn().Round(0)
 	wasIdle := r.lastActivityAt.IsZero() || now.Sub(r.lastActivityAt.Round(0)) > r.activityWindow
 	r.lastActivityAt = now
-	if !wasIdle {
+	if !wasIdle || !r.enabled {
 		r.mu.Unlock()
 		return
 	}
@@ -296,12 +304,12 @@ func (r *cookieAutoRefresher) PrepareRequest(ctx context.Context, onWait func())
 }
 
 // TriggerEarly launches an early refresh when Gemini serves another model
-// (at most once per minSpacing = 60 min).
+// (at most once per minSpacing = 60 min) if auto-refresh is enabled.
 func (r *cookieAutoRefresher) TriggerEarly() {
 	r.client.RecordUserActivity()
 	r.mu.Lock()
 	now := r.nowFn()
-	if r.running {
+	if !r.enabled || r.running {
 		r.mu.Unlock()
 		return
 	}
@@ -430,10 +438,25 @@ func (r *cookieAutoRefresher) RunManual(activeInFlight int) (cookieAutoRefreshSt
 	return r.Status(), http.StatusOK, ""
 }
 
-// Toggle flips or sets the enabled state (used by the UI switch).
+// Toggle flips or sets the enabled state for the lifetime of this process
+// (never persisted to disk or restored across restarts; used by the UI switch).
 func (r *cookieAutoRefresher) Toggle(on *bool) cookieAutoRefreshStatus {
+	return r.ToggleFrom(on, "ui")
+}
+
+// ToggleFrom flips or sets the enabled state and logs each transition with source.
+func (r *cookieAutoRefresher) ToggleFrom(on *bool, source string) cookieAutoRefreshStatus {
+	if source == "" {
+		source = "ui"
+	}
+	var (
+		changed     bool
+		enabled     bool
+		intervalMin int
+	)
 	r.mu.Lock()
 	if len(r.cmdArgs) > 0 {
+		prev := r.enabled
 		if on != nil {
 			r.enabled = *on
 		} else {
@@ -446,8 +469,17 @@ func (r *cookieAutoRefresher) Toggle(on *bool) cookieAutoRefreshStatus {
 			r.paused = false
 			r.consecutiveFailures = 0
 		}
+		changed = r.enabled != prev
+		enabled = r.enabled
+		intervalMin = int(r.interval / time.Minute)
 	}
 	r.mu.Unlock()
+	if changed {
+		r.log.Info("cookie_auto_refresh_toggle",
+			"enabled", enabled,
+			"source", source,
+			"interval_min", intervalMin)
+	}
 	return r.Status()
 }
 
