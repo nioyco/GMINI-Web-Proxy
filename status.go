@@ -32,6 +32,7 @@ type statusResponse struct {
 	UpstreamParams      gemini.UpstreamParams   `json:"upstream_params"`
 	ToolPromptRules        bool                    `json:"tool_prompt_noecho_rules"`   // GEMINI_TOOL_PROMPT_NOECHO_RULES
 	NoInternalCodeExecRule bool                    `json:"no_internal_code_exec_rule"` // GEMINI_NO_INTERNAL_CODE_EXEC_RULE
+	CodeRefFastpath        bool                    `json:"code_ref_fastpath"`          // GEMINI_CODE_REF_FASTPATH
 	MarkerNeutralized   bool                    `json:"neutralize_history_markers"` // GEMINI_NEUTRALIZE_HISTORY_MARKERS
 	StreamProgress      bool                    `json:"stream_tools_progress"`      // GEMINI_STREAM_TOOLS_PROGRESS
 	StreamThoughts      bool                    `json:"stream_thoughts"`            // GEMINI_STREAM_THOUGHTS
@@ -227,6 +228,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			"tool_call_unconverted":     s.stats.toolCallUnconverted.Load(),
 			"tool_name_inferred":        s.stats.toolNameInferred.Load(),
 			"internal_tool_detected":    s.stats.internalToolDetected.Load(),
+			"code_ref_fastpath":         s.stats.codeRefFastpath.Load(),
 			"limit_banner_detected":     s.stats.limitBannerDetected.Load(),
 			"canned_error_retries":      s.stats.cannedErrorRetries.Load(),
 			"upstream_empty_reply":      s.stats.upstreamEmptyReply.Load(),
@@ -326,6 +328,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	resp.UpstreamParams = s.client.UpstreamParams()
 	resp.ToolPromptRules = apiconv.ToolPromptRules()
 	resp.NoInternalCodeExecRule = apiconv.NoInternalCodeExecRule()
+	resp.CodeRefFastpath = s.cfg.CodeRefFastpath
 	resp.MarkerNeutralized = apiconv.MarkerNeutralization()
 	resp.StreamProgress, resp.StreamThoughts = s.cfg.StreamToolsProgress, s.cfg.StreamThoughts
 	resp.ThinkingLevel, resp.MaxPromptBytes = s.cfg.DefaultThinkingLevel, s.cfg.MaxPromptBytes

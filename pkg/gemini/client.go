@@ -866,6 +866,7 @@ type StreamHandlers struct {
 	Thought      func(delta string)                // model "thinking" text, when the backend streams it
 	Status       func(text string)                 // Google progress status from body[2]["7"] (K11)
 	InternalTool func(name string)                 // internal Google tool detected in body[11]/body[24][0] (B1)
+	Body24Tools  func(names []string)              // all tool names in body[24][0], including local tools (K17 S3)
 	LimitBanner  func(msg string)                  // explicit Google quota/limit banner from body[52] (B1)
 	Identity     func(servedID, servedName string) // reported as soon as position 39 is read
 	ErrorMarker  func()                            // reported when inner[31]=true is read
@@ -1055,6 +1056,9 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 			}
 			if ok && fr.internalTool != "" && h.InternalTool != nil {
 				h.InternalTool(fr.internalTool)
+			}
+			if ok && len(fr.body24Tools) > 0 && h.Body24Tools != nil {
+				h.Body24Tools(fr.body24Tools)
 			}
 			if ok && fr.limitBanner != "" && h.LimitBanner != nil {
 				h.LimitBanner(fr.limitBanner)
@@ -1258,6 +1262,7 @@ type frame struct {
 	hasCandidate bool        // true when inner2[4] carries >=1 candidate (K16 B2)
 	status       string      // Google progress status from body[2]["7"] (K11)
 	internalTool string      // internal Google tool from body[11] or body[24][0] (B1)
+	body24Tools  []string    // all tool names in body[24][0] (K17 S3)
 	limitBanner  string      // Google limit banner from body[52] (B1)
 	sizes        map[int]int // first candidate: index → string bytes in that subtree
 	thoughts     []int       // sizes of the strings found under the thinking slot, in order
@@ -1346,6 +1351,35 @@ func parseBody24ToolCalls(inner2 []any) string {
 	return ""
 }
 
+// parseBody24AllToolNames returns all tool names present in body[24][0],
+// including user-declared local tools such as run_command (K17 S3).
+func parseBody24AllToolNames(inner2 []any) []string {
+	if len(inner2) <= 24 {
+		return nil
+	}
+	b24, ok := inner2[24].([]any)
+	if !ok || len(b24) == 0 {
+		return nil
+	}
+	calls, ok := b24[0].([]any)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, c := range calls {
+		entry, ok := c.([]any)
+		if !ok || len(entry) == 0 {
+			continue
+		}
+		if name, ok := entry[0].(string); ok {
+			if name = strings.TrimSpace(name); name != "" {
+				out = append(out, name)
+			}
+		}
+	}
+	return out
+}
+
 // parseBody52Limit extracts Google's explicit quota/limit banner from body[52]
 // (e.g. [["Limit reached. Continuing with Flash-Lite."], ...]).
 func parseBody52Limit(inner2 []any) string {
@@ -1424,18 +1458,20 @@ func parseFrame(line string) (frame, bool) {
 	if t24 := parseBody24ToolCalls(inner2); t24 != "" && internalTool == "" {
 		internalTool = t24
 	}
+	body24Tools := parseBody24AllToolNames(inner2)
 	limitBanner := parseBody52Limit(inner2)
 	var cands []any
 	if len(inner2) > 4 {
 		cands, _ = inner2[4].([]any)
 	}
-	if len(cands) == 0 && status == "" && internalTool == "" && limitBanner == "" {
+	if len(cands) == 0 && status == "" && internalTool == "" && limitBanner == "" && len(body24Tools) == 0 {
 		return frame{}, false
 	}
 	var fr frame
 	fr.hasCandidate = len(cands) > 0
 	fr.status = status
 	fr.internalTool = internalTool
+	fr.body24Tools = body24Tools
 	fr.limitBanner = limitBanner
 	for _, part := range cands {
 		ps, ok := part.([]any)

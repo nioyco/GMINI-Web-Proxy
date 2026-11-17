@@ -19,10 +19,11 @@ import (
 
 // DeclaredTool is a tool declared by the client: its name and parameter schema keys.
 type DeclaredTool struct {
-	Name      string
-	Props     map[string]bool   // property names of the parameters schema
-	PropTypes map[string]string // property name -> JSON schema type (when present)
-	Required  []string
+	Name         string
+	Props        map[string]bool   // property names of the parameters schema
+	PropTypes    map[string]string // property name -> JSON schema type (when present)
+	PropDefaults map[string]any    // property name -> JSON schema default (when present)
+	Required     []string
 }
 
 // Unparsed describes a tool-intent fence that could not be turned into a call. It
@@ -49,7 +50,7 @@ type ParseReport struct {
 
 // declaredFromSchema builds a DeclaredTool from a JSON-schema-like value.
 func declaredFromSchema(name string, params any) DeclaredTool {
-	d := DeclaredTool{Name: name, Props: map[string]bool{}, PropTypes: map[string]string{}}
+	d := DeclaredTool{Name: name, Props: map[string]bool{}, PropTypes: map[string]string{}, PropDefaults: map[string]any{}}
 	if m, ok := params.(map[string]any); ok {
 		if props, ok := m["properties"].(map[string]any); ok {
 			for k, rawProp := range props {
@@ -57,6 +58,9 @@ func declaredFromSchema(name string, params any) DeclaredTool {
 				if pm, ok := rawProp.(map[string]any); ok {
 					if typ, ok := pm["type"].(string); ok {
 						d.PropTypes[k] = strings.ToLower(strings.TrimSpace(typ))
+					}
+					if def, hasDef := pm["default"]; hasDef {
+						d.PropDefaults[k] = def
 					}
 				}
 			}
@@ -342,4 +346,132 @@ func decodeIntentBlock(body, tag string, declared []DeclaredTool, rep *ParseRepo
 		rep.Unparsed = append(rep.Unparsed, Unparsed{Tag: tag, Declared: len(declared), Reason: "body is not JSON"})
 	}
 	return out
+}
+
+func isSingleExploitableCommand(body string) bool {
+	if body == "" || strings.Contains(body, "tool_call") || strings.Contains(body, "function_call") {
+		return false
+	}
+	var lines []string
+	for _, ln := range strings.Split(body, "\n") {
+		t := strings.TrimSpace(ln)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		lines = append(lines, t)
+	}
+	if len(lines) == 0 {
+		return false
+	}
+	if len(lines) == 1 {
+		return true
+	}
+	// Multi-line command is treated as a single command only when it is a heredoc,
+	// uses trailing backslash continuation, or is a shell compound statement.
+	first := lines[0]
+	if strings.Contains(first, "<<") {
+		return true
+	}
+	if strings.HasSuffix(first, "\\") {
+		return true
+	}
+	for _, kw := range []string{"if ", "for ", "while ", "until ", "case ", "{", "("} {
+		if strings.HasPrefix(first, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func defaultArgForSchemaProp(key, typ string) any {
+	switch strings.ToLower(key) {
+	case "cwd", "workingdirectory", "working_directory", "workdir", "dir":
+		return "."
+	case "waitmsbeforeasync", "timeout_ms", "timeout":
+		if typ == "" || typ == "integer" || typ == "number" {
+			return 5000
+		}
+	case "safetoautorun", "safe_to_auto_run":
+		if typ == "" || typ == "boolean" {
+			return false
+		}
+	}
+	switch typ {
+	case "integer", "number":
+		return 0
+	case "boolean":
+		return false
+	case "array":
+		return []any{}
+	case "object":
+		return map[string]any{}
+	default:
+		return ""
+	}
+}
+
+// BuildCommandToolCallFromCodeRef builds a synthetic JSON tool call when text
+// contains a single complete code_reference block with one exploitable command,
+// a command tool is declared, and body[24][0] names that same command tool (K17 S3).
+func BuildCommandToolCallFromCodeRef(text string, declared []DeclaredTool, body24Tools map[string]bool) (string, string, bool) {
+	cmdTool, ok := FindCommandTool(declared)
+	if !ok || len(body24Tools) == 0 {
+		return "", "", false
+	}
+	matchedBody24 := body24Tools[cmdTool.Name]
+	if !matchedBody24 {
+		for k, v := range body24Tools {
+			if v && strings.EqualFold(k, cmdTool.Name) {
+				matchedBody24 = true
+				break
+			}
+		}
+	}
+	if !matchedBody24 {
+		return "", "", false
+	}
+
+	fences := findFences(text)
+	var codeRefs []fenceBlock
+	for _, fb := range fences {
+		if IsCodeReferenceTag(fb.tag) {
+			codeRefs = append(codeRefs, fb)
+		}
+	}
+	if len(codeRefs) != 1 || !isClosedFence(text, codeRefs[0]) {
+		return "", "", false
+	}
+	cmd := strings.TrimSpace(text[codeRefs[0].bodyStart:codeRefs[0].bodyEnd])
+	if !isSingleExploitableCommand(cmd) {
+		return "", "", false
+	}
+
+	cmdKey := commandPropKey(cmdTool)
+	if cmdKey == "" {
+		if strings.EqualFold(cmdTool.Name, "run_command") {
+			cmdKey = "CommandLine"
+		} else {
+			cmdKey = "command"
+		}
+	}
+	args := map[string]any{cmdKey: cmd}
+	for _, reqKey := range cmdTool.Required {
+		if reqKey == cmdKey {
+			continue
+		}
+		if def, hasDef := cmdTool.PropDefaults[reqKey]; hasDef {
+			args[reqKey] = def
+			continue
+		}
+		args[reqKey] = defaultArgForSchemaProp(reqKey, cmdTool.PropTypes[reqKey])
+	}
+	payload := map[string]any{
+		"name":      cmdTool.Name,
+		"arguments": args,
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return "", "", false
+	}
+	return string(b), cmdTool.Name, true
 }

@@ -16,6 +16,7 @@ import (
 // the gemini package's own test config (no network, single retry).
 func testConfig() *Config {
 	return &Config{
+		NoInternalCodeExecRule: true,
 		Gemini: gemini.Config{
 			RetryAttempts:  1,
 			RetryDelaySec:  0,

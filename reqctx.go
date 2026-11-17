@@ -270,6 +270,7 @@ type statsCounters struct {
 	toolCallUnconverted  atomic.Int64
 	toolNameInferred     atomic.Int64
 	internalToolDetected atomic.Int64
+	codeRefFastpath      atomic.Int64
 	limitBannerDetected  atomic.Int64
 	cannedErrorRetries   atomic.Int64
 	upstreamEmptyReply   atomic.Int64

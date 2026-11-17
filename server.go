@@ -853,6 +853,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		thought      string
 		status       string
 		internalTool string
+		body24Tools  []string
 		limitBanner  string
 		servedID     string
 		servedName   string
@@ -874,6 +875,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		Text:         func(d string) { push(event{text: d}) },
 		Status:       func(st string) { push(event{status: st}) },
 		InternalTool: func(name string) { push(event{internalTool: name}) },
+		Body24Tools:  func(names []string) { push(event{body24Tools: names}) },
 		LimitBanner:  func(msg string) { push(event{limitBanner: msg}) },
 		Identity: func(servedID, servedName string) {
 			push(event{servedID: servedID, servedName: servedName})
@@ -916,6 +918,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	lastHeldNoteBytes := 0
 	internalToolNotified := false
 	codeRefHandled := false
+	body24Tools := map[string]bool{}
 	var streamOpenedAt, lastNoContentNoteAt time.Time
 	hasContent := false
 	hasCandidate := false
@@ -981,6 +984,22 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		}
 	}
 
+	tryCodeRefFastpath := func() bool {
+		if !s.cfg.CodeRefFastpath || res.released || res.transmittedBytes != 0 || completeToolCalls != 0 || len(declared) == 0 {
+			return false
+		}
+		rawJSON, toolName, ok := apiconv.BuildCommandToolCallFromCodeRef(raw.String(), declared, body24Tools)
+		if !ok {
+			return false
+		}
+		res.earlyStopReason = "code_ref_fastpath"
+		res.rawText = rawJSON
+		s.stats.codeRefFastpath.Add(1)
+		s.rlog(ctx).Info("code_ref_fastpath", "tool", toolName, "elapsed", time.Since(start).Round(time.Millisecond))
+		cancel(gemini.ErrEarlyStop)
+		return true
+	}
+
 	onInternalTool := func(name string) bool {
 		s.markInternalToolDetected(ctx, name)
 		action := normalizeInternalToolAction(s.cfg.InternalToolAction)
@@ -1032,6 +1051,15 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			if noContentTimeout == 0 && !hasContent && (lastNoContentNoteAt.IsZero() || time.Since(lastNoContentNoteAt) >= noContentNoteWait/2) {
 				lastNoContentNoteAt = time.Now()
 				return emitWaitNote(time.Since(streamOpenedAt))
+			}
+			return true
+		}
+		if len(e.body24Tools) > 0 {
+			for _, name := range e.body24Tools {
+				body24Tools[name] = true
+			}
+			if tryCodeRefFastpath() {
+				return false
 			}
 			return true
 		}
@@ -1128,6 +1156,9 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		}
 
 		scan := apiconv.ScanToolCalls(raw.String(), declared)
+		if scan.CompleteCalls == 0 && tryCodeRefFastpath() {
+			return false
+		}
 		if len(declared) > 0 && scan.HasCodeRef && !codeRefHandled {
 			codeRefHandled = true
 			action := normalizeInternalToolAction(s.cfg.InternalToolAction)

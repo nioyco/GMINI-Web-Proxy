@@ -317,7 +317,7 @@ func toolSpecificRules(hasWriteFile, hasSearchWeb bool, cmdToolName string) stri
 	if len(extra) == 0 {
 		return ""
 	}
-	return strings.Join(extra, "\n") + "\n"
+	return "\n" + strings.Join(extra, "\n") + "\n"
 }
 
 func commandToolNameFromDefs(defs []toolDef) string {

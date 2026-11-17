@@ -157,6 +157,7 @@ async function load(){
     ["Relance erreur interne",badge(s.canned_error_retry==="once"?"warn":"none",esc(s.canned_error_retry||"off"))+(s.canned_error_retry==="once"?` <span class="sub">max ${s.canned_error_retry_sec||25} s</span>`:"")+`<div class="sub">off = pas de relance (défaut) · once = 1 relance bornée</div>`],
     ["Arrêts anticipés",(s.counters?.early_stop?badge("warn",String(s.counters.early_stop)):badge("none","0"))+`<div class="sub">marqueur : ${s.counters?.early_stop_marker||0} · taille : ${s.counters?.early_stop_size||0} · durée : ${s.counters?.early_stop_duration||0}</div>`],
     ["Appels non convertis",(s.counters?.tool_call_unconverted?badge("bad",String(s.counters.tool_call_unconverted)):badge("none","0"))+`<div class="sub">filet de sécurité (blocs tool_call restants)</div>`],
+    ["Raccourci code_reference",badge(s.code_ref_fastpath?"info":"none",s.code_ref_fastpath?"on":"off")+" "+(s.counters?.code_ref_fastpath?badge("warn",String(s.counters.code_ref_fastpath)):badge("none","0"))+`<div class="sub">GEMINI_CODE_REF_FASTPATH (0 = attente normale)</div>`],
     ["Réponses vides Google",(s.counters?.upstream_empty_reply?badge("bad",String(s.counters.upstream_empty_reply)):badge("none","0"))+`<div class="sub">flux clos sans candidat, texte ni pensée</div>`]
   ];
   $("tiles").innerHTML=t.map(([k,v])=>`<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
