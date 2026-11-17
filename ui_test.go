@@ -245,4 +245,14 @@ func TestUISessionDegradedExposedAndCleared(t *testing.T) {
 	if !strings.Contains(wHTML.Body.String(), "Prochain essai autorisé dans ") || !strings.Contains(wHTML.Body.String(), "b.disabled=true") {
 		t.Error("ui.html missing refresh cooldown timer / disabled button logic")
 	}
+	for _, want := range []string{
+		"Actualisation auto :",
+		"activée jusqu'à l'arrêt du proxy — toutes les ",
+		"fait piloter Chrome sur Gemini sans demande de votre part",
+		"Actualiser le cookie maintenant",
+	} {
+		if !strings.Contains(wHTML.Body.String(), want) {
+			t.Errorf("ui.html missing K16 A2 text %q", want)
+		}
+	}
 }
