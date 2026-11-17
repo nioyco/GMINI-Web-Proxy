@@ -94,4 +94,24 @@ func TestScanToolCallsMarkersAndBatching(t *testing.T) {
 			t.Fatalf("false positive on open second bare JSON write_file: %+v", res)
 		}
 	})
+
+	t.Run("exotic opening fence before tool_calls counts all calls", func(t *testing.T) {
+		txt := "\n\n```bash?code_reference&code_event_index=1\ngit rev-parse HEAD\n```\n\n" +
+			"```tool_call\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"1.go\"}}\n```\n" +
+			"```tool_call\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"2.go\"}}\n```\n" +
+			"```tool_call\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"3.go\"}}\n```\n" +
+			"```tool_call\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"4.go\"}}\n```\n"
+		res := ScanToolCalls(txt, declared)
+		if res.CompleteCalls != 4 {
+			t.Fatalf("CompleteCalls=%d, want 4 (%+v)", res.CompleteCalls, res)
+		}
+	})
+
+	t.Run("unclosed exotic fence at end keeps earlier call", func(t *testing.T) {
+		txt := "```tool_call\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"1.go\"}}\n```\n```foo?a=1&b=2\npartial"
+		res := ScanToolCalls(txt, declared)
+		if res.CompleteCalls != 1 {
+			t.Fatalf("CompleteCalls=%d, want 1", res.CompleteCalls)
+		}
+	})
 }

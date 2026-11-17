@@ -163,3 +163,74 @@ func TestAudit13FenceInsideArgumentsFixed(t *testing.T) {
 		t.Fatalf("calls=%+v rep=%+v", calls, rep)
 	}
 }
+
+// K15 Q1: arbitrary opening fence tags (?, &, =, spaces, :, 4+ backticks) before,
+// between, or unclosed after tool_call blocks must never shift fence pairing.
+func TestK15_Q1_ExoticFenceTags(t *testing.T) {
+	decl := []DeclaredTool{
+		{Name: "run_command", Props: map[string]bool{"CommandLine": true}},
+		{Name: "read_file", Props: map[string]bool{"Path": true}},
+	}
+
+	t.Run("code_reference_shape_four_calls", func(t *testing.T) {
+		reply := "\n\n```bash?code_reference&code_event_index=1\ngit -C /tmp/repo rev-parse --short HEAD\n```\n\n" +
+			"```tool_call\n{\"name\": \"run_command\", \"arguments\": {\"CommandLine\": \"git status\"}}\n```\n" +
+			"```tool_call\n{\"name\": \"read_file\", \"arguments\": {\"Path\": \"a.go\"}}\n```\n" +
+			"```tool_call\n{\"name\": \"read_file\", \"arguments\": {\"Path\": \"b.go\"}}\n```\n" +
+			"```tool_call\n{\"name\": \"read_file\", \"arguments\": {\"Path\": \"c.go\"}}\n```\n"
+		_, calls, rep := ParseToolCallsWith(reply, decl)
+		if len(calls) != 4 || len(rep.Unparsed) != 0 {
+			t.Fatalf("calls=%d unparsed=%+v, want 4/0", len(calls), rep.Unparsed)
+		}
+		if calls[0].Function.Name != "run_command" || calls[1].Function.Name != "read_file" || calls[3].Function.Name != "read_file" {
+			t.Fatalf("unexpected call names: %+v", calls)
+		}
+	})
+
+	t.Run("exotic_tag_between_two_calls", func(t *testing.T) {
+		SetDropTextAfterToolCall(false)
+		defer SetDropTextAfterToolCall(true)
+		reply := "```tool_call\n{\"name\": \"run_command\", \"arguments\": {\"CommandLine\": \"ls\"}}\n```\n" +
+			"```custom:lang?a=1&b=2 with spaces\nsome output\n```\n" +
+			"```tool_call\n{\"name\": \"read_file\", \"arguments\": {\"Path\": \"x.go\"}}\n```\n"
+		text, calls, _ := ParseToolCallsWith(reply, decl)
+		if len(calls) != 2 {
+			t.Fatalf("calls=%d, want 2 (text=%q)", len(calls), text)
+		}
+		if !strings.Contains(text, "custom:lang?a=1&b=2 with spaces") {
+			t.Errorf("exotic block between calls was lost: %q", text)
+		}
+	})
+
+	t.Run("unclosed_exotic_block_at_end", func(t *testing.T) {
+		reply := "```tool_call\n{\"name\": \"read_file\", \"arguments\": {\"Path\": \"a.go\"}}\n```\n" +
+			"```log?tail=1&mode=raw:live\nunclosed trailing content"
+		_, calls, _ := ParseToolCallsWith(reply, decl)
+		if len(calls) != 1 {
+			t.Fatalf("calls=%d, want 1", len(calls))
+		}
+		alone := "```log?tail=1&mode=raw:live\nunclosed trailing content"
+		text, calls2, _ := ParseToolCallsWith(alone, decl)
+		if len(calls2) != 0 || text != alone {
+			t.Fatalf("alone: calls=%d text=%q", len(calls2), text)
+		}
+	})
+
+	t.Run("four_backticks_with_inner_triple_before_call", func(t *testing.T) {
+		reply := "````bash?x=1&y=2\n```inner\ncode\n```\n````\n" +
+			"```tool_call\n{\"name\": \"read_file\", \"arguments\": {\"Path\": \"a.go\"}}\n```"
+		text, calls, _ := ParseToolCallsWith(reply, decl)
+		if len(calls) != 1 || !strings.Contains(text, "```inner") {
+			t.Fatalf("calls=%d text=%q", len(calls), text)
+		}
+	})
+
+	t.Run("inline_triple_backticks_before_call", func(t *testing.T) {
+		reply := "Utilisez (` ```tool_call ... ``` `) pour appeler.\n" +
+			"```tool_call\n{\"name\": \"read_file\", \"arguments\": {\"Path\": \"a.go\"}}\n```"
+		text, calls, _ := ParseToolCallsWith(reply, decl)
+		if len(calls) != 1 || !strings.Contains(text, "Utilisez") {
+			t.Fatalf("calls=%d text=%q", len(calls), text)
+		}
+	})
+}

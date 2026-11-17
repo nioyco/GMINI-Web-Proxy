@@ -13,11 +13,12 @@ import "strings"
 
 // ProgressGate is fed the reply deltas in order. The zero value is ready to use.
 type ProgressGate struct {
-	acc    string
-	sent   int  // bytes of acc already released
-	scan   int  // where the fence scan resumes
-	inCode bool // inside an ordinary code block
-	closed bool // a possible tool call was met: nothing more is released
+	acc       string
+	sent      int  // bytes of acc already released
+	scan      int  // where the fence scan resumes
+	inCode    bool // inside an ordinary code block
+	inCodeLen int  // backtick count of the open code block
+	closed    bool // a possible tool call was met: nothing more is released
 }
 
 // mayHoldToolCall reports whether a fence with this tag can carry a tool call.
@@ -53,24 +54,43 @@ func (g *ProgressGate) Push(delta string) string {
 			break
 		}
 		i += g.scan
+		fenceLen := 3
+		for i+fenceLen < len(g.acc) && g.acc[i+fenceLen] == '`' {
+			fenceLen++
+		}
 		if g.inCode {
+			if i+fenceLen == len(g.acc) && fenceLen < g.inCodeLen {
+				safe, g.scan = i, i
+				break
+			}
+			if fenceLen < g.inCodeLen {
+				g.scan = i + fenceLen
+				continue
+			}
 			g.inCode = false
-			g.scan = i + 3
+			g.inCodeLen = 0
+			g.scan = i + fenceLen
 			continue
 		}
-		nl := strings.IndexByte(g.acc[i+3:], '\n')
+		nl := strings.IndexByte(g.acc[i+fenceLen:], '\n')
 		if nl < 0 {
 			safe, g.scan = i, i // tag line incomplete: hold from the fence
 			break
 		}
-		tag := strings.ToLower(strings.TrimSpace(g.acc[i+3 : i+3+nl]))
+		rawTag := strings.TrimSuffix(g.acc[i+fenceLen:i+fenceLen+nl], "\r")
+		if end, ok := inlineFenceEnd(rawTag); ok {
+			g.scan = i + fenceLen + end
+			continue
+		}
+		tag := strings.ToLower(strings.TrimSpace(rawTag))
 		if mayHoldToolCall(tag) {
 			g.closed = true
 			safe = i
 			break
 		}
 		g.inCode = true
-		g.scan = i + 3 + nl + 1
+		g.inCodeLen = fenceLen
+		g.scan = i + fenceLen + nl + 1
 	}
 	if safe <= g.sent {
 		return ""

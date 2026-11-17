@@ -26,6 +26,9 @@ func TestProgressGate(t *testing.T) {
 		{"bare JSON is held", "{\"name\":\"x\",\"arguments\":{}}", ""},
 		{"ordinary code flows", "Code :\n```go\nfmt.Println(1)\n```\nFin.", "Code :\n```go\nfmt.Println(1)\n```\nFin."},
 		{"tool call after code", "```bash\nls\n```\n```tool_call\n{\"name\":\"x\"}\n```", "```bash\nls\n```\n"},
+		{"exotic non-tool tag flows", "```foo?a=1&b=2:bar baz\necho 1\n```\n```tool_call\n{\"name\":\"x\"}\n```", "```foo?a=1&b=2:bar baz\necho 1\n```\n"},
+		{"four-backtick block flows", "````bash?x=1\n```inner```\n````\n```tool_call\n{\"name\":\"x\"}\n```", "````bash?x=1\n```inner```\n````\n"},
+		{"inline triple backticks flow", "Utilisez (` ```tool_call ... ``` `) ici.\n```tool_call\n{\"name\":\"x\"}\n```", "Utilisez (` ```tool_call ... ``` `) ici.\n"},
 		{"inline backticks flow", "Utilisez `ls` puis ``x``.", "Utilisez `ls` puis ``x``."},
 	}
 	for _, c := range cases {
