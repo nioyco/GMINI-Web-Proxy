@@ -60,52 +60,89 @@ var hexIDRe = regexp.MustCompile(`(?:^|[^0-9A-Za-z_])([0-9a-f]{16})(?:[^0-9A-Za-
 type idScan struct {
 	seen                 map[string]struct{}
 	servedID, servedName string
+	errorMarker          bool
 }
 
-// Positions of the model id and model name in the response body.
+// Positions of the error marker, model id, and model name in the response body.
 const (
-	servedIDIndex   = 39
-	servedNameIndex = 42
+	errorMarkerIndex = 31
+	servedIDIndex    = 39
+	servedNameIndex  = 42
 )
 
-// servedFromLine reads the model id and name Google states in a response line.
-func servedFromLine(line string) (id, name string) {
+// frameMetaFromLine reads the model id, name, and inner[31] error flag Google
+// states in a response line.
+func frameMetaFromLine(line string) (id, name string, errorMarker bool) {
 	if !strings.Contains(line, `"wrb.fr"`) {
-		return "", ""
+		return "", "", false
 	}
 	var arr []any
 	if json.Unmarshal([]byte(line), &arr) != nil {
-		return "", ""
+		return "", "", false
 	}
 	first, ok := indexSlice(arr, 0)
 	if !ok {
-		return "", ""
+		return "", "", false
 	}
 	innerStr, ok := indexString(first, 2)
 	if !ok {
-		return "", ""
+		return "", "", false
 	}
 	var body []any
 	if json.Unmarshal([]byte(innerStr), &body) != nil {
-		return "", ""
+		return "", "", false
 	}
 	id, _ = indexAny(body, servedIDIndex).(string)
 	name, _ = indexAny(body, servedNameIndex).(string)
+	if b, ok := indexAny(body, errorMarkerIndex).(bool); ok && b {
+		errorMarker = true
+	}
 	if !hexIDOnlyRe.MatchString(id) {
 		id = ""
 	}
 	if len(name) > 60 {
 		name = ""
 	}
-	return id, name
+	return id, name, errorMarker
 }
 
 var hexIDOnlyRe = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
+var (
+	cannedWidgetRe = regexp.MustCompile(`^(\s*<GenerateWidget\b[^>]*/>\s*)+$`)
+	cannedGlitchRe = regexp.MustCompile(`(?i)can['’]t use workspace because|turn on these settings to continue`)
+	cannedErrorRe  = regexp.MustCompile(`(?i)^(?:i\s+seem\s+to\s+be\s+encountering\s+an\s+error|i\s+encountered\s+an\s+error(?:\s+doing\s+what\s+you\s+asked)?|i['’]?m\s+(?:sorry,?\s+)?(?:having\s+trouble|encountering\s+an?\s+error)|i['’]?m\s+having\s+a\s+hard\s+time\s+(?:fulfilling|completing|processing)\s+(?:your|that|this)\s+request|(?:sorry,?\s+)?something\s+went\s+wrong|an\s+error\s+occurred)\b(?:\s*[.,!]\s*(?:can\s+i\s+try\s+something\s+else\s+for\s+you|can\s+i\s+help\s+you\s+with\s+something\s+else(?:\s+instead)?|could\s+you\s+try\s+again(?:\s+later|\s+in\s+a\s+moment)?|please\s+try\s+(?:your\s+request\s+)?again(?:\s+later|\s+in\s+a\s+moment)?|try\s+something\s+else))?[.!?]?$|^(?:je\s+ne\s+suis\s+qu['’]une\s+ia\s+basée\s+sur\s+du\s+texte\.?\s*je\s+ne\s+peux\s+pas\s+vous\s+aider\s+à\s+ce\s+sujet\.?|ce\s+que\s+vous\s+demandez\s+va\s+au-delà\s+de\s+ce\s+que\s+permet\s+ma\s+programmation\.?\s*je\s+génère\s+juste\s+du\s+texte\.?)$`)
+)
+
+// IsCannedErrorReply reports whether text is a short canned upstream error:
+// primarily when Google flagged the response with inner[31]=true on a short,
+// non-fenced, non-widget/workspace reply, with known EN/FR canned phrases as
+// fallback when frame metadata is unavailable.
+func IsCannedErrorReply(text string, hasErrorMarker bool) bool {
+	t := strings.TrimSpace(text)
+	if t == "" || len(t) > 250 {
+		return false
+	}
+	if strings.Contains(t, "```") {
+		return false
+	}
+	if cannedWidgetRe.MatchString(t) || cannedGlitchRe.MatchString(t) {
+		return false
+	}
+	if hasErrorMarker {
+		return true
+	}
+	return cannedErrorRe.MatchString(t)
+}
+
 func (s *idScan) add(line string) {
-	if s.servedID == "" {
-		if id, name := servedFromLine(line); id != "" {
+	if s.servedID == "" || !s.errorMarker {
+		id, name, errMarker := frameMetaFromLine(line)
+		if s.servedID == "" && id != "" {
 			s.servedID, s.servedName = id, name
+		}
+		if errMarker {
+			s.errorMarker = true
 		}
 	}
 	if len(s.seen) >= 64 {

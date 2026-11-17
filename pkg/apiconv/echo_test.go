@@ -143,6 +143,9 @@ func TestN1_IsUpstreamCannedError(t *testing.T) {
 		"I'm having a hard time fulfilling your request. Can I help you with something else instead?",
 		"I encountered an error doing what you asked. Could you try again?",
 		"Sorry, something went wrong. Please try your request again.",
+		"Je ne suis qu'une IA basée sur du texte. Je ne peux pas vous aider à ce sujet.",
+		"Je ne suis qu’une IA basée sur du texte. Je ne peux pas vous aider à ce sujet.",
+		"Ce que vous demandez va au-delà de ce que permet ma programmation. Je génère juste du texte.",
 	}
 	for _, s := range yes {
 		if !IsUpstreamCannedError(s) {
@@ -154,6 +157,7 @@ func TestN1_IsUpstreamCannedError(t *testing.T) {
 	}
 	no := []string{
 		"",
+		"OK.",
 		"I encountered an error doing what you asked because the file was locked, here is the fix.",
 		"Sorry, something went wrong in test_foo.go line 42: unexpected EOF.",
 		"I'm having a hard time fulfilling your request because the directory is missing.",
@@ -164,5 +168,20 @@ func TestN1_IsUpstreamCannedError(t *testing.T) {
 		if IsUpstreamCannedError(s) {
 			t.Errorf("IsUpstreamCannedError(%q) = true, want false", s)
 		}
+	}
+
+	// K15 Q4: inner[31]=true catches short non-fenced canned errors regardless of wording,
+	// while never flagging long replies, fenced replies, or widgets.
+	if !IsUpstreamCannedErrorWithMarker("Erreur générique inconnue.", true) {
+		t.Errorf("short reply with errorMarker=true must match")
+	}
+	if IsUpstreamCannedErrorWithMarker(strings.Repeat("a", 260), true) {
+		t.Errorf("long reply (>250 bytes) with errorMarker=true must not match")
+	}
+	if IsUpstreamCannedErrorWithMarker("```markdown\nhello\n```", true) {
+		t.Errorf("fenced reply with errorMarker=true must not match")
+	}
+	if IsUpstreamCannedErrorWithMarker(`<GenerateWidget component_placeholder_id="x" type="artifact"/>`, true) {
+		t.Errorf("widget glitch with errorMarker=true must stay glitch, not canned error")
 	}
 }

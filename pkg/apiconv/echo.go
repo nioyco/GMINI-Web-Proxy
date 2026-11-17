@@ -3,6 +3,8 @@ package apiconv
 import (
 	"regexp"
 	"strings"
+
+	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
 )
 
 // History-echo filter.
@@ -277,17 +279,15 @@ func IsInternalToolStatus(status string) bool {
 	return internalToolStatusRe.MatchString(status)
 }
 
-var cannedErrorRe = regexp.MustCompile(`(?i)^(?:i\s+seem\s+to\s+be\s+encountering\s+an\s+error|i\s+encountered\s+an\s+error(?:\s+doing\s+what\s+you\s+asked)?|i['’]?m\s+(?:sorry,?\s+)?(?:having\s+trouble|encountering\s+an?\s+error)|i['’]?m\s+having\s+a\s+hard\s+time\s+(?:fulfilling|completing|processing)\s+(?:your|that|this)\s+request|(?:sorry,?\s+)?something\s+went\s+wrong|an\s+error\s+occurred)\b(?:\s*[.,!]\s*(?:can\s+i\s+try\s+something\s+else\s+for\s+you|can\s+i\s+help\s+you\s+with\s+something\s+else(?:\s+instead)?|could\s+you\s+try\s+again(?:\s+later|\s+in\s+a\s+moment)?|please\s+try\s+(?:your\s+request\s+)?again(?:\s+later|\s+in\s+a\s+moment)?|try\s+something\s+else))?[.!?]?$`)
-
 // IsUpstreamCannedError reports whether Gemini returned a short canned
 // internal-error non-answer (B6/N1, e.g. "I seem to be encountering an error. Can I try something else for you?").
 func IsUpstreamCannedError(text string) bool {
-	t := strings.TrimSpace(text)
-	if t == "" || len(t) > 250 {
-		return false
-	}
-	if strings.Contains(t, "```") {
-		return false
-	}
-	return cannedErrorRe.MatchString(t)
+	return gemini.IsCannedErrorReply(text, false)
+}
+
+// IsUpstreamCannedErrorWithMarker reports whether Gemini returned a short canned
+// error, using Google's inner[31]=true error marker as the primary criterion and
+// known EN/FR canned phrases as fallback.
+func IsUpstreamCannedErrorWithMarker(text string, hasErrorMarker bool) bool {
+	return gemini.IsCannedErrorReply(text, hasErrorMarker)
 }

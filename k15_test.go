@@ -243,3 +243,40 @@ func TestK15_Q3_SafetyNetLogsStatusAndUI(t *testing.T) {
 		t.Errorf("UI page missing tool_call_unconverted tile")
 	}
 }
+
+func fakeStreamWithErrorMarker(text, servedID, servedName string, errMarker bool) string {
+	body := make([]any, 43)
+	body[4] = []any{[]any{"rc_k15", []any{text}}}
+	if errMarker {
+		body[31] = true
+	}
+	body[39], body[42] = servedID, servedName
+	ib, _ := json.Marshal(body)
+	line, _ := json.Marshal([]any{[]any{"wrb.fr", nil, string(ib)}})
+	return string(line) + "\n"
+}
+
+// K15 Q4: inner[31]=true drives IsUpstreamCannedErrorWithMarker even for an
+// arbitrary short phrasing or the French canned-error sentence.
+func TestK15_Q4_ErrorMarkerDrivesCannedErrorDetection(t *testing.T) {
+	_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+		body := fakeStreamWithErrorMarker("Réponse générique inédite.", "e6fa609c3fa255c0", "3.1 Pro", true)
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+	}))
+	cfg := testConfig()
+	cfg.StreamToolsProgress = true
+	cfg.StreamThoughts = true
+	cfg.SSEKeepaliveSec = 1
+	cfg.CannedErrorRetry = "off"
+	s := newServer(cfg, client, testLogger())
+	s.keepaliveOverride = 50 * time.Millisecond
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	c := readSSE(t, context.Background(), ts.URL, k9ChatToolsBody)
+	assertProgressStream(t, c)
+	joined := strings.Join(c.dataFrames, "\n")
+	if !strings.Contains(joined, "Gemini a renvoyé une erreur interne") {
+		t.Errorf("expected canned error wrapper from inner[31]=true, got %s", joined)
+	}
+}

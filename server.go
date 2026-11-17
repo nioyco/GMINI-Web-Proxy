@@ -562,7 +562,7 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 	}
 
 	if res.earlyStopReason == "" {
-		isCannedErr := !res.released && apiconv.IsUpstreamCannedError(res.rawText)
+		isCannedErr := !res.released && apiconv.IsUpstreamCannedErrorWithMarker(res.rawText, res.errorMarker)
 		isGlitch := !res.released && !isCannedErr && apiconv.IsUpstreamGlitch(res.rawText)
 		isToolRefusal := !res.released && !isCannedErr && len(declared) > 0 && apiconv.IsUpstreamToolRefusal(res.rawText)
 		if isCannedErr {
@@ -607,7 +607,7 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, rres.earlyStopMsg, nil)), sse.done())
 					return
 				}
-				if rres.cannedRetryTimedOut || (rres.earlyStopReason == "" && (rres.genErr != nil || rres.rawText == "" || (!rres.released && apiconv.IsUpstreamCannedError(rres.rawText)))) {
+				if rres.cannedRetryTimedOut || (rres.earlyStopReason == "" && (rres.genErr != nil || rres.rawText == "" || (!rres.released && apiconv.IsUpstreamCannedErrorWithMarker(rres.rawText, rres.errorMarker)))) {
 					s.recordModelFailure(model)
 					s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(rres.rawText), "timed_out", rres.cannedRetryTimedOut, "action", "reported")
 					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
@@ -787,6 +787,7 @@ type streamToolsResult struct {
 	released            bool
 	early               string
 	warnEmitted         bool
+	errorMarker         bool
 	aborted             bool // SSE write failed or client cancelled
 	created             int64
 	transmittedBytes    int
@@ -812,6 +813,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		limitBanner  string
 		servedID     string
 		servedName   string
+		errorMarker  bool
 	}
 	events := make(chan event, 256)
 	done := make(chan error, 1)
@@ -832,6 +834,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		Identity: func(servedID, servedName string) {
 			push(event{servedID: servedID, servedName: servedName})
 		},
+		ErrorMarker: func() { push(event{errorMarker: true}) },
 		Progress: func(textBytes, thoughtBytes int) {
 			if ri != nil {
 				ri.setProgress(thoughtBytes, textBytes)
@@ -1001,6 +1004,10 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			if !onInternalTool("artifact/skills") {
 				return false
 			}
+		}
+		if e.errorMarker {
+			res.errorMarker = true
+			return true
 		}
 		if e.servedID != "" {
 			verdict := "confirmed"

@@ -867,6 +867,7 @@ type StreamHandlers struct {
 	InternalTool func(name string)                 // internal Google tool detected in body[11]/body[24][0] (B1)
 	LimitBanner  func(msg string)                  // explicit Google quota/limit banner from body[52] (B1)
 	Identity     func(servedID, servedName string) // reported as soon as position 39 is read
+	ErrorMarker  func()                            // reported when inner[31]=true is read
 	Opened       func()                            // upstream HTTP 200 stream opened (N4)
 	Heartbeat    func()                            // Google wait heartbeat frame [{"37":[n]}] received (N4)
 	Progress     func(textBytes, thoughtBytes int) // incremental bytes received and heartbeat
@@ -994,7 +995,7 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 	// batchexecute lines routinely exceed that.
 	reader := bufio.NewReader(resp.Body)
 	emitted, thoughtEmitted := false, false
-	identEmitted := false
+	identEmitted, errMarkerEmitted := false, false
 	for {
 		if ctx.Err() != nil {
 			if cerr, ok := earlyCause(); ok {
@@ -1013,6 +1014,12 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 				identEmitted = true
 				if h.Identity != nil {
 					h.Identity(scan.servedID, scan.servedName)
+				}
+			}
+			if scan.errorMarker && !errMarkerEmitted {
+				errMarkerEmitted = true
+				if h.ErrorMarker != nil {
+					h.ErrorMarker()
 				}
 			}
 			if c.cfg.TraceRaw && c.cfg.TraceDir != "" && rawBytes < traceRawMax {
