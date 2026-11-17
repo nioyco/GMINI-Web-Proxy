@@ -263,24 +263,23 @@ func (r *cookieAutoRefresher) Tick() {
 }
 
 // PrepareRequest records request activity and, if auto-refresh was explicitly
-// enabled via the UI toggle, the proxy was idle, and the token is older than
-// the configured interval, runs a synchronous refresh (capped at 45 s).
+// enabled via the UI toggle and the token is older than the configured interval,
+// runs a synchronous refresh (capped at 45 s) even when inactivity was shorter
+// than activityWindow (10–90 min blind spot when Tick() is quiet-gated; K18 T3).
 func (r *cookieAutoRefresher) PrepareRequest(ctx context.Context, onWait func()) {
 	r.client.RecordUserActivity()
 	r.mu.Lock()
 	now := r.nowFn().Round(0)
-	wasIdle := r.lastActivityAt.IsZero() || now.Sub(r.lastActivityAt.Round(0)) > r.activityWindow
+	_ = r.lastActivityAt.IsZero() || now.Sub(r.lastActivityAt.Round(0)) > r.activityWindow
 	r.lastActivityAt = now
-	if !wasIdle || !r.enabled {
+	if !r.enabled || !r.tokenDueLocked(now) {
 		r.mu.Unlock()
 		return
 	}
 	var waitCh chan struct{}
 	if r.running {
-		if r.tokenDueLocked(now) {
-			waitCh = r.runDone
-		}
-	} else if r.tokenDueLocked(now) {
+		waitCh = r.runDone
+	} else {
 		if ok, _ := r.canLaunchLocked(now); ok && r.client.AcquireBackground(gemini.FamilyApp, "cookie_auto_refresh_on_demand") {
 			waitCh = r.startRunLocked(now, "on_demand")
 		}

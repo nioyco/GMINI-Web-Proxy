@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -184,5 +186,47 @@ func TestK18_T2_WaitNoteFrom2sAndFormat(t *testing.T) {
 	}
 	if !strings.Contains(reasoning, "GMINI (pas le modèle — attente technique) :") {
 		t.Fatalf("expected technical wait attribution, got %q", reasoning)
+	}
+}
+
+// K18 T3: PrepareRequest launches on_demand refresh when enabled and tokenDueLocked(now)
+// is true even if inactivity was 10–90 min (< activityWindow), where Tick() is blocked by quiet gate.
+func TestK18_T3_PrepareRequestBlindSpot10To90Min(t *testing.T) {
+	c, cookieFile, _ := newCookieTestClient(t, "SAPISID=s1; __Secure-1PSIDTS=t1", 70*time.Minute)
+	now := time.Now().Round(0)
+	realNow := time.Now()
+	if err := os.Chtimes(cookieFile, realNow.Add(-70*time.Minute), realNow.Add(-70*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(t.TempDir(), "ran_ondemand")
+	script := writeFakeScript(t, "touch "+marker)
+	ar := newCookieAutoRefresher(&Config{CookieAutoRefreshMin: 90, CookieRefreshCmd: script}, c, testLogger())
+	ar.nowFn = func() time.Time { return now }
+	ar.startedAt = now.Add(-70 * time.Minute)
+	on := true
+	ar.Toggle(&on)
+
+	// t = 0: user activity (token age 70m < 90m -> no refresh).
+	ar.PrepareRequest(context.Background(), nil)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("expected 0 refreshes at t=0 (age 70m < 90m)")
+	}
+
+	// t = +25 min: user paused 25 min (10 min < 25 min < 90 min activityWindow),
+	// and token is now 95 min old (>= 90 min).
+	// PrepareRequest must refresh on_demand even though wasIdle is false!
+	now = now.Add(25 * time.Minute)
+	if err := os.Chtimes(cookieFile, realNow.Add(-95*time.Minute), realNow.Add(-95*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	waited := false
+	ar.PrepareRequest(context.Background(), func() { waited = true })
+	if !waited {
+		t.Fatal("expected on_demand refresh in 10-90 min window")
+	}
+	waitForCondition(t, 2*time.Second, func() bool { return !ar.Status().Running })
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected refresh script to have run: %v", err)
 	}
 }
