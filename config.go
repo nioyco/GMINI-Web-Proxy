@@ -149,6 +149,9 @@ type Config struct {
 	// default "<cookie file>.state.json", "off" to disable; always off for an
 	// inline cookie) and its reuse threshold (GEMINI_STATE_MAX_AGE_MIN, default 1440 = 24h).
 	StateMaxAgeMin int
+	// FlightsFile persists the recent in-flight/past requests history (JSON, 0600).
+	// Derived from StateFile by default ("<cookie>.flights.json"); "off" disables it.
+	FlightsFile    string
 	EnvFilePath    string
 	ConfigLoadedAt time.Time
 	EnvFileModTime time.Time
@@ -254,6 +257,8 @@ func loadConfig(envFile string) *Config {
 	cfg.Gemini.StateMaxAge = time.Duration(cfg.StateMaxAgeMin) * time.Minute
 	cfg.Gemini.StateFile = stateFilePath(getEnv("GEMINI_STATE_FILE", ""), cfg.Gemini.CookieFile, cfg.Gemini.Cookie)
 	cfg.Gemini.CallsFile = callsFilePath(getEnv("GEMINI_CALLS_FILE", ""), cfg.Gemini.StateFile)
+	cfg.Gemini.TokensFile = tokensFilePath(getEnv("GEMINI_TOKENS_FILE", ""), cfg.Gemini.StateFile)
+	cfg.FlightsFile = flightsFilePath(getEnv("GEMINI_FLIGHTS_FILE", ""), cfg.Gemini.StateFile)
 
 	// GEMINI_BL: empty or "auto" → auto-resolve from the Gemini page (with the
 	// baked-in default as fallback); an explicit value disables auto-resolution.
@@ -564,13 +569,25 @@ func splitKeys(s string) []string {
 // callsFilePath returns the journal of generations: the explicit value ("off"
 // disables it), else a file beside the state file, else none.
 func callsFilePath(explicit, stateFile string) string {
+	return derivedStateSidecarPath(explicit, stateFile, ".calls.jsonl")
+}
+
+func tokensFilePath(explicit, stateFile string) string {
+	return derivedStateSidecarPath(explicit, stateFile, ".tokens.jsonl")
+}
+
+func flightsFilePath(explicit, stateFile string) string {
+	return derivedStateSidecarPath(explicit, stateFile, ".flights.json")
+}
+
+func derivedStateSidecarPath(explicit, stateFile, suffix string) string {
 	switch v := strings.TrimSpace(explicit); {
 	case strings.EqualFold(v, "off"):
 		return ""
 	case v != "":
 		return v
 	case stateFile != "":
-		return strings.TrimSuffix(stateFile, ".state.json") + ".calls.jsonl"
+		return strings.TrimSuffix(stateFile, ".state.json") + suffix
 	}
 	return ""
 }

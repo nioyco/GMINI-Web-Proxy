@@ -39,8 +39,14 @@ type CallRecord struct {
 	FirstThoughtMS int64  `json:"first_thought_ms"` // -1: unknown / none
 	Frames         int    `json:"frames"`
 	PromptBytes    int    `json:"prompt_bytes"`
+	ImageCount     int    `json:"image_count,omitempty"`
 	TextBytes      int    `json:"text_bytes"`
 	ThoughtBytes   int    `json:"thought_bytes"`
+	GoogleModel    string `json:"google_model,omitempty"`
+	InputTokens    int    `json:"input_tokens,omitempty"`
+	ThoughtTokens  int    `json:"thought_tokens,omitempty"`
+	TextTokens     int    `json:"text_tokens,omitempty"`
+	TotalTokens    int    `json:"total_tokens,omitempty"`
 	// ServedID / ServedName: the model Google names in the reply itself (response
 	// body positions 39 and 42, located in real traces on 2026-11-14).
 	ServedID     string   `json:"served_id,omitempty"`
@@ -186,9 +192,9 @@ func (s *idScan) classify(requested string, catalogue map[string]struct{}) (seen
 }
 
 const (
-	callLogKeep     = 500  // records kept in memory and served to the page
-	callFileMax     = 2000 // lines before the journal file is compacted
-	callFileCompact = 1000
+	callLogKeep     = 1000 // records kept in memory and served to the page
+	callFileMax     = 3000 // lines before the journal file is compacted
+	callFileCompact = 1500
 )
 
 // ModelIdentityStatus tracks the latest identity verdict for one model and
@@ -231,6 +237,7 @@ func (c *Client) loadCalls() {
 	for sc.Scan() {
 		var r CallRecord
 		if json.Unmarshal(sc.Bytes(), &r) == nil && r.Model != "" {
+			PopulateCallTokens(&r, nil)
 			c.calls.recs = append(c.calls.recs, r)
 			c.calls.lines++
 			t, _ := time.Parse(time.RFC3339, r.Time)
@@ -245,12 +252,43 @@ func (c *Client) loadCalls() {
 	}
 }
 
+func (c *Client) catalogNamesByID() map[string]string {
+	byID := map[string]string{}
+	for _, m := range c.ListModels() {
+		if m.ModelID == "" {
+			continue
+		}
+		label := m.Description
+		if label == "" {
+			label = m.DisplayName
+		}
+		if label != "" {
+			byID[m.ModelID] = label
+		}
+	}
+	for _, w := range c.WithdrawnModels() {
+		if w.Model.ModelID == "" || byID[w.Model.ModelID] != "" {
+			continue
+		}
+		label := w.Model.Description
+		if label == "" {
+			label = w.Model.DisplayName
+		}
+		if label != "" {
+			byID[w.Model.ModelID] = label
+		}
+	}
+	return byID
+}
+
 // RecentCalls returns the newest generations first (content-free).
 func (c *Client) RecentCalls() []CallRecord {
+	byID := c.catalogNamesByID()
 	c.calls.mu.Lock()
 	defer c.calls.mu.Unlock()
 	out := make([]CallRecord, len(c.calls.recs))
 	for i, r := range c.calls.recs {
+		PopulateCallTokens(&r, byID)
 		out[len(out)-1-i] = r
 	}
 	return out
@@ -313,12 +351,14 @@ func (c *Client) recordCall(r CallRecord, scan *idScan) {
 		r.Identity = "canned_error"
 	}
 
+	byID := c.catalogNamesByID()
 	c.calls.mu.Lock()
 	// The absence of thoughts only counts when Google did not name the model: a
 	// short answer of the right model can come without thoughts (seen 2026-11-14).
 	if r.Identity == "not_stated" && r.Error == "" && r.Stream && r.TextBytes > 0 && r.ThoughtBytes == 0 && c.calls.thinksUsually(r.Model) {
 		r.Suspect = "no_thoughts"
 	}
+	PopulateCallTokens(&r, byID)
 	c.calls.recs = append(c.calls.recs, r)
 	if len(c.calls.recs) > callLogKeep {
 		c.calls.recs = c.calls.recs[len(c.calls.recs)-callLogKeep:]
@@ -326,6 +366,7 @@ func (c *Client) recordCall(r CallRecord, scan *idScan) {
 	c.calls.updateModelIdentity(r, time.Now())
 	c.appendCallLocked(r)
 	c.calls.mu.Unlock()
+	c.recordTokenCall(r, byID)
 
 	// No catalogue check here any more: on 2026-11-15 that extra call returned a
 	// one-model catalogue while every model was still offered on the web page,
@@ -389,8 +430,11 @@ func (c *Client) appendCallLocked(r CallRecord) {
 
 func newCallRecord(met *CallMetrics, p GenParams, start time.Time) CallRecord {
 	r := CallRecord{Time: start.Format(time.RFC3339), Level: p.Level, Mode: p.Mode,
-		PromptBytes: len(p.Prompt), FirstTextMS: -1, FirstThoughtMS: -1,
-		DurationMS: time.Since(start).Milliseconds()}
+		PromptBytes: len(p.Prompt), ImageCount: len(p.Images),
+		InputTokens:    EstimateTokensForText(p.Prompt) + len(p.Images)*GeminiImageTokens,
+		FirstTextMS:    -1,
+		FirstThoughtMS: -1,
+		DurationMS:     time.Since(start).Milliseconds()}
 	if met != nil {
 		r.RequestID = met.ID
 	}

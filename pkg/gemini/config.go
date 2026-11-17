@@ -54,6 +54,9 @@ type Config struct {
 	// CallsFile is the content-free journal of generations (JSONL, 0600). Empty:
 	// the journal lives in memory only.
 	CallsFile string
+	// TokensFile is the append-only content-free token usage ledger for past
+	// requests (JSONL, 0600). Empty disables file persistence.
+	TokensFile string
 
 	// BlockMaxBackoff is the top step of the anti-bot backoff (AUDIT-13 A9). Zero
 	// keeps the built-in schedule (60 min at the top); the proxy sets it from

@@ -172,8 +172,9 @@ type Client struct {
 	stateMtime      time.Time
 	autoRefreshPref atomic.Int32 // -1 unset, 0 false, 1 true (K18 T4)
 
-	// Content-free journal of generations (served.go).
-	calls callJournal
+	// Content-free journal of generations (served.go) & token ledger (tokens.go).
+	calls  callJournal
+	tokens tokenLedger
 }
 
 // New builds a Client with an HTTP client honouring the configured timeout and
@@ -213,6 +214,7 @@ func New(cfg Config, logger *slog.Logger) (*Client, error) {
 	c.imageHTTP = c.newImageHTTPClient()
 	c.autoRefreshPref.Store(-1)
 	c.loadCalls()
+	c.loadTokens()
 	return c, nil
 }
 
@@ -803,6 +805,8 @@ func (c *Client) generateAttempts(ctx context.Context, p GenParams, images []upl
 						rec := newCallRecord(met, p, t0)
 						rec.Frames = shape.frames
 						rec.TextBytes, rec.ThoughtBytes = len(text), shape.thought
+						rec.TextTokens = EstimateTokensForText(text)
+						rec.ThoughtTokens = EstimateTokensForBytes(shape.thought)
 						rec.FirstTextMS, rec.FirstThoughtMS = shape.firstTextMS, shape.firstThoughtMS
 						scan.cannedError = IsCannedErrorReply(text, scan.errorMarker)
 						c.recordCall(rec, scan)
@@ -940,6 +944,7 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 		rec.Stream, rec.Frames = true, shape.frames
 		rec.FirstTextMS, rec.FirstThoughtMS = shape.firstTextMS, shape.firstThoughtMS
 		rec.TextBytes, rec.ThoughtBytes = len(prevText), len(prevThought)
+		rec.TextTokens, rec.ThoughtTokens = EstimateTokensForText(prevText), EstimateTokensForText(prevThought)
 		if runErr != nil {
 			if errors.Is(runErr, ErrEarlyStopAborted) {
 				rec.Error = "early_stop"

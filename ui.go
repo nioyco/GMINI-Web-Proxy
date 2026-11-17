@@ -152,7 +152,8 @@ func (s *Server) handleUIState(w http.ResponseWriter, r *http.Request) {
 	}
 	st := &bufWriter{h: http.Header{}}
 	s.handleStatus(st, r)
-	calls := filterCallsLastHours(s.client.RecentCalls(), recentCallsHistoryWindow, s.currentNow())
+	now := s.currentNow()
+	calls := filterCallsLastHours(s.client.RecentCalls(), recentCallsHistoryWindow, now)
 	models := s.uiModels()
 	sendJSON(w, http.StatusOK, map[string]any{
 		"status":            json.RawMessage(st.buf.Bytes()),
@@ -160,6 +161,7 @@ func (s *Server) handleUIState(w http.ResponseWriter, r *http.Request) {
 		"calls":             calls,
 		"in_flight":         s.inFlightRequests(),
 		"in_flight_history": s.flightHist.list(),
+		"token_usage":       s.client.TokenUsageSummary(now),
 		"antigravity":       s.uiAntigravity(models),
 		"apps":              listAntigravity(),
 		"listen":            s.cfg.Listen,

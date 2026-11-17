@@ -29,6 +29,8 @@ func main() {
 		cfg.Gemini.CookieFile = *cookieFile
 		cfg.Gemini.StateFile = stateFilePath(os.Getenv("GEMINI_STATE_FILE"), cfg.Gemini.CookieFile, cfg.Gemini.Cookie)
 		cfg.Gemini.CallsFile = callsFilePath(os.Getenv("GEMINI_CALLS_FILE"), cfg.Gemini.StateFile)
+		cfg.Gemini.TokensFile = tokensFilePath(os.Getenv("GEMINI_TOKENS_FILE"), cfg.Gemini.StateFile)
+		cfg.FlightsFile = flightsFilePath(os.Getenv("GEMINI_FLIGHTS_FILE"), cfg.Gemini.StateFile)
 	}
 	if *listenAddr != "" {
 		cfg.Listen = normalizeListen(*listenAddr)

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
 	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
@@ -162,7 +163,15 @@ func newServer(cfg *Config, client *gemini.Client, logger *slog.Logger) *Server 
 	apiconv.SetNoInternalCodeExecRule(cfg.NoInternalCodeExecRule)
 	apiconv.SetMarkerNeutralization(!cfg.DisableMarkerNeutralization)
 	apiconv.SetDropTextAfterToolCall(!cfg.KeepTextAfterToolCall)
-	srv := &Server{cfg: cfg, client: client, log: logger, generate: client.Generate, started: time.Now()}
+	srv := &Server{
+		cfg:        cfg,
+		client:     client,
+		log:        logger,
+		generate:   client.Generate,
+		started:    time.Now(),
+		flightHist: inFlightHistory{path: cfg.FlightsFile},
+	}
+	srv.flightHist.load()
 	srv.autoRefresh = newCookieAutoRefresher(cfg, client, logger)
 	if cfg.UIEnabled {
 		srv.uiToken = newUIToken()
@@ -343,6 +352,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	setReqMeta(r.Context(), m.Name, req.Stream)
 	setReqConvID(r.Context(), convFingerprintFromPrompt(prompt))
+	setReqInput(r.Context(), len(prompt), utf8.RuneCountInString(prompt), len(images))
 	s.client.RecordUserActivity()
 	cid := apiconv.ID("chatcmpl-", 12)
 	p := m.Params(prompt)
@@ -2210,6 +2220,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	setReqMeta(r.Context(), m.Name, req.Stream)
 	setReqConvID(r.Context(), convFingerprintFromPrompt(prompt))
+	setReqInput(r.Context(), len(prompt), utf8.RuneCountInString(prompt), len(images))
 	s.client.RecordUserActivity()
 	p := m.Params(prompt)
 	p.Images = images
@@ -2331,6 +2342,7 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 	stream := strings.Contains(r.URL.Path, ":streamGenerateContent")
 	setReqMeta(r.Context(), m.Name, stream)
 	setReqConvID(r.Context(), convFingerprintFromPrompt(prompt))
+	setReqInput(r.Context(), len(prompt), utf8.RuneCountInString(prompt), len(images))
 	s.client.RecordUserActivity()
 	p := m.Params(prompt)
 	p.Images = images
@@ -2506,6 +2518,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	setReqMeta(r.Context(), m.Name, req.Stream)
 	setReqConvID(r.Context(), convFingerprintFromPrompt(prompt))
+	setReqInput(r.Context(), len(prompt), utf8.RuneCountInString(prompt), len(images))
 	s.client.RecordUserActivity()
 	p := m.Params(prompt)
 	p.Images = images

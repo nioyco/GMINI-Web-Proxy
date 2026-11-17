@@ -100,13 +100,16 @@ button:disabled{opacity:.5;cursor:not-allowed}
 </section>
 
 <section class="card">
-<h2>Quota Google</h2>
-<p id="quota" style="margin:0 0 8px"></p>
-<div class="note">
+<h2>Quota Google & Estimation des tokens</h2>
+<p id="quota" style="margin:0 0 10px"></p>
+<div id="token-totals" style="margin:0 0 10px"></div>
+<table id="token-usage"></table>
+<div class="note" id="token-note">
   Le quota réel (fenêtre de 5 h et limite hebdomadaire) n'est pas encore lu chez Google : le consulter sur <code>gemini.google.com/usage</code>.
   <ul>
     <li><b>Repère mesuré (14/11/2026 sur 3.1 Pro)</b> : environ <b>2,6 %</b> de la fenêtre de 5 h par demande envoyée (soit ~40 demandes).</li>
     <li><b>Impact Antigravity</b> : chaque étape (lecture, commande, écriture) envoie une nouvelle demande incluant l'historique de la conversation.</li>
+    <li><b>Tokens estimés</b> : calculés sur les données réelles de chaque demande (~1 token / 4 caractères pour entrée, pensées et réponse + 258 tok/image) et attribués au <b>modèle indiqué par Google</b> (position 39/42, sinon modèle demandé).</li>
   </ul>
 </div>
 </section>
@@ -118,6 +121,16 @@ const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&g
 const dur=ms=>ms==null||ms<0?"—":ms<1000?ms+" ms":(ms/1000).toFixed(ms<10000?1:0)+" s";
 const ko=n=>n==null?"—":n<1024?n+" o":(n/1024).toFixed(1)+" Ko";
 const koKB=n=>n==null?"—":(n/1024).toFixed(1)+" Ko";
+const tokFmt=n=>n==null?"—":n<1000?String(n):n<1000000?(n/1000).toFixed(n<10000?1:0)+" k":(n/1000000).toFixed(2)+" M";
+const estTokFromBytes=b=>b>0?Math.ceil(b/4):0;
+function tokCell(c){
+  const inT=c.input_tokens!=null?c.input_tokens:(estTokFromBytes(c.prompt_bytes)+(c.image_count||0)*258);
+  const thT=c.thought_tokens!=null?c.thought_tokens:estTokFromBytes(c.thought_bytes);
+  const txT=c.text_tokens!=null?c.text_tokens:estTokFromBytes(c.text_bytes);
+  const tot=c.total_tokens!=null?c.total_tokens:(inT+thT+txT);
+  const g=c.google_model||c.served_name;
+  return `<b>${tokFmt(tot)}</b><div class="sub">E:${tokFmt(inT)} · P:${tokFmt(thT)} · R:${tokFmt(txT)}${g?" · "+esc(g):""}</div>`;
+}
 const age=s=>s==null?"—":s<90?s+" s":s<5400?Math.round(s/60)+" min":(s/3600).toFixed(1)+" h";
 const hm=t=>t?new Date(t).toLocaleTimeString("fr-FR"):"—";
 const hmShort=t=>t?new Date(t).toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"}):"—";
@@ -259,6 +272,19 @@ async function load(){
   });
   const n5=d.models.reduce((t,m)=>t+(m.calls_5h||0),0);
   $("quota").innerHTML=`<b>${n5}</b> demande(s) envoyée(s) à Gemini par ce proxy sur les 5 dernières heures`+(n5?` — estimation : ${Math.min(100,Math.round(n5*2.6))} % de la fenêtre de 5 h si tout est parti sur 3.1 Pro.`:".");
+  const tu=d.token_usage||{};
+  const t5=tu.totals_5h||{},t12=tu.totals_12h||{},tall=tu.totals_all||{};
+  const tuRows=tu.by_google_model||[];
+  $("token-totals").innerHTML=`<span class="sub">Total estimé — <b>5 h :</b> ${tokFmt(t5.total_tokens||0)} tok (${t5.requests||0} dem. · E ${tokFmt(t5.input_tokens||0)} / P ${tokFmt(t5.thought_tokens||0)} / R ${tokFmt(t5.text_tokens||0)}) · <b>12 h :</b> ${tokFmt(t12.total_tokens||0)} tok (${t12.requests||0} dem.) · <b>Sauvegardé (${tu.records_count||0} dem.${tu.persisted&&tu.file_name?" dans "+esc(tu.file_name):""}) :</b> ${tokFmt(tall.total_tokens||0)} tok</span>`;
+  $("token-usage").innerHTML="<tr><th>Modèle indiqué par Google</th><th class=num>5 h : dem.</th><th class=num>5 h : Entrée</th><th class=num>5 h : Pensées</th><th class=num>5 h : Réponse</th><th class=num>5 h : Total est.</th><th class=num>12 h : Total est.</th><th class=num>Total fichier</th><th class=num>Prompt max (% 1 M)</th></tr>"+
+    (tuRows.length?tuRows.map(g=>{
+      const w5=g.window_5h||{},w12=g.window_12h||{},wa=g.all_saved||{};
+      const cw=g.context_window||1048576;
+      const maxIn=wa.max_input_tokens||0;
+      const pct=maxIn?Math.min(100,((maxIn*100)/cw)).toFixed(1)+" %":"—";
+      const lbl=g.google_indicated?badge("ok",g.effective_model):badge("none",g.effective_model+" (non indiqué)");
+      return `<tr><td>${lbl}${g.served_id?`<div class="sub"><code>${esc(g.served_id)}</code></div>`:""}</td><td class=num>${w5.requests||0}</td><td class=num>${tokFmt(w5.input_tokens||0)}</td><td class=num>${tokFmt(w5.thought_tokens||0)}</td><td class=num>${tokFmt(w5.text_tokens||0)}</td><td class=num><b>${tokFmt(w5.total_tokens||0)}</b></td><td class=num>${tokFmt(w12.total_tokens||0)}</td><td class=num>${tokFmt(wa.total_tokens||0)} (${wa.requests||0})</td><td class=num>${maxIn?tokFmt(maxIn)+" ("+pct+")":"—"}</td></tr>`;
+    }).join(""):"<tr><td colspan=9 class=sub>Aucune donnée de tokens enregistrée pour le moment.</td></tr>");
   const a=d.antigravity;
   if(a.file_state!=="ok"){$("ag").innerHTML=`<tr><td>Fichier des modèles d'Antigravity ${a.file_state==="off"?"non consulté (désactivé)":a.file_state==="absent"?"introuvable":"illisible"}.</td></tr>`;$("agcmd").innerHTML=""}
   else{
@@ -267,21 +293,21 @@ async function load(){
       a.missing.map(n=>`<tr><td>${badge("warn","Aucune entrée")}</td><td><code>${esc(n)}</code></td><td colspan=3 class="sub">Modèle détecté mais pas encore proposé dans Antigravity</td></tr>`).join("");
     $("agcmd").innerHTML=`<p class="note">Pour créer ou renommer les entrées (Antigravity fermé), lancer dans le dossier <code>SUIVI_PROJET/5_Outils_et_diagnostics</code> :</p><code class="cmd">python3 synchroniser_modeles_gmini.py --rename --apply</code><p class="note">Variantes par niveau de réflexion :</p><code class="cmd">python3 synchroniser_modeles_gmini.py --efforts low,high --apply</code>`;
   }
+  const promptWarnBytes=(s.prompt_warn_kb!=null?s.prompt_warn_kb:300)*1024;
+  const fmtPrompt=n=>{const txt=koKB(n);return promptWarnBytes>0&&n!=null&&n>promptWarnBytes?`<span style="color:var(--warn);font-weight:600">${txt}</span>`:txt;};
   const inflight = d.in_flight || [];
   const inflightHist = d.in_flight_history || [];
   const allInflight = inflight.concat(inflightHist);
   const convCount = new Set(allInflight.map(c => c.conv_id || c.id)).size;
   $("inflight-meta").textContent = `${inflight.length} en cours · ${inflightHist.length} en historique (${convCount}/5 conv., max 200 · vue scrollable de 15 lignes)`;
   const stateBadge = (c, live) => live ? badge("info", "En cours") : c.state === "Terminée" ? badge("ok", "Terminée") : badge("warn", c.state || "Terminée");
-  const rowInflight = (c, live) => `<tr${live ? ' style="background:var(--infobg)"' : ""}><td>${hm(c.start_time)}</td><td><code>${esc(c.conv_id || "—")}</code></td><td>${stateBadge(c, live)}</td><td><code>${esc(c.model)}</code></td><td>${c.identity ? who(c.identity, "", "", c.served_name) : (live ? badge("info", "En attente d'identification…") : badge("none", "Non indiqué"))}${c.internal_tool ? `<div class="sub" style="color:var(--warn);font-weight:600">outil interne détecté : ${esc(c.internal_tool)}</div>` : ""}${c.limit_banner ? `<div class="sub" style="color:var(--bad);font-weight:600">limite annoncée par Google : ${esc(c.limit_banner)}</div>` : ""}${c.stale_token_alert ? `<div class="sub" style="color:var(--bad);font-weight:600">⚠ ${esc(c.stale_token_alert)}</div>` : ""}${c.status_note ? (c.status_note.startsWith("Google : ") ? `<div class="sub" style="color:var(--info);font-weight:600">⏳ ${esc(c.status_note)}</div>` : `<div class="sub" style="color:var(--warn);font-weight:600">⚠ ${esc(c.status_note)}</div>`) : ""}</td><td class=num>${ko(c.thought_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${ko(c.sent_bytes)}</td><td class=num>${live ? (c.last_frame_age_sec > 0 ? age(c.last_frame_age_sec) : "à l'instant") : "—"}</td><td class=num>${dur(c.duration_ms)}</td><td><code>${esc((c.id||"").slice(0,8))}</code></td></tr>`;
-  $("inflight").innerHTML = "<thead><tr><th>Heure début</th><th>Conv.</th><th>État</th><th>Modèle demandé</th><th>Qui répond (déroulé)</th><th class=num>Pensées</th><th class=num>Reçus</th><th class=num>Transmis</th><th class=num>Dernière trame</th><th class=num>Durée</th><th>Requête</th></tr></thead><tbody>" +
-    (allInflight.length ? inflight.map(c => rowInflight(c, true)).join("") + inflightHist.map(c => rowInflight(c, false)).join("") : "<tr><td colspan=11 class=sub>Aucune demande en cours ou récente.</td></tr>") + "</tbody>";
-  const promptWarnBytes=(s.prompt_warn_kb!=null?s.prompt_warn_kb:300)*1024;
-  const fmtPrompt=n=>{const txt=koKB(n);return promptWarnBytes>0&&n!=null&&n>promptWarnBytes?`<span style="color:var(--warn);font-weight:600">${txt}</span>`:txt;};
+  const rowInflight = (c, live) => `<tr${live ? ' style="background:var(--infobg)"' : ""}><td>${hm(c.start_time)}</td><td><code>${esc(c.conv_id || "—")}</code></td><td>${stateBadge(c, live)}</td><td><code>${esc(c.model)}</code></td><td>${c.identity ? who(c.identity, "", "", c.served_name) : (live ? badge("info", "En attente d'identification…") : badge("none", "Non indiqué"))}${c.internal_tool ? `<div class="sub" style="color:var(--warn);font-weight:600">outil interne détecté : ${esc(c.internal_tool)}</div>` : ""}${c.limit_banner ? `<div class="sub" style="color:var(--bad);font-weight:600">limite annoncée par Google : ${esc(c.limit_banner)}</div>` : ""}${c.stale_token_alert ? `<div class="sub" style="color:var(--bad);font-weight:600">⚠ ${esc(c.stale_token_alert)}</div>` : ""}${c.status_note ? (c.status_note.startsWith("Google : ") ? `<div class="sub" style="color:var(--info);font-weight:600">⏳ ${esc(c.status_note)}</div>` : `<div class="sub" style="color:var(--warn);font-weight:600">⚠ ${esc(c.status_note)}</div>`) : ""}</td><td class=num>${fmtPrompt(c.prompt_bytes)}</td><td class=num>${ko(c.thought_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${ko(c.sent_bytes)}</td><td class=num>${tokCell(c)}</td><td class=num>${live ? (c.last_frame_age_sec > 0 ? age(c.last_frame_age_sec) : "à l'instant") : "—"}</td><td class=num>${dur(c.duration_ms)}</td><td><code>${esc((c.id||"").slice(0,8))}</code></td></tr>`;
+  $("inflight").innerHTML = "<thead><tr><th>Heure début</th><th>Conv.</th><th>État</th><th>Modèle demandé</th><th>Qui répond (déroulé)</th><th class=num>Prompt</th><th class=num>Pensées</th><th class=num>Reçus</th><th class=num>Transmis</th><th class=num>Tokens (est.)</th><th class=num>Dernière trame</th><th class=num>Durée</th><th>Requête</th></tr></thead><tbody>" +
+    (allInflight.length ? inflight.map(c => rowInflight(c, true)).join("") + inflightHist.map(c => rowInflight(c, false)).join("") : "<tr><td colspan=13 class=sub>Aucune demande en cours ou récente.</td></tr>") + "</tbody>";
   const callsList=d.calls||[];
   $("calls-meta").textContent=`${callsList.length} sur les 12 dernières heures (vue scrollable de 15 lignes)`;
-  $("calls").innerHTML="<thead><tr><th>Heure</th><th>Modèle demandé</th><th>Qui répond</th><th class=num>Niveau</th><th class=num>Durée</th><th class=num>1re pensée</th><th class=num>1er texte</th><th class=num>Prompt</th><th class=num>Réponse</th><th class=num>Pensées</th><th>Erreur</th><th>Requête</th></tr></thead><tbody>"+
-    (callsList.length?callsList.map(c=>`<tr><td>${hm(c.time)}</td><td><code>${esc(c.model)}</code></td><td>${who(c.identity,c.suspect,(c.seen_model_ids||[]).join(", "),c.served_name)}</td><td class=num>${c.thinking_level||"—"}</td><td class=num>${dur(c.duration_ms)}</td><td class=num>${dur(c.first_thought_ms)}</td><td class=num>${dur(c.first_text_ms)}</td><td class=num>${fmtPrompt(c.prompt_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${ko(c.thought_bytes)}</td><td>${c.error?badge("bad",c.error):""}</td><td><code>${esc((c.request_id||"").slice(0,8))}</code></td></tr>`).join(""):"<tr><td colspan=12 class=sub>Aucun appel enregistré sur les 12 dernières heures.</td></tr>")+"</tbody>";
+  $("calls").innerHTML="<thead><tr><th>Heure</th><th>Modèle demandé</th><th>Qui répond</th><th class=num>Niveau</th><th class=num>Durée</th><th class=num>1re pensée</th><th class=num>1er texte</th><th class=num>Prompt</th><th class=num>Réponse</th><th class=num>Pensées</th><th class=num>Tokens (est.)</th><th>Erreur</th><th>Requête</th></tr></thead><tbody>"+
+    (callsList.length?callsList.map(c=>`<tr><td>${hm(c.time)}</td><td><code>${esc(c.model)}</code></td><td>${who(c.identity,c.suspect,(c.seen_model_ids||[]).join(", "),c.served_name)}</td><td class=num>${c.thinking_level||"—"}</td><td class=num>${dur(c.duration_ms)}</td><td class=num>${dur(c.first_thought_ms)}</td><td class=num>${dur(c.first_text_ms)}</td><td class=num>${fmtPrompt(c.prompt_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${ko(c.thought_bytes)}</td><td class=num>${tokCell(c)}</td><td>${c.error?badge("bad",c.error):""}</td><td><code>${esc((c.request_id||"").slice(0,8))}</code></td></tr>`).join(""):"<tr><td colspan=13 class=sub>Aucun appel enregistré sur les 12 dernières heures.</td></tr>")+"</tbody>";
 }
 let refreshNextMs=0;
 let arRunMsg="";

@@ -5,9 +5,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -72,6 +75,9 @@ type reqInfo struct {
 	servedID         string
 	servedName       string
 	inFlightVerdict  string
+	promptBytes      int
+	promptRunes      int
+	imageCount       int
 	thoughtBytes     int
 	textBytes        int
 	sentBytes        int
@@ -193,12 +199,19 @@ type InFlightRequest struct {
 	Model           string  `json:"model"`
 	ServedID        string  `json:"served_id,omitempty"`
 	ServedName      string  `json:"served_name,omitempty"`
+	GoogleModel     string  `json:"google_model,omitempty"`
 	Identity        string  `json:"identity,omitempty"`
 	StartTime       string  `json:"start_time"`
 	DurationMS      int64   `json:"duration_ms"`
+	PromptBytes     int     `json:"prompt_bytes,omitempty"`
+	ImageCount      int     `json:"image_count,omitempty"`
 	ThoughtBytes    int     `json:"thought_bytes"`
 	TextBytes       int     `json:"text_bytes"`
 	SentBytes       int     `json:"sent_bytes"`
+	InputTokens     int     `json:"input_tokens,omitempty"`
+	ThoughtTokens   int     `json:"thought_tokens,omitempty"`
+	TextTokens      int     `json:"text_tokens,omitempty"`
+	TotalTokens     int     `json:"total_tokens,omitempty"`
 	LastFrameAgeSec float64 `json:"last_frame_age_sec"`
 	StatusNote      string  `json:"status_note,omitempty"`
 	InternalTool    string  `json:"internal_tool,omitempty"`
@@ -220,6 +233,13 @@ func (ri *reqInfo) inFlightSnapshot(now time.Time) InFlightRequest {
 	if durMS < 0 {
 		durMS = 0
 	}
+	inTok := gemini.EstimateTokensForBytes(ri.promptBytes)
+	if ri.promptRunes > 0 {
+		inTok = (ri.promptRunes + 3) / 4
+	}
+	inTok += ri.imageCount * gemini.GeminiImageTokens
+	thTok := gemini.EstimateTokensForBytes(ri.thoughtBytes)
+	txtTok := gemini.EstimateTokensForBytes(ri.textBytes)
 	return InFlightRequest{
 		ID:              ri.id,
 		ConvID:          ri.convID,
@@ -227,12 +247,19 @@ func (ri *reqInfo) inFlightSnapshot(now time.Time) InFlightRequest {
 		Model:           ri.model,
 		ServedID:        ri.servedID,
 		ServedName:      ri.servedName,
+		GoogleModel:     ri.servedName,
 		Identity:        ri.inFlightVerdict,
 		StartTime:       ri.start.UTC().Format(time.RFC3339),
 		DurationMS:      durMS,
+		PromptBytes:     ri.promptBytes,
+		ImageCount:      ri.imageCount,
 		ThoughtBytes:    ri.thoughtBytes,
 		TextBytes:       ri.textBytes,
 		SentBytes:       ri.sentBytes,
+		InputTokens:     inTok,
+		ThoughtTokens:   thTok,
+		TextTokens:      txtTok,
+		TotalTokens:     inTok + thTok + txtTok,
 		LastFrameAgeSec: lastAge,
 		StatusNote:      ri.statusNote,
 		InternalTool:    ri.internalToolName,
@@ -260,6 +287,17 @@ func setReqMeta(ctx context.Context, model string, stream bool) {
 func setReqConvID(ctx context.Context, convID string) {
 	if ri := reqFrom(ctx); ri != nil {
 		ri.convID = convID
+	}
+}
+
+// setReqInput records the input prompt size and image count on the request.
+func setReqInput(ctx context.Context, promptBytes, promptRunes, imageCount int) {
+	if ri := reqFrom(ctx); ri != nil {
+		ri.inFlightMu.Lock()
+		ri.promptBytes = promptBytes
+		ri.promptRunes = promptRunes
+		ri.imageCount = imageCount
+		ri.inFlightMu.Unlock()
 	}
 }
 
@@ -344,22 +382,27 @@ const (
 )
 
 // inFlightHistory retains finished request snapshots for the last N distinct
-// conversations (newest first), capped at inFlightHistoryMaxEntries total rows.
+// conversations (newest first), capped at inFlightHistoryMaxEntries total rows,
+// and persists them atomically to path (when non-empty).
 type inFlightHistory struct {
 	mu      sync.Mutex
+	path    string
 	entries []InFlightRequest
 }
 
-func (h *inFlightHistory) record(snap InFlightRequest) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	combined := make([]InFlightRequest, 0, len(h.entries)+1)
-	combined = append(combined, snap)
-	combined = append(combined, h.entries...)
-
+func pruneInFlightEntries(combined []InFlightRequest) []InFlightRequest {
 	seenConvs := map[string]bool{}
 	kept := make([]InFlightRequest, 0, len(combined))
 	for _, e := range combined {
+		if e.TotalTokens == 0 && (e.PromptBytes > 0 || e.ImageCount > 0 || e.ThoughtBytes > 0 || e.TextBytes > 0) {
+			e.InputTokens = gemini.EstimateTokensForBytes(e.PromptBytes) + e.ImageCount*gemini.GeminiImageTokens
+			e.ThoughtTokens = gemini.EstimateTokensForBytes(e.ThoughtBytes)
+			e.TextTokens = gemini.EstimateTokensForBytes(e.TextBytes)
+			e.TotalTokens = e.InputTokens + e.ThoughtTokens + e.TextTokens
+		}
+		if e.GoogleModel == "" && e.ServedName != "" {
+			e.GoogleModel = e.ServedName
+		}
 		key := e.ConvID
 		if key == "" {
 			key = e.ID
@@ -375,7 +418,68 @@ func (h *inFlightHistory) record(snap InFlightRequest) {
 			break
 		}
 	}
-	h.entries = kept
+	return kept
+}
+
+func (h *inFlightHistory) load() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.path == "" {
+		return
+	}
+	raw, err := os.ReadFile(h.path)
+	if err != nil {
+		return
+	}
+	var loaded []InFlightRequest
+	if json.Unmarshal(raw, &loaded) != nil {
+		return
+	}
+	h.entries = pruneInFlightEntries(loaded)
+}
+
+func (h *inFlightHistory) saveLocked() {
+	if h.path == "" {
+		return
+	}
+	data, err := json.Marshal(h.entries)
+	if err != nil {
+		return
+	}
+	dir := filepath.Dir(h.path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(h.path)+".tmp-*")
+	if err != nil {
+		return
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return
+	}
+	if err := os.Rename(tmpName, h.path); err != nil {
+		cleanup()
+	}
+}
+
+func (h *inFlightHistory) record(snap InFlightRequest) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	combined := make([]InFlightRequest, 0, len(h.entries)+1)
+	combined = append(combined, snap)
+	combined = append(combined, h.entries...)
+	h.entries = pruneInFlightEntries(combined)
+	h.saveLocked()
 }
 
 func (h *inFlightHistory) list() []InFlightRequest {
