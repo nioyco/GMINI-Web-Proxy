@@ -133,8 +133,8 @@ func (s *Server) handleUIState(w http.ResponseWriter, r *http.Request) {
 	st := &bufWriter{h: http.Header{}}
 	s.handleStatus(st, r)
 	calls := s.client.RecentCalls()
-	if len(calls) > 60 {
-		calls = calls[:60]
+	if len(calls) > 50 {
+		calls = calls[:50]
 	}
 	models := s.uiModels()
 	sendJSON(w, http.StatusOK, map[string]any{

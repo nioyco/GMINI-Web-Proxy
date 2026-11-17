@@ -33,6 +33,10 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .note{color:var(--mute);font-size:12px;margin-top:10px}
 .cmd{display:block;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-top:6px;font-family:var(--mono);font-size:12px;white-space:pre-wrap;word-break:break-all;user-select:all}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:space-between;margin-bottom:10px}
+.calls-scroll{max-height:540px;overflow-y:auto;overflow-x:auto;border:1px solid var(--line);border-radius:8px}
+.calls-scroll table{margin:0}
+.calls-scroll th{position:sticky;top:0;background:var(--card);z-index:1;padding:8px 10px 8px 10px}
+.calls-scroll td{padding:7px 10px}
 #err{display:none}
 </style>
 </head>
@@ -70,8 +74,8 @@ button:disabled{opacity:.5;cursor:not-allowed}
 </section>
 
 <section class="card">
-<h2>Derniers appels</h2>
-<table id="calls"></table>
+<div class="row"><h2>Derniers appels</h2><span class="sub" id="calls-meta">50 derniers max · vue scrollable de 15 lignes</span></div>
+<div class="calls-scroll"><table id="calls"></table></div>
 <p class="note">Tailles et délais uniquement : aucun contenu de conversation n'est affiché ici.</p>
 </section>
 
@@ -203,8 +207,10 @@ async function load(){
     (inflight.length ? inflight.map(c => `<tr><td>${hm(c.start_time)}</td><td><code>${esc(c.model)}</code></td><td>${c.identity ? who(c.identity, "", "", c.served_name) : badge("info", "En attente d'identification…")}${c.internal_tool ? `<div class="sub" style="color:var(--warn);font-weight:600">outil interne détecté : ${esc(c.internal_tool)}</div>` : ""}${c.limit_banner ? `<div class="sub" style="color:var(--bad);font-weight:600">limite annoncée par Google : ${esc(c.limit_banner)}</div>` : ""}${c.stale_token_alert ? `<div class="sub" style="color:var(--bad);font-weight:600">⚠ ${esc(c.stale_token_alert)}</div>` : ""}${c.status_note ? (c.status_note.startsWith("Google : ") ? `<div class="sub" style="color:var(--info);font-weight:600">⏳ ${esc(c.status_note)}</div>` : `<div class="sub" style="color:var(--warn);font-weight:600">⚠ ${esc(c.status_note)}</div>`) : ""}</td><td class=num>${ko(c.thought_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${ko(c.sent_bytes)}</td><td class=num>${c.last_frame_age_sec > 0 ? age(c.last_frame_age_sec) : "à l'instant"}</td><td class=num>${dur(c.duration_ms)}</td><td><code>${esc((c.id||"").slice(0,8))}</code></td></tr>`).join("") : "<tr><td colspan=9 class=sub>Aucune demande en cours d'exécution.</td></tr>");
   const promptWarnBytes=(s.prompt_warn_kb!=null?s.prompt_warn_kb:300)*1024;
   const fmtPrompt=n=>{const txt=koKB(n);return promptWarnBytes>0&&n!=null&&n>promptWarnBytes?`<span style="color:var(--warn);font-weight:600">${txt}</span>`:txt;};
-  $("calls").innerHTML="<tr><th>Heure</th><th>Modèle demandé</th><th>Qui répond</th><th class=num>Niveau</th><th class=num>Durée</th><th class=num>1re pensée</th><th class=num>1er texte</th><th class=num>Prompt</th><th class=num>Réponse</th><th class=num>Pensées</th><th>Erreur</th><th>Requête</th></tr>"+
-    (d.calls.length?d.calls.map(c=>`<tr><td>${hm(c.time)}</td><td><code>${esc(c.model)}</code></td><td>${who(c.identity,c.suspect,(c.seen_model_ids||[]).join(", "),c.served_name)}</td><td class=num>${c.thinking_level||"—"}</td><td class=num>${dur(c.duration_ms)}</td><td class=num>${dur(c.first_thought_ms)}</td><td class=num>${dur(c.first_text_ms)}</td><td class=num>${fmtPrompt(c.prompt_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${ko(c.thought_bytes)}</td><td>${c.error?badge("bad",c.error):""}</td><td><code>${esc((c.request_id||"").slice(0,8))}</code></td></tr>`).join(""):"<tr><td colspan=12 class=sub>Aucun appel enregistré pour l'instant.</td></tr>");
+  const callsList=(d.calls||[]).slice(0,50);
+  $("calls-meta").textContent=`${callsList.length} affiché(s) (max 50 · vue scrollable de 15 lignes)`;
+  $("calls").innerHTML="<thead><tr><th>Heure</th><th>Modèle demandé</th><th>Qui répond</th><th class=num>Niveau</th><th class=num>Durée</th><th class=num>1re pensée</th><th class=num>1er texte</th><th class=num>Prompt</th><th class=num>Réponse</th><th class=num>Pensées</th><th>Erreur</th><th>Requête</th></tr></thead><tbody>"+
+    (callsList.length?callsList.map(c=>`<tr><td>${hm(c.time)}</td><td><code>${esc(c.model)}</code></td><td>${who(c.identity,c.suspect,(c.seen_model_ids||[]).join(", "),c.served_name)}</td><td class=num>${c.thinking_level||"—"}</td><td class=num>${dur(c.duration_ms)}</td><td class=num>${dur(c.first_thought_ms)}</td><td class=num>${dur(c.first_text_ms)}</td><td class=num>${fmtPrompt(c.prompt_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${ko(c.thought_bytes)}</td><td>${c.error?badge("bad",c.error):""}</td><td><code>${esc((c.request_id||"").slice(0,8))}</code></td></tr>`).join(""):"<tr><td colspan=12 class=sub>Aucun appel enregistré pour l'instant.</td></tr>")+"</tbody>";
 }
 let refreshNextMs=0;
 let arRunMsg="";

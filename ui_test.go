@@ -250,9 +250,11 @@ func TestUISessionDegradedExposedAndCleared(t *testing.T) {
 		"activée (conservée au redémarrage) — toutes les ",
 		"fait piloter Chrome sur Gemini sans demande de votre part",
 		"Actualiser le cookie maintenant",
+		`class="calls-scroll"`,
+		"vue scrollable de 15 lignes",
 	} {
 		if !strings.Contains(wHTML.Body.String(), want) {
-			t.Errorf("ui.html missing K16 A2 text %q", want)
+			t.Errorf("ui.html missing expected text %q", want)
 		}
 	}
 }
