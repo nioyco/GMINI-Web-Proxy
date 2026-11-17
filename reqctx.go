@@ -76,6 +76,8 @@ type reqInfo struct {
 	statusNote       string
 	internalToolName string
 	limitBanner      string
+	staleTokenAlert  string
+	staleStreamNote  string
 }
 
 func (ri *reqInfo) setServed(id, name, verdict string) {
@@ -156,6 +158,29 @@ func (ri *reqInfo) setLimitBanner(msg string) {
 	ri.inFlightMu.Unlock()
 }
 
+func (ri *reqInfo) setStaleTokenAlert(alert, streamNote string) {
+	if ri == nil || alert == "" {
+		return
+	}
+	ri.inFlightMu.Lock()
+	ri.staleTokenAlert = alert
+	if streamNote != "" {
+		ri.staleStreamNote = streamNote
+	}
+	ri.inFlightMu.Unlock()
+}
+
+func (ri *reqInfo) takeStaleStreamNote() string {
+	if ri == nil {
+		return ""
+	}
+	ri.inFlightMu.Lock()
+	note := ri.staleStreamNote
+	ri.staleStreamNote = ""
+	ri.inFlightMu.Unlock()
+	return note
+}
+
 // InFlightRequest summarizes one request currently in progress (K7, K8, K9, B1).
 type InFlightRequest struct {
 	ID              string  `json:"id"`
@@ -172,6 +197,7 @@ type InFlightRequest struct {
 	StatusNote      string  `json:"status_note,omitempty"`
 	InternalTool    string  `json:"internal_tool,omitempty"`
 	LimitBanner     string  `json:"limit_banner,omitempty"`
+	StaleTokenAlert string  `json:"stale_token_alert,omitempty"`
 }
 
 func (ri *reqInfo) inFlightSnapshot(now time.Time) InFlightRequest {
@@ -203,6 +229,7 @@ func (ri *reqInfo) inFlightSnapshot(now time.Time) InFlightRequest {
 		StatusNote:      ri.statusNote,
 		InternalTool:    ri.internalToolName,
 		LimitBanner:     ri.limitBanner,
+		StaleTokenAlert: ri.staleTokenAlert,
 	}
 }
 

@@ -63,6 +63,9 @@ type Server struct {
 	failMemMu sync.Mutex
 	failMem   map[string][]time.Time
 
+	staleWarnMu sync.Mutex
+	staleWarnAt time.Time
+
 	autoRefresh *cookieAutoRefresher
 }
 
@@ -305,6 +308,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	s.client.EnsureAuthOnRequest(r.Context())
+	s.prepareStaleTokenAlert(r.Context())
 	s.applyEffort(&p, m, effort, req.ReasoningEffort)
 
 	// True streaming path (no active tools): forward deltas as they arrive.
@@ -370,6 +374,11 @@ func (s *Server) streamChat(ctx context.Context, w http.ResponseWriter, cid, mod
 				cancel()
 				return
 			}
+			if ri := reqFrom(ctx); ri != nil {
+				if note := ri.takeStaleStreamNote(); note != "" && s.cfg.StreamThoughts {
+					_ = sse.data(apiconv.ChatChunkReasoning(cid, created, model, "\n"+note+"\n"))
+				}
+			}
 		}
 		acc.WriteString(text)
 		if err := sse.data(apiconv.ChatChunk(cid, created, model, text)); err != nil {
@@ -419,6 +428,13 @@ func (s *Server) streamChatTools(ctx context.Context, w http.ResponseWriter, cid
 	if !ok {
 		sendError(w, http.StatusInternalServerError, "streaming unsupported")
 		return
+	}
+	if ri := reqFrom(ctx); ri != nil {
+		if note := ri.takeStaleStreamNote(); note != "" && s.cfg.StreamThoughts {
+			if err := sse.data(apiconv.ChatChunkReasoning(cid, time.Now().Unix(), model, "\n"+note+"\n")); err != nil {
+				return
+			}
+		}
 	}
 	res := s.awaitGenerate(ctx, sse, p, interval)
 	switch res.out {
@@ -1177,6 +1193,19 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	if !keepalive() { // bytes right after the headers
 		return res
 	}
+	if ri != nil {
+		if note := ri.takeStaleStreamNote(); note != "" {
+			if hooks != nil && hooks.progressive && s.cfg.StreamThoughts {
+				if !write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, "\n"+note+"\n"))) {
+					return res
+				}
+			} else {
+				if !write(sse.comment(note)) {
+					return res
+				}
+			}
+		}
+	}
 	tick := interval / 4
 	if tick <= 0 {
 		tick = interval
@@ -1580,6 +1609,41 @@ func (s *Server) modelFailures() []modelFailureSummary {
 	return out
 }
 
+const (
+	staleTokenWarnThreshold = 120 * time.Minute
+	staleTokenWarnCooldown  = 30 * time.Minute
+)
+
+func (s *Server) autoRefreshEnabled() bool {
+	return s.autoRefresh != nil && s.autoRefresh.IsEnabled()
+}
+
+// prepareStaleTokenAlert warns the user in the stream (at most once per 30 min)
+// and in "Demandes en cours" when auto-refresh is off and the token exceeds
+// 120 min, without launching Chrome or delaying the request (K16 A3).
+func (s *Server) prepareStaleTokenAlert(ctx context.Context) {
+	if s.autoRefreshEnabled() {
+		return
+	}
+	rot := s.client.RotationStatus()
+	if rot.TokenAgeSource == "unknown" || rot.TokenAge <= staleTokenWarnThreshold {
+		return
+	}
+	mins := int(rot.TokenAge / time.Minute)
+	alert := fmt.Sprintf("GMINI : jeton de %d min — risque de repli sur un autre modèle ; actualisez le cookie depuis GMINI Control", mins)
+	var streamNote string
+	now := s.currentNow()
+	s.staleWarnMu.Lock()
+	if s.staleWarnAt.IsZero() || now.Sub(s.staleWarnAt) >= staleTokenWarnCooldown {
+		s.staleWarnAt = now
+		streamNote = alert
+	}
+	s.staleWarnMu.Unlock()
+	if ri := reqFrom(ctx); ri != nil {
+		ri.setStaleTokenAlert(alert, streamNote)
+	}
+}
+
 func (s *Server) warnCooldown() time.Duration {
 	if s.cfg.WarnSuspectCooldownMin < 0 {
 		return 0
@@ -1859,6 +1923,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	s.client.EnsureAuthOnRequest(r.Context())
+	s.prepareStaleTokenAlert(r.Context())
 
 	// Stream + tools: same keepalive behaviour as chat completions.
 	if interval := s.keepaliveInterval(); req.Stream && toolsActive && interval > 0 {
@@ -1976,6 +2041,7 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	s.client.EnsureAuthOnRequest(r.Context())
+	s.prepareStaleTokenAlert(r.Context())
 
 	// Incremental streaming (no tools): emit a chunk per delta, then a final
 	// chunk with finishReason and usage.
@@ -2039,6 +2105,11 @@ func (s *Server) streamGoogle(ctx context.Context, w http.ResponseWriter, model 
 				noFlush = true
 				cancel()
 				return
+			}
+			if ri := reqFrom(ctx); ri != nil {
+				if note := ri.takeStaleStreamNote(); note != "" {
+					_ = sse.comment(note)
+				}
 			}
 		}
 		full.WriteString(delta)
@@ -2127,6 +2198,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	s.client.EnsureAuthOnRequest(r.Context())
+	s.prepareStaleTokenAlert(r.Context())
 
 	// True streaming (no active tools): forward text deltas as they arrive.
 	if req.Stream && !toolsActive {

@@ -483,6 +483,13 @@ func (r *cookieAutoRefresher) ToggleFrom(on *bool, source string) cookieAutoRefr
 	return r.Status()
 }
 
+// IsEnabled reports whether auto-refresh is currently enabled for this process.
+func (r *cookieAutoRefresher) IsEnabled() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.enabled
+}
+
 // Status returns a content-free snapshot of the auto-refresh state.
 func (r *cookieAutoRefresher) Status() cookieAutoRefreshStatus {
 	r.mu.Lock()
