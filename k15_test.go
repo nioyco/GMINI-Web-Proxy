@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
+	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
 )
 
 // K15 Q1: An ordinary exotic-tag fence before tool_call blocks in runStreamTools
@@ -278,5 +279,69 @@ func TestK15_Q4_ErrorMarkerDrivesCannedErrorDetection(t *testing.T) {
 	joined := strings.Join(c.dataFrames, "\n")
 	if !strings.Contains(joined, "Gemini a renvoyé une erreur interne") {
 		t.Errorf("expected canned error wrapper from inner[31]=true, got %s", joined)
+	}
+}
+
+// K15 Q5: On a non-tool stream (like essai_minimal_proxy.py) receiving a canned
+// error with inner[31]=true, journal, /_status, /_ui/api/state and /_ui report
+// identity="canned_error" with the served model name, never "confirmed".
+func TestK15_Q5_CannedErrorVerdictInStatusAndUI(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	cfg := testConfig()
+	cfg.UIEnabled = true
+	cfg.StreamToolsProgress = true
+	cfg.StreamThoughts = true
+	cfg.SSEKeepaliveSec = 1
+	client, err := gemini.New(cfg.Gemini, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.SetModels([]*gemini.AvailableModel{
+		{Name: "gemini-3.1-pro", ModelID: "e6fa609c3fa255c0", Description: "3.1 Pro"},
+	})
+	client.SetTransport(rtFn(func(r *http.Request) (*http.Response, error) {
+		body := fakeStreamWithErrorMarker("Je ne suis qu'une IA basée sur du texte. Je ne peux pas vous aider à ce sujet.", "e6fa609c3fa255c0", "3.1 Pro", true)
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+	}))
+	s := newServer(cfg, client, logger)
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	body := `{"model":"gemini-3.1-pro","stream":true,"messages":[{"role":"user","content":"Réponds OK"}]}`
+	_ = readSSE(t, context.Background(), ts.URL, body)
+
+	if !strings.Contains(logs.String(), "identity=canned_error") || strings.Contains(logs.String(), "identity=confirmed") {
+		t.Errorf("log must show identity=canned_error, never confirmed: %s", logs.String())
+	}
+
+	stRec := uiDo(s.handler(), "GET", "/_status", "127.0.0.1:5000", "")
+	var st struct {
+		ModelIdentities []struct {
+			Model       string `json:"model"`
+			LastVerdict string `json:"last_verdict"`
+			ServedName  string `json:"served_name"`
+		} `json:"model_identities"`
+	}
+	_ = json.Unmarshal(stRec.Body.Bytes(), &st)
+	if len(st.ModelIdentities) != 1 || st.ModelIdentities[0].LastVerdict != "canned_error" || st.ModelIdentities[0].ServedName != "3.1 Pro" {
+		t.Fatalf("/_status model_identities = %+v", st.ModelIdentities)
+	}
+
+	uiStateRec := uiDo(s.handler(), "GET", "/_ui/api/state", "127.0.0.1:5000", s.uiToken)
+	var state struct {
+		Calls []struct {
+			Identity   string `json:"identity"`
+			ServedName string `json:"served_name"`
+		} `json:"calls"`
+	}
+	_ = json.Unmarshal(uiStateRec.Body.Bytes(), &state)
+	if len(state.Calls) != 1 || state.Calls[0].Identity != "canned_error" || state.Calls[0].ServedName != "3.1 Pro" {
+		t.Fatalf("/_ui/api/state calls = %+v", state.Calls)
+	}
+
+	uiRec := uiDo(s.handler(), "GET", "/_ui", "127.0.0.1:5000", "")
+	if !strings.Contains(uiRec.Body.String(), `identity==="canned_error"`) {
+		t.Errorf("ui.html missing canned_error rendering")
 	}
 }

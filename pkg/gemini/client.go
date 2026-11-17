@@ -802,6 +802,7 @@ func (c *Client) generateAttempts(ctx context.Context, p GenParams, images []upl
 						rec.Frames = shape.frames
 						rec.TextBytes, rec.ThoughtBytes = len(text), shape.thought
 						rec.FirstTextMS, rec.FirstThoughtMS = shape.firstTextMS, shape.firstThoughtMS
+						scan.cannedError = IsCannedErrorReply(text, scan.errorMarker)
 						c.recordCall(rec, scan)
 						return text, nil
 					}
@@ -945,6 +946,8 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 			}
 		} else if prevText == "" {
 			rec.Error = "empty"
+		} else {
+			scan.cannedError = IsCannedErrorReply(prevText, scan.errorMarker)
 		}
 		c.recordCall(rec, scan)
 	}()

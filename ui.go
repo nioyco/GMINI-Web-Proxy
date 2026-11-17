@@ -263,7 +263,7 @@ func (s *Server) uiModels() []uiModel {
 				}
 				u.LastSeenModels = strings.Join(names, ", ")
 			}
-			if c.Error != "" || !c.Stream || len(firsts) >= 20 {
+			if c.Error != "" || c.Identity == "canned_error" || !c.Stream || len(firsts) >= 20 {
 				continue
 			}
 			u.Calls++

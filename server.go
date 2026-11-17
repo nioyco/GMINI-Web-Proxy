@@ -636,7 +636,7 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 					return
 				}
 				s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+bres.err.Error())), sse.done())
-			case apiconv.IsUpstreamCannedError(bres.text):
+			case s.isCannedRetryText(ctx, bres.text):
 				s.recordModelFailure(model)
 				s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(bres.text), "action", "reported")
 				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
@@ -1473,6 +1473,18 @@ func modelDisplayLabel(model string, p gemini.GenParams) string {
 
 func cannedErrorMessage(model string, p gemini.GenParams) string {
 	return fmt.Sprintf("GMINI : Gemini a renvoyé une erreur interne sur %s (pas une réponse du modèle). Réessayez, ou changez de modèle.", modelDisplayLabel(model, p))
+}
+
+func (s *Server) isCannedRetryText(ctx context.Context, text string) bool {
+	if apiconv.IsUpstreamCannedError(text) {
+		return true
+	}
+	if ri := reqFrom(ctx); ri != nil {
+		if rec, ok := s.client.CallByRequest(ri.id); ok && rec.Identity == "canned_error" {
+			return true
+		}
+	}
+	return false
 }
 
 const (

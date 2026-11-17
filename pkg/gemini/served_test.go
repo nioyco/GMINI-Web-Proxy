@@ -397,3 +397,58 @@ func TestWithdrawnModelWarnRateLimited(t *testing.T) {
 		t.Fatalf("absent WARN count = %d, want 2 (1 per model)\n%s", n, logs.String())
 	}
 }
+
+// K15 Q5: A canned error (even bearing the requested model id in position 39)
+// must be recorded as identity="canned_error" with ServedName kept, never "confirmed".
+func TestK15_Q5_CannedErrorIdentityVerdict(t *testing.T) {
+	var logs bytes.Buffer
+	c, err := New(Config{RetryAttempts: 1, RequestTimeout: 5}, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pro := &AvailableModel{Name: "gemini-detailed-research", ModelID: "e6fa609c3fa255c0", Description: "3.1 Pro"}
+	c.storeModels([]*AvailableModel{pro}, "dynamic")
+
+	makeCannedLine := func(txt string, marker bool) string {
+		body := make([]any, 43)
+		body[4] = []any{[]any{"rc_1", []any{txt}}}
+		if marker {
+			body[31] = true
+		}
+		body[39], body[42] = "e6fa609c3fa255c0", "3.1 Pro"
+		ib, _ := json.Marshal(body)
+		line, _ := json.Marshal([]any{[]any{"wrb.fr", nil, string(ib)}})
+		return ")]}'\n\n123\n" + string(line) + "\n"
+	}
+
+	var reply string
+	c.SetTransport(rtFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(reply))}, nil
+	}))
+
+	// 1. Canned error (inner[31]=true, French sentence): identity must be "canned_error", keeping ServedName.
+	reply = makeCannedLine("Je ne suis qu'une IA basée sur du texte. Je ne peux pas vous aider à ce sujet.", true)
+	err = c.GenerateStreamEvents(context.Background(), GenParams{Prompt: "hi", Model: pro}, StreamHandlers{})
+	if err != nil {
+		t.Fatalf("GenerateStreamEvents: %v", err)
+	}
+	r := c.RecentCalls()[0]
+	if r.Identity != "canned_error" || r.ServedID != "e6fa609c3fa255c0" || r.ServedName != "3.1 Pro" {
+		t.Fatalf("got record %+v, want identity=canned_error served=3.1 Pro", r)
+	}
+	if ids := c.ModelIdentities(); len(ids) != 1 || ids[0].LastVerdict != "canned_error" || ids[0].ServedName != "3.1 Pro" {
+		t.Fatalf("ModelIdentities = %+v", ids)
+	}
+	if !strings.Contains(logs.String(), "identity=canned_error") || strings.Contains(logs.String(), "identity=confirmed") {
+		t.Errorf("unexpected logs: %s", logs.String())
+	}
+
+	// 2. Genuine reply (no error marker): identity is "confirmed".
+	reply = makeCannedLine("OK.", false)
+	if _, err := c.Generate(context.Background(), GenParams{Prompt: "hi", Model: pro}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if got := c.RecentCalls()[0]; got.Identity != "confirmed" {
+		t.Fatalf("genuine reply got identity=%q, want confirmed", got.Identity)
+	}
+}

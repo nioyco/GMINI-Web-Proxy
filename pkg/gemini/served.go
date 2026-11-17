@@ -47,7 +47,7 @@ type CallRecord struct {
 	ServedName   string   `json:"served_name,omitempty"`
 	SeenModelIDs []string `json:"seen_model_ids"`  // catalogue ids present in the raw reply
 	OtherHexIDs  int      `json:"other_hex_ids"`   // 16-hex tokens that are not catalogue ids
-	Identity     string   `json:"identity"`        // confirmed | other_model | name_only | not_stated
+	Identity     string   `json:"identity"`        // confirmed | other_model | name_only | canned_error | not_stated
 	Suspect      string   `json:"suspect"`         // "" | no_thoughts
 	Error        string   `json:"error,omitempty"` // error kind, never content
 }
@@ -61,6 +61,7 @@ type idScan struct {
 	seen                 map[string]struct{}
 	servedID, servedName string
 	errorMarker          bool
+	cannedError          bool
 }
 
 // Positions of the error marker, model id, and model name in the response body.
@@ -305,6 +306,12 @@ func (c *Client) recordCall(r CallRecord, scan *idScan) {
 		// hex id elsewhere in the raw payload must not claim "confirmed".
 		r.Identity = "not_stated"
 	}
+	if r.Error == "" && scan != nil && scan.cannedError {
+		// "confirmed" requires both the right model id and a genuine reply: a
+		// canned upstream error (even bearing the requested model id) gets its own
+		// verdict while keeping ServedID / ServedName.
+		r.Identity = "canned_error"
+	}
 
 	c.calls.mu.Lock()
 	// The absence of thoughts only counts when Google did not name the model: a
@@ -335,7 +342,7 @@ func (c *Client) recordCall(r CallRecord, scan *idScan) {
 					"catalog_name", m.Description, "served_name", r.ServedName)
 			}
 		}
-		if c.cfg.LogParams {
+		if c.cfg.LogParams || r.Identity == "canned_error" {
 			c.log.Info("served_model", "request_id", r.RequestID, "model", r.Model, "identity", r.Identity,
 				"served_id", r.ServedID, "served_name", r.ServedName,
 				"seen_model_ids", strings.Join(r.SeenModelIDs, ","), "other_hex_ids", r.OtherHexIDs)

@@ -91,6 +91,7 @@ const hm=t=>t?new Date(t).toLocaleTimeString("fr-FR"):"—";
 const hmShort=t=>t?new Date(t).toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"}):"—";
 const badge=(c,t)=>`<span class="b ${c}">${esc(t)}</span>`;
 function who(identity,suspect,seen,served){
+  if(identity==="canned_error")return badge("bad","Erreur interne"+(served?" ("+served+")":""));
   if(identity==="other_model")return badge("bad","Autre modèle : "+(served||seen||"?"));
   if(identity==="name_only")return badge("warn","Nom indiqué : "+(served||"?")+", identifiant différent");
   if(suspect==="no_thoughts")return badge("warn","Repli probable");
