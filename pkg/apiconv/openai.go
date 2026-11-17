@@ -439,7 +439,10 @@ func ParseToolCallsWith(text string, declared []DeclaredTool) (string, []ToolCal
 	last := 0
 	names := declaredNameSet(declared)
 
-	for _, fb := range findFences(text) {
+	fences := findFences(text)
+	decoded := make([][]ToolCall, len(fences))
+	lastValidIdx := -1
+	for idx, fb := range fences {
 		tag := strings.ToLower(fb.tag)
 		body := strings.TrimSpace(text[fb.bodyStart:fb.bodyEnd])
 		var blockCalls []ToolCall
@@ -459,15 +462,30 @@ func ParseToolCallsWith(text string, declared []DeclaredTool) (string, []ToolCal
 			rep.Inferred = rep.Inferred[:inferredBefore]
 			continue
 		}
+		decoded[idx] = blockCalls
+		lastValidIdx = idx
+	}
+
+	for idx, fb := range fences {
+		blockCalls := decoded[idx]
+		isCodeRef := len(blockCalls) == 0 && IsCodeReferenceTag(fb.tag) && idx < lastValidIdx
+		if len(blockCalls) == 0 && !isCodeRef {
+			continue
+		}
 		// Text between/after tool calls is dropped (see dropAfterToolCall): only what
-		// precedes the first call is kept.
+		// precedes the first call is kept. Code-reference blocks followed by a valid
+		// tool call are removed along with the tool calls.
 		if len(calls) == 0 || !DropTextAfterToolCall() {
 			clean.WriteString(text[last:fb.start])
 		} else {
 			rep.DroppedAfter += len(strings.TrimSpace(text[last:fb.start]))
 		}
 		last = fb.end
-		calls = append(calls, blockCalls...)
+		if isCodeRef {
+			rep.CodeRefRemoved++
+		} else {
+			calls = append(calls, blockCalls...)
+		}
 	}
 	if len(calls) == 0 || !DropTextAfterToolCall() {
 		clean.WriteString(text[last:])

@@ -178,12 +178,23 @@ func TestK15_Q1_ExoticFenceTags(t *testing.T) {
 			"```tool_call\n{\"name\": \"read_file\", \"arguments\": {\"Path\": \"a.go\"}}\n```\n" +
 			"```tool_call\n{\"name\": \"read_file\", \"arguments\": {\"Path\": \"b.go\"}}\n```\n" +
 			"```tool_call\n{\"name\": \"read_file\", \"arguments\": {\"Path\": \"c.go\"}}\n```\n"
-		_, calls, rep := ParseToolCallsWith(reply, decl)
+		text, calls, rep := ParseToolCallsWith(reply, decl)
 		if len(calls) != 4 || len(rep.Unparsed) != 0 {
 			t.Fatalf("calls=%d unparsed=%+v, want 4/0", len(calls), rep.Unparsed)
 		}
+		if text != "" || rep.CodeRefRemoved != 1 {
+			t.Fatalf("expected code_reference removed cleanly: text=%q codeRefRemoved=%d", text, rep.CodeRefRemoved)
+		}
 		if calls[0].Function.Name != "run_command" || calls[1].Function.Name != "read_file" || calls[3].Function.Name != "read_file" {
 			t.Fatalf("unexpected call names: %+v", calls)
+		}
+	})
+
+	t.Run("code_reference_alone_kept_intact", func(t *testing.T) {
+		alone := "Voici le script :\n```bash?code_reference&code_event_index=1\ngit status\n```\nFin."
+		text, calls, rep := ParseToolCallsWith(alone, decl)
+		if len(calls) != 0 || rep.CodeRefRemoved != 0 || text != alone {
+			t.Fatalf("alone code_reference altered: calls=%d removed=%d text=%q", len(calls), rep.CodeRefRemoved, text)
 		}
 	})
 

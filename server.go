@@ -868,6 +868,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	completeToolCalls, lastCompleteEnd := 0, 0
 	lastHeldNoteBytes := 0
 	internalToolNotified := false
+	codeRefHandled := false
 	var streamOpenedAt, lastNoContentNoteAt time.Time
 	hasContent := false
 	heartbeats := 0
@@ -933,14 +934,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	}
 
 	onInternalTool := func(name string) bool {
-		if ri != nil {
-			ri.setInternalTool(name)
-			if !ri.internalTool.Swap(true) {
-				s.stats.internalToolDetected.Add(1)
-			}
-		} else {
-			s.stats.internalToolDetected.Add(1)
-		}
+		s.markInternalToolDetected(ctx, name)
 		action := normalizeInternalToolAction(s.cfg.InternalToolAction)
 		switch action {
 		case "off":
@@ -1078,6 +1072,31 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		}
 
 		scan := apiconv.ScanToolCalls(raw.String(), declared)
+		if len(declared) > 0 && scan.HasCodeRef && !codeRefHandled {
+			codeRefHandled = true
+			action := normalizeInternalToolAction(s.cfg.InternalToolAction)
+			if action == "retry" && !res.released && res.transmittedBytes == 0 && scan.CompleteCalls == 0 && (hooks == nil || !hooks.noInternalRetry) {
+				if !onInternalTool("exécution de code") {
+					return false
+				}
+			} else if action != "off" {
+				if ri != nil {
+					ri.setInternalTool("exécution de code")
+					if scan.CompleteCalls == 0 {
+						ri.setStatusNote("Gemini lance un outil interne (exécution de code) ; la réponse peut tarder")
+					}
+				}
+				if !internalToolNotified {
+					internalToolNotified = true
+					if hooks != nil && hooks.progressive && s.cfg.StreamThoughts {
+						res.forwarded = true
+						if !write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, proxyWaitNote(s.currentNow(), "Gemini lance un outil interne ; la réponse peut tarder.")))) {
+							return false
+						}
+					}
+				}
+			}
+		}
 		if scan.CompleteCalls > 0 && completeToolCalls == 0 {
 			lastHeldNoteAt = time.Now()
 		}

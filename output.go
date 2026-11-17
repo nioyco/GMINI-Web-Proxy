@@ -107,6 +107,20 @@ func (s *Server) noteParse(ctx context.Context, rep apiconv.ParseReport) {
 		s.stats.toolNameInferred.Add(1)
 		s.rlog(ctx).Info("tool_name_inferred", "tool", safeKeyList([]string{name}))
 	}
+	if rep.CodeRefRemoved > 0 {
+		s.markInternalToolDetected(ctx, "exécution de code")
+	}
+}
+
+func (s *Server) markInternalToolDetected(ctx context.Context, name string) {
+	if ri := reqFrom(ctx); ri != nil {
+		ri.setInternalTool(name)
+		if !ri.internalTool.Swap(true) {
+			s.stats.internalToolDetected.Add(1)
+		}
+		return
+	}
+	s.stats.internalToolDetected.Add(1)
 }
 
 // safeKeyList joins key names for logging, replacing anything that is not a plain

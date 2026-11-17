@@ -83,7 +83,7 @@ func (g *ProgressGate) Push(delta string) string {
 			continue
 		}
 		tag := strings.ToLower(strings.TrimSpace(rawTag))
-		if mayHoldToolCall(tag) {
+		if mayHoldToolCall(tag) || IsCodeReferenceTag(tag) {
 			g.closed = true
 			safe = i
 			break

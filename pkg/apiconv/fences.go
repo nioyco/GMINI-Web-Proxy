@@ -182,6 +182,13 @@ func isJSONSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
+// IsCodeReferenceTag reports whether a fence info string marks Gemini's
+// internal code-execution reference/output block.
+func IsCodeReferenceTag(tag string) bool {
+	low := strings.ToLower(tag)
+	return strings.Contains(low, "code_reference") || strings.Contains(low, "code_event_index")
+}
+
 func inlineFenceEnd(rawTag string) (int, bool) {
 	idx := strings.Index(rawTag, "```")
 	if idx < 0 {

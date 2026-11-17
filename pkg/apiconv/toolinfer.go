@@ -39,9 +39,11 @@ type ParseReport struct {
 	Inferred []string // names of tools whose name was inferred from the declared set
 	// Repaired counts tool-call blocks whose JSON needed the tolerant reading
 	// (invalid escape, raw line break in a string). DroppedAfter is the number of
-	// bytes of text removed because they followed a tool call.
-	Repaired     int
-	DroppedAfter int
+	// bytes of text removed because they followed a tool call. CodeRefRemoved
+	// counts code_reference blocks stripped because a valid tool call followed.
+	Repaired       int
+	DroppedAfter   int
+	CodeRefRemoved int
 }
 
 // declaredFromSchema builds a DeclaredTool from a JSON-schema-like value.

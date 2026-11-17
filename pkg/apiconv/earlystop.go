@@ -22,6 +22,7 @@ type ToolScanResult struct {
 	LastCallEnd   int
 	CutAt         int
 	HasMarker     bool
+	HasCodeRef    bool
 }
 
 // findRunawayMarker returns the byte offset of the earliest runaway marker in s,
@@ -52,6 +53,9 @@ func ScanToolCalls(text string, declared []DeclaredTool) ToolScanResult {
 	scanFrom := 0
 
 	for _, fb := range fences {
+		if IsCodeReferenceTag(fb.tag) {
+			res.HasCodeRef = true
+		}
 		if res.CompleteCalls > 0 && fb.start > scanFrom {
 			if m := findRunawayMarker(text[scanFrom:fb.start]); m >= 0 {
 				res.CutAt = scanFrom + m
