@@ -45,6 +45,15 @@ func (s *Server) finishText(ctx context.Context, raw string, toolsActive bool, d
 		var rep apiconv.ParseReport
 		text, calls, rep = apiconv.ParseToolCallsWith(text, declared)
 		s.noteParse(ctx, rep)
+		if len(declared) > 0 && text != "" {
+			recText, recCalls, recCount := apiconv.RecoverUnconvertedToolCalls(text, declared, len(calls) > 0)
+			if recCount > 0 {
+				text = recText
+				calls = append(calls, recCalls...)
+				s.stats.toolCallUnconverted.Add(int64(recCount))
+				s.rlog(ctx).Warn("tool_call_unconverted", "count", recCount)
+			}
+		}
 	}
 	if !s.cfg.DisableEchoFilter {
 		var st apiconv.EchoStats

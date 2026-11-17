@@ -245,3 +245,31 @@ func TestK15_Q1_ExoticFenceTags(t *testing.T) {
 		}
 	})
 }
+
+// K15 Q3: Safety net recovers remaining ```tool_call blocks with valid JSON naming
+// declared tools, while ignoring undeclared names or invalid JSON.
+func TestK15_Q3_RecoverUnconvertedToolCalls(t *testing.T) {
+	decl := []DeclaredTool{
+		{Name: "read_file", Props: map[string]bool{"path": true}},
+	}
+	// Example where pass 1 leaves ```tool_call inside remaining text (e.g. inline opening without newline).
+	rem := "Voici : ```tool_call{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.go\"}}```"
+	clean, calls, count := RecoverUnconvertedToolCalls(rem, decl, false)
+	if count != 1 || len(calls) != 1 || calls[0].Function.Name != "read_file" || clean != "Voici :" {
+		t.Fatalf("got clean=%q calls=%+v count=%d", clean, calls, count)
+	}
+
+	// Undeclared tool name must NOT be recovered.
+	undecl := "Voici : ```tool_call{\"name\":\"unknown_tool\",\"arguments\":{\"x\":1}}```"
+	clean2, calls2, count2 := RecoverUnconvertedToolCalls(undecl, decl, false)
+	if count2 != 0 || len(calls2) != 0 || clean2 != undecl {
+		t.Fatalf("undeclared should stay untouched: clean=%q calls=%+v count=%d", clean2, calls2, count2)
+	}
+
+	// Invalid JSON must NOT be recovered.
+	bad := "Voici : ```tool_call\n{\"name\":\"read_file\", invalid}\n```"
+	clean3, calls3, count3 := RecoverUnconvertedToolCalls(bad, decl, false)
+	if count3 != 0 || len(calls3) != 0 || clean3 != bad {
+		t.Fatalf("invalid JSON should stay untouched: clean=%q calls=%+v count=%d", clean3, calls3, count3)
+	}
+}

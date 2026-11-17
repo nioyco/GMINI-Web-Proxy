@@ -153,7 +153,8 @@ async function load(){
     ["Niveau de réflexion par défaut",esc(s.thinking_level_default||"non envoyé")],
     ["Outils internes Gemini",badge(s.internal_tool_action==="retry"?"warn":s.internal_tool_action==="off"?"none":"info",esc(s.internal_tool_action||"notify"))+(s.internal_tool_action==="retry"?`<div class="sub">le mode retry consomme une demande de quota en plus</div>`:`<div class="sub">notify = note · retry = relance (1 quota en plus) · off</div>`)],
     ["Relance erreur interne",badge(s.canned_error_retry==="once"?"warn":"none",esc(s.canned_error_retry||"off"))+(s.canned_error_retry==="once"?` <span class="sub">max ${s.canned_error_retry_sec||25} s</span>`:"")+`<div class="sub">off = pas de relance (défaut) · once = 1 relance bornée</div>`],
-    ["Arrêts anticipés",(s.counters?.early_stop?badge("warn",String(s.counters.early_stop)):badge("none","0"))+`<div class="sub">marqueur : ${s.counters?.early_stop_marker||0} · taille : ${s.counters?.early_stop_size||0} · durée : ${s.counters?.early_stop_duration||0}</div>`]
+    ["Arrêts anticipés",(s.counters?.early_stop?badge("warn",String(s.counters.early_stop)):badge("none","0"))+`<div class="sub">marqueur : ${s.counters?.early_stop_marker||0} · taille : ${s.counters?.early_stop_size||0} · durée : ${s.counters?.early_stop_duration||0}</div>`],
+    ["Appels non convertis",(s.counters?.tool_call_unconverted?badge("bad",String(s.counters.tool_call_unconverted)):badge("none","0"))+`<div class="sub">filet de sécurité (blocs tool_call restants)</div>`]
   ];
   $("tiles").innerHTML=t.map(([k,v])=>`<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
   const arToggle=$("ar-toggle");

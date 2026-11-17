@@ -515,6 +515,116 @@ func ParseToolCallsWith(text string, declared []DeclaredTool) (string, []ToolCal
 	return result, calls, rep
 }
 
+// RecoverUnconvertedToolCalls is the safety-net second pass: if the text left
+// after ParseToolCallsWith still contains any ```tool_call block with valid JSON
+// naming one of the declared tools, it extracts those calls, removes their blocks
+// from text, and returns the count of recovered blocks.
+func RecoverUnconvertedToolCalls(text string, declared []DeclaredTool, hadCalls bool) (string, []ToolCall, int) {
+	if text == "" || len(declared) == 0 {
+		return text, nil, 0
+	}
+	low := strings.ToLower(text)
+	const prefix = "```tool_call"
+	if !strings.Contains(low, prefix) {
+		return text, nil, 0
+	}
+	names := declaredNameSet(declared)
+
+	type span struct{ start, end int }
+	var spans []span
+	var recovered []ToolCall
+
+	pos := 0
+	for pos < len(text) {
+		rel := strings.Index(low[pos:], prefix)
+		if rel < 0 {
+			break
+		}
+		start := pos + rel
+		afterTag := start + len(prefix)
+		if afterTag < len(text) {
+			c := text[afterTag]
+			if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' {
+				pos = afterTag
+				continue
+			}
+		}
+		jStart := afterTag
+		for jStart < len(text) && (text[jStart] == ' ' || text[jStart] == '\t' || text[jStart] == '\r' || text[jStart] == '\n') {
+			jStart++
+		}
+		if jStart < len(text) && text[jStart] != '{' && text[jStart] != '[' {
+			if nl := strings.IndexByte(text[afterTag:], '\n'); nl >= 0 {
+				jStart = afterTag + nl + 1
+				for jStart < len(text) && isJSONSpace(text[jStart]) {
+					jStart++
+				}
+			}
+		}
+		if jStart >= len(text) || (text[jStart] != '{' && text[jStart] != '[') {
+			pos = afterTag
+			continue
+		}
+		dec := json.NewDecoder(strings.NewReader(text[jStart:]))
+		var blockCalls []ToolCall
+		jEnd := jStart
+		for {
+			q := int(dec.InputOffset())
+			for q < len(text)-jStart && isJSONSpace(text[jStart+q]) {
+				q++
+			}
+			if q >= len(text)-jStart || (text[jStart+q] != '{' && text[jStart+q] != '[') {
+				break
+			}
+			var raw json.RawMessage
+			if err := dec.Decode(&raw); err != nil {
+				break
+			}
+			var dummyRep ParseReport
+			calls := toolIntentCalls(raw, "tool_call", declared, &dummyRep)
+			if len(calls) == 0 || len(dummyRep.Inferred) > 0 || len(rejectUndeclared(calls, names)) > 0 {
+				blockCalls = nil
+				break
+			}
+			blockCalls = append(blockCalls, calls...)
+			jEnd = jStart + int(dec.InputOffset())
+		}
+		if len(blockCalls) == 0 {
+			pos = afterTag
+			continue
+		}
+		end := jEnd
+		afterJSON := jEnd
+		for afterJSON < len(text) && isJSONSpace(text[afterJSON]) {
+			afterJSON++
+		}
+		if strings.HasPrefix(text[afterJSON:], "```") {
+			end = afterJSON + 3
+			for end < len(text) && text[end] == '`' {
+				end++
+			}
+		}
+		spans = append(spans, span{start: start, end: end})
+		recovered = append(recovered, blockCalls...)
+		pos = end
+	}
+	if len(spans) == 0 {
+		return text, nil, 0
+	}
+	var sb strings.Builder
+	last := 0
+	for i, sp := range spans {
+		if (i == 0 && !hadCalls) || !DropTextAfterToolCall() {
+			sb.WriteString(text[last:sp.start])
+		}
+		last = sp.end
+	}
+	if !DropTextAfterToolCall() {
+		sb.WriteString(text[last:])
+	}
+	return strings.TrimSpace(sb.String()), recovered, len(spans)
+}
+
 // decodeToolCalls reads one or more JSON values from a fenced block body and turns
 // each that names a tool into a ToolCall. tagIntent reports whether the fence tag
 // already signalled tool-call intent (see toolFenceTags).

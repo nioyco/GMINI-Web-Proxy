@@ -240,6 +240,7 @@ type statsCounters struct {
 	echoFabricated       atomic.Int64
 	upstreamRefusal      atomic.Int64
 	toolCallUnparsed     atomic.Int64
+	toolCallUnconverted  atomic.Int64
 	toolNameInferred     atomic.Int64
 	internalToolDetected atomic.Int64
 	limitBannerDetected  atomic.Int64

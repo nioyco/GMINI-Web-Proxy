@@ -222,6 +222,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			"echo_fabricated":           s.stats.echoFabricated.Load(),
 			"upstream_refusal":          s.stats.upstreamRefusal.Load(),
 			"tool_call_unparsed":        s.stats.toolCallUnparsed.Load(),
+			"tool_call_unconverted":     s.stats.toolCallUnconverted.Load(),
 			"tool_name_inferred":        s.stats.toolNameInferred.Load(),
 			"internal_tool_detected":    s.stats.internalToolDetected.Load(),
 			"limit_banner_detected":     s.stats.limitBannerDetected.Load(),

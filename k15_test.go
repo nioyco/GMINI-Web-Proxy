@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
 )
 
 // K15 Q1: An ordinary exotic-tag fence before tool_call blocks in runStreamTools
@@ -193,4 +197,49 @@ func TestK15_Q2_CodeReferenceHandling(t *testing.T) {
 			t.Errorf("retry did not produce tool_call: %s", joined)
 		}
 	})
+}
+
+// K15 Q3: Safety net in finishText logs tool_call_unconverted count=N (no content),
+// increments /_status counter, shows it on the UI page, and converts the calls.
+func TestK15_Q3_SafetyNetLogsStatusAndUI(t *testing.T) {
+	var logs bytes.Buffer
+	_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+		reply := "Intro : ```tool_call{\"name\":\"read_file\",\"arguments\":{\"path\":\"SECRET_PATH.go\"}}```"
+		body := fakeStreamServed(reply, "", "e6fa609c3fa255c0", "3.1 Pro")
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+	}))
+	cfg := testConfig()
+	cfg.UIEnabled = true
+	cfg.StreamToolsProgress = true
+	cfg.StreamThoughts = true
+	cfg.SSEKeepaliveSec = 1
+	s := newServer(cfg, client, slog.New(slog.NewTextHandler(&logs, nil)))
+	s.keepaliveOverride = 50 * time.Millisecond
+
+	decl := []apiconv.DeclaredTool{{Name: "read_file", Props: map[string]bool{"path": true}}}
+	// Exercise finishText directly and HTTP end-to-end.
+	text, calls := s.finishText(context.Background(), "Intro : ```tool_call{\"name\":\"read_file\",\"arguments\":{\"path\":\"SECRET_PATH.go\"}}```", true, decl)
+	if len(calls) != 1 || calls[0].Function.Name != "read_file" || text != "Intro :" {
+		t.Fatalf("finishText got text=%q calls=%+v", text, calls)
+	}
+	logStr := logs.String()
+	if !strings.Contains(logStr, "tool_call_unconverted") || !strings.Contains(logStr, "count=1") {
+		t.Errorf("missing tool_call_unconverted log: %s", logStr)
+	}
+	if strings.Contains(logStr, "SECRET_PATH") {
+		t.Errorf("log must never leak argument content: %s", logStr)
+	}
+
+	stRec := uiDo(s.handler(), "GET", "/_status", "127.0.0.1:5000", "")
+	var st struct {
+		Counters map[string]int64 `json:"counters"`
+	}
+	_ = json.Unmarshal(stRec.Body.Bytes(), &st)
+	if st.Counters["tool_call_unconverted"] != 1 {
+		t.Errorf("tool_call_unconverted = %d, want 1", st.Counters["tool_call_unconverted"])
+	}
+	uiRec := uiDo(s.handler(), "GET", "/_ui", "127.0.0.1:5000", "")
+	if !strings.Contains(uiRec.Body.String(), "tool_call_unconverted") {
+		t.Errorf("UI page missing tool_call_unconverted tile")
+	}
 }
