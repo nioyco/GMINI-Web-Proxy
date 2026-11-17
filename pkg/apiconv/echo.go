@@ -245,12 +245,13 @@ func IsUpstreamGlitch(text string) bool {
 }
 
 var (
-	toolRefusalEN = regexp.MustCompile(`(?i)(none of (those|these|the)\b[^.\n]*(tools|commands)\b[^.\n]*(declared|available)|lack local (file|shell|filesystem|command) access|do not have access to (your|the|any) local (filesystem|files|folders|directory)|no (local )?tools are declared or available)`)
-	toolRefusalFR = regexp.MustCompile(`(?i)(aucun\b[^.\n]*(outil|des outils)\b[^.\n]*(n['’]est|ne sont)\s*(déclaré|disponible)|n['’]existent? pas dans mes outils actifs|n['’]ai pas accès (à ces|aux|à vos|aux dossiers|aux fichiers)\s*(dossiers|fichiers)?\s*locaux|aucun outil local n['’]est disponible)`)
+	toolRefusalEN        = regexp.MustCompile(`(?i)(none of (those|these|the)\b[^.\n]*(tools|commands)\b[^.\n]*(declared|available)|lack local (file|shell|filesystem|command) access|do not have access to (your|the|any) local (filesystem|files|folders|directory)|no (local )?tools are declared or available|tool[^.\n]*call[^.\n]*limit|action limit|maximum[^.\n]*tool|tool[^.\n]*quota)`)
+	toolRefusalFR        = regexp.MustCompile(`(?i)(aucun\b[^.\n]*(outil|des outils)\b[^.\n]*(n['’]est|ne sont)\s*(déclaré|disponible)|n['’]existent? pas dans mes outils actifs|n['’]ai pas accès (à ces|aux|à vos|aux dossiers|aux fichiers)\s*(dossiers|fichiers)?\s*locaux|aucun outil local n['’]est disponible|limite[^.\n]*(appels d['’]outils|d['’]actions|quota d['’]outils)|quota d['’]outils)`)
+	thoughtToolRefusalRe = regexp.MustCompile(`(?i)(file\s+tools\s+are\s+not\s+available|(?:local\s+|file\s+|command\s+)?tools\s+are\s+(?:not\s+available|unavailable)|no\s+(?:local\s+|file\s+|command\s+)?tools\s+(?:are\s+)?(?:available|declared)|simulated\s+[^.\n]*(?:report|content|counter-review|review|audit|response|output)|drafted\s+a\s+simulated|without\s+(?:any\s+|access\s+to\s+|using\s+|calling\s+)?(?:file\s+|local\s+)?tools?\b)`)
 )
 
 // IsUpstreamToolRefusal reports whether text is an upstream non-answer claiming
-// that local tools are undeclared or local files/commands are inaccessible,
+// that local tools are undeclared, unavailable, or at an invented limit/quota,
 // without emitting any tool call block.
 func IsUpstreamToolRefusal(text string) bool {
 	t := strings.TrimSpace(text)
@@ -261,6 +262,20 @@ func IsUpstreamToolRefusal(text string) bool {
 		return false
 	}
 	return toolRefusalEN.MatchString(t) || toolRefusalFR.MatchString(t)
+}
+
+// IsThoughtToolRefusalOrSimulation reports whether thought explicitly states
+// that local tools are unavailable or that the reply is simulated, while text
+// contains no tool_call block.
+func IsThoughtToolRefusalOrSimulation(thought, text string) bool {
+	th := strings.TrimSpace(thought)
+	if th == "" {
+		return false
+	}
+	if strings.Contains(text, "```tool_call") || strings.Contains(text, "```function_call") {
+		return false
+	}
+	return thoughtToolRefusalRe.MatchString(th) || toolRefusalEN.MatchString(th) || toolRefusalFR.MatchString(th)
 }
 
 var internalToolRe = regexp.MustCompile(`(?i)(expand_skills|expand_tools|retriever:expand_skills|<GenerateWidget\b|trigger(ed|ing)?\s+artifact\s+generation|artifact\s+generation\s+using)`)

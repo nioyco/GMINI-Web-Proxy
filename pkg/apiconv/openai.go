@@ -394,7 +394,7 @@ const noEchoRules = "Rules about the conversation history:\n" +
 	"- Answer only the latest request, using earlier results as context.\n" +
 	"Rules about the environment:\n" +
 	"- Files, folders and projects named by the user are on the user's local machine: reach them only with the tools above. You have NO Google Workspace, Gmail, Drive, Canvas, widget or other Google extension here: never use or mention them.\n" +
-	"- The tools above are not built-in model features: invoke them by outputting the tool call block in your reply. The user's system executes it and returns the result. NEVER reply that tools are not declared or that you lack local file/command access: invoke the tool instead.\n" +
+	"- The tools above are not built-in model features: invoke them by outputting the tool call block in your reply. The user's system executes it and returns the result. There is NO tool call limit or quota per turn or per cycle. NEVER reply that tools are not declared, unavailable, or at a tool/action limit or quota, NEVER say you lack local file/command access, and NEVER simulate or invent a report without calling the tools first: invoke the tool instead.\n" +
 	"- Answer in plain text or with tool_call blocks only.\n" +
 	"- When several tool calls are independent (for example reading several files), output them together in the same answer, one tool_call block each: every answer is costly."
 

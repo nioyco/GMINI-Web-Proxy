@@ -655,7 +655,8 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 	if res.earlyStopReason == "" {
 		isCannedErr := !res.released && apiconv.IsUpstreamCannedErrorWithMarker(res.rawText, res.errorMarker)
 		isGlitch := !res.released && !isCannedErr && apiconv.IsUpstreamGlitch(res.rawText)
-		isToolRefusal := !res.released && !isCannedErr && len(declared) > 0 && apiconv.IsUpstreamToolRefusal(res.rawText)
+		isToolRefusal := !res.released && !isCannedErr && len(declared) > 0 &&
+			(apiconv.IsUpstreamToolRefusal(res.rawText) || apiconv.IsThoughtToolRefusalOrSimulation(res.thoughtText, res.rawText))
 		if isCannedErr {
 			if normalizeCannedErrorRetry(s.cfg.CannedErrorRetry) != "once" {
 				s.recordModelFailure(model)
@@ -865,6 +866,7 @@ type streamToolsHooks struct {
 
 type streamToolsResult struct {
 	rawText             string
+	thoughtText         string
 	earlyStopReason     string // "" | "marker" | "size" | "duration"
 	earlyStopMsg        string
 	internalToolRetry   bool
@@ -937,12 +939,13 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			}
 		},
 	}
-	if hooks != nil && hooks.progressive && s.cfg.StreamThoughts {
+	if (hooks != nil && hooks.progressive && s.cfg.StreamThoughts) || len(declared) > 0 {
 		h.Thought = func(d string) { push(event{thought: d}) }
 	}
 	go func() { done <- s.streamEvents(genCtx, p, h) }()
 
 	var raw strings.Builder
+	var thoughtBuilder strings.Builder
 	filter := func(d string) string {
 		if hooks == nil || hooks.echo == nil || s.cfg.DisableEchoFilter {
 			return d
@@ -1230,13 +1233,14 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			return true
 		}
 		if e.thought != "" {
-			hasContent = true
-			thoughtBytes += len(e.thought)
-			lastFrameTime = time.Now()
-			if ri != nil {
-				ri.setReceived(thoughtBytes, raw.Len())
-			}
-			if hooks != nil && hooks.progressive {
+			thoughtBuilder.WriteString(e.thought)
+			if hooks != nil && hooks.progressive && s.cfg.StreamThoughts {
+				hasContent = true
+				thoughtBytes += len(e.thought)
+				lastFrameTime = time.Now()
+				if ri != nil {
+					ri.setReceived(thoughtBytes, raw.Len())
+				}
 				res.forwarded = true
 				return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, e.thought)))
 			}
@@ -1329,7 +1333,10 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 				// The first few hundred bytes are held back: a canned non-answer of
 				// Gemini is short, and holding it lets the request be retried instead.
 				early.WriteString(out)
-				if raw.Len() >= earlyHold {
+				holdForRefusal := len(declared) > 0 &&
+					(apiconv.IsThoughtToolRefusalOrSimulation(thoughtBuilder.String(), raw.String()) ||
+						(raw.Len() <= 2000 && apiconv.IsUpstreamToolRefusal(raw.String())))
+				if raw.Len() >= earlyHold && !holdForRefusal {
 					res.released, out = true, early.String()
 				} else {
 					out = ""
@@ -1563,6 +1570,7 @@ loop:
 		cancelled()
 		return res
 	}
+	res.thoughtText = thoughtBuilder.String()
 	if res.earlyStopReason == "" {
 		res.rawText = raw.String()
 		if res.genErr == nil && !res.aborted && !res.noContentTimedOut && !res.cannedRetryTimedOut &&
@@ -1650,7 +1658,7 @@ func glitchRetryParams(p gemini.GenParams) gemini.GenParams {
 	return p
 }
 
-const toolRefusalRetryNote = "\n\n[Retry instruction: The listed tools are NOT built-in model features. You invoke them by outputting a ```tool_call block in your reply; the user's system executes it locally and returns the result. Never reply that tools are not declared or that you lack local access: output a ```tool_call block now or reply in plain text.]"
+const toolRefusalRetryNote = "\n\n[Retry instruction: The listed tools are NOT built-in model features. You invoke them by outputting a ```tool_call block in your reply; the user's system executes it locally and returns the result. There is NO tool call limit or quota per turn or per cycle. NEVER reply that tools are not declared, unavailable, or at a tool/action limit or quota, and NEVER simulate or invent a report without calling the tools first: output a ```tool_call block now or reply in plain text.]"
 
 func toolRefusalRetryParams(p gemini.GenParams) gemini.GenParams {
 	p.Prompt += toolRefusalRetryNote
