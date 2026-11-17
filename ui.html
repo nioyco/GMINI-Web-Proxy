@@ -9,16 +9,27 @@
 @media (prefers-color-scheme:dark){:root{--bg:#111316;--card:#1a1d22;--ink:#e8eaee;--mute:#9aa2ae;--line:#2c313a;--ok:#6fd49b;--okbg:#17352a;--warn:#f0b65a;--warnbg:#3a2c12;--bad:#ff8f86;--badbg:#3d1c1a;--info:#8fbcff;--infobg:#17293f}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-header{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;padding:18px 24px 6px}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;justify-content:space-between;padding:18px 24px 8px;max-width:1320px}
+header .hleft{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline}
 h1{font-size:20px;margin:0}
 h2{font-size:15px;margin:0 0 10px}
 .sub{color:var(--mute);font-size:12px}
-main{padding:10px 24px 40px;display:grid;gap:16px;max-width:1280px}
+main{padding:10px 24px 40px;display:grid;gap:18px;max-width:1320px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;overflow-x:auto}
-.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
-.tile{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
-.tile .k{color:var(--mute);font-size:12px}
-.tile .v{font-size:16px;font-weight:600;margin-top:2px}
+.groups{display:grid;gap:16px}
+.group-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--mute);margin:0 0 8px 2px}
+.tiles{display:grid;gap:12px;align-items:stretch}
+.tiles-3{grid-template-columns:repeat(auto-fit,minmax(310px,1fr))}
+.tiles-4{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:13px 15px;display:flex;flex-direction:column;gap:8px}
+.tile-head{display:flex;justify-content:space-between;align-items:center;gap:8px;border-bottom:1px solid var(--line);padding-bottom:6px}
+.tile .k{color:var(--mute);font-size:12px;font-weight:600}
+.tile .v{font-size:15px;font-weight:600;margin-top:0}
+.kv-list{display:grid;gap:5px}
+.kv{display:flex;justify-content:space-between;align-items:baseline;gap:10px;font-size:12.5px}
+.kv-k{color:var(--mute);flex-shrink:0}
+.kv-v{text-align:right;font-weight:500}
+.tile-foot{margin-top:auto;padding-top:6px;border-top:1px dashed var(--line)}
 table{border-collapse:collapse;width:100%;font-size:13px}
 th{text-align:left;color:var(--mute);font-weight:500;font-size:12px;padding:6px 10px 6px 0;border-bottom:1px solid var(--line);white-space:nowrap}
 td{padding:7px 10px 7px 0;border-bottom:1px solid var(--line);vertical-align:top}
@@ -30,7 +41,9 @@ code,.mono{font-family:var(--mono);font-size:12px}
 button{font:inherit;padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer}
 button:hover:not(:disabled){border-color:var(--mute)}
 button:disabled{opacity:.5;cursor:not-allowed}
-.note{color:var(--mute);font-size:12px;margin-top:10px}
+.note{color:var(--mute);font-size:12px;line-height:1.55;margin:12px 0 0;padding:8px 12px;background:var(--bg);border-left:3px solid var(--line);border-radius:0 6px 6px 0}
+.note ul{margin:4px 0 0;padding-left:18px}
+.note li{margin:2px 0}
 .cmd{display:block;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-top:6px;font-family:var(--mono);font-size:12px;white-space:pre-wrap;word-break:break-all;user-select:all}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:space-between;margin-bottom:10px}
 .calls-scroll{max-height:540px;overflow-y:auto;overflow-x:auto;border:1px solid var(--line);border-radius:8px}
@@ -41,18 +54,25 @@ button:disabled{opacity:.5;cursor:not-allowed}
 </style>
 </head>
 <body>
-<header><h1>GMINI Control</h1><span class="sub" id="ver"></span><span class="sub" id="upd"></span></header>
+<header><div class="hleft"><h1>GMINI Control</h1><span class="sub" id="ver"></span></div><span class="sub" id="upd"></span></header>
 <main>
 <div class="card bad" id="err"></div>
 <div class="card warn" id="idwarn" style="display:none"></div>
 <div class="card warn" id="envwarn" style="display:none"></div>
-<div class="tiles" id="tiles"></div>
+<div class="groups" id="tiles"></div>
 
 <section class="card">
 <div class="row"><h2>Modèles détectés chez Google et qui répond réellement</h2><button id="refresh">Actualiser le catalogue</button></div>
 <table id="models"></table>
-<p class="note">« Nom chez Google » est le nom complet (avec version) que Google renvoie lui-même pour cet identifiant ; dessous, la rubrique du menu de Gemini. « Qui répond » vient du journal des appels : Google n'indique pas toujours le modèle servi, et le remplace parfois sans prévenir (limite d'utilisation atteinte). « Indiqué par Google » = le nom du modèle figure dans la réponse elle-même. « Repli probable » = Google n'a rien indiqué, et ce modèle qui fournit d'habitude ses pensées n'en a pas fourni.</p>
-<p class="note" id="refreshmsg"></p>
+<div class="note">
+  <b>Repères de lecture :</b>
+  <ul>
+    <li><b>Nom chez Google</b> : nom complet (avec version) renvoyé par Google pour cet identifiant ; dessous, la rubrique du menu Gemini.</li>
+    <li><b>Qui répond</b> : issu du journal des appels (Google peut remplacer un modèle sans prévenir si une limite est atteinte).</li>
+    <li><b>Indiqué par Google</b> = le nom figure dans la réponse · <b>Repli probable</b> = aucun nom indiqué et absence inhabituelle de pensées.</li>
+  </ul>
+</div>
+<p class="note" id="refreshmsg" style="display:none"></p>
 </section>
 
 <section class="card">
@@ -81,8 +101,14 @@ button:disabled{opacity:.5;cursor:not-allowed}
 
 <section class="card">
 <h2>Quota Google</h2>
-<p id="quota"></p>
-<p class="note">Le quota réel (fenêtre de 5 h et limite hebdomadaire) n'est pas encore lu chez Google : le consulter sur gemini.google.com/usage. Repère mesuré le 14/11/2026 sur 3.1 Pro : environ 2,6 % de la fenêtre de 5 h par demande envoyée à Gemini, soit une quarantaine de demandes. Une tâche dans Antigravity envoie une demande par étape (lecture, commande, écriture), chacune avec toute la conversation.</p>
+<p id="quota" style="margin:0 0 8px"></p>
+<div class="note">
+  Le quota réel (fenêtre de 5 h et limite hebdomadaire) n'est pas encore lu chez Google : le consulter sur <code>gemini.google.com/usage</code>.
+  <ul>
+    <li><b>Repère mesuré (14/11/2026 sur 3.1 Pro)</b> : environ <b>2,6 %</b> de la fenêtre de 5 h par demande envoyée (soit ~40 demandes).</li>
+    <li><b>Impact Antigravity</b> : chaque étape (lecture, commande, écriture) envoie une nouvelle demande incluant l'historique de la conversation.</li>
+  </ul>
+</div>
 </section>
 </main>
 <script>
@@ -152,26 +178,65 @@ async function load(){
   const bgBreakdown=["accounts","app","batchexecute","generate","other"].filter(f=>bgFam[f]>0).map(f=>`${f} : ${bgFam[f]}`).join(" · ");
   const bgMain=!bg.last_at?badge("ok","aucun depuis le démarrage"):`${bg.total_24h||0} sur 24 h`+(bgBreakdown?` <span class="sub">(${esc(bgBreakdown)})</span>`:"");
   const bgSub=(bg.last_at?`<div class="sub">Dernier : ${hm(bg.last_at)}${bg.last_family?" ("+esc(bg.last_family)+(bg.last_reason?", "+esc(bg.last_reason):"")+")":""}</div>`:"")+`<div class="sub">calme : ${bg.idle_quiet_min||0} min · rotation : ${bg.cookie_rotation?"on":"off"} · reprise auth : ${bg.auth_recovery?"on":"off"}${bg.refused_24h?` · refusés (24 h) : ${bg.refused_24h}`:""}</div>`;
-  const t=[
-    ["Session Google",(!s.authenticated?badge("bad","Non connectée"):ss.session_degraded?badge("warn","Session affaiblie : actualiser le cookie"):badge("ok","Connectée"))+`<div class="sub">Âge du jeton : ${tokAgeHTML}</div><div class="sub">Actualisation auto : ${esc(arState)}${arBtn}</div>`+(ar.configured?`<div class="sub">Dernier lancement : ${esc(arLast)}</div>`:"")+arRunBtn],
-    ["Blocage anti-robot",g.active?badge("bad","Actif, niveau "+g.level):badge("ok","Aucun")+` <span class="sub">${g.total} au total</span>`],
-    ["Appels de fond vers Google",bgMain+bgSub],
-    ["Catalogue",`${s.models_count} modèles <span class="sub">${esc(s.models_source)}, ${ss.catalog_age_sec>86400?`<span style="color:var(--warn);font-weight:600">${age(ss.catalog_age_sec)}</span>`:age(ss.catalog_age_sec)}</span>`+(ss.session_degraded?" "+badge("warn","1 modèle ignoré"):"")],
-    ["Dernière rotation du cookie",!s.cookie_rotation.enabled?`désactivée (n'a jamais abouti — voir R&D-14)`:((s.cookie_rotation.suspended?badge("warn","Rotation suspendue")+" ":"")+age(s.cookie_rotation.last_success_age_sec)+` <span class="sub">${esc(s.cookie_rotation.last_result||"")}</span>`+(s.cookie_rotation.suspended?`<div class="sub">Âge du jeton (__Secure-1PSIDTS) : ${age(s.cookie_rotation.token_age_sec)} — Le renouvellement automatique est arrêté : relancer le raccourci 7 (choix 2) pour garder la session</div>`:""))],
-    ["Requêtes en cours",String(Math.max(0,s.active_requests-1))],
-    ["Proxy démarré depuis",age(s.uptime_sec)],
-    ["Trace des échanges",s.content_trace_enabled?badge("info","Activée"):badge("none","Désactivée")],
-    ["Conversations temporaires",s.temporary_chat?badge("info","Activées"):badge("none","Désactivées")],
-    ["Niveau de réflexion par défaut",esc(s.thinking_level_default||"non envoyé")],
-    ["Outils internes Gemini",badge(s.internal_tool_action==="retry"?"warn":s.internal_tool_action==="off"?"none":"info",esc(s.internal_tool_action||"notify"))+(s.internal_tool_action==="retry"?`<div class="sub">le mode retry consomme une demande de quota en plus</div>`:`<div class="sub">notify = note · retry = relance (1 quota en plus) · off</div>`)],
-    ["Relance erreur interne",badge(s.canned_error_retry==="once"?"warn":"none",esc(s.canned_error_retry||"off"))+(s.canned_error_retry==="once"?` <span class="sub">max ${s.canned_error_retry_sec||25} s</span>`:"")+`<div class="sub">off = pas de relance (défaut) · once = 1 relance bornée</div>`],
-    ["Arrêts anticipés",(s.counters?.early_stop?badge("warn",String(s.counters.early_stop)):badge("none","0"))+`<div class="sub">marqueur : ${s.counters?.early_stop_marker||0} · taille : ${s.counters?.early_stop_size||0} · durée : ${s.counters?.early_stop_duration||0}</div>`],
-    ["Appels non convertis",(s.counters?.tool_call_unconverted?badge("bad",String(s.counters.tool_call_unconverted)):badge("none","0"))+`<div class="sub">filet de sécurité (blocs tool_call restants)</div>`],
-    ["Raccourci code_reference",badge(s.code_ref_fastpath?"info":"none",s.code_ref_fastpath?"on":"off")+" "+(s.counters?.code_ref_fastpath?badge("warn",String(s.counters.code_ref_fastpath)):badge("none","0"))+`<div class="sub">GEMINI_CODE_REF_FASTPATH (0 = attente normale)</div>`],
-    ["Réponses vides Google",(s.counters?.upstream_empty_reply?badge("bad",String(s.counters.upstream_empty_reply)):badge("none","0"))+`<div class="sub">flux clos sans candidat, texte ni pensée</div>`],
-    ["Réglages .env",badge(s.env_modified_since_start?"warn":"ok",s.env_modified_since_start?"modifié depuis démarrage":"à jour")+` <button id="env-reload-tile" style="margin-left:6px;padding:2px 8px;font-size:12px">Recharger .env</button><div class="sub">code_ref_fastpath : ${s.code_ref_fastpath?"on":"off"} · no_internal_code_exec_rule : ${s.no_internal_code_exec_rule?"on":"off"}</div><div class="sub">wait_note_sec : ${s.wait_note_sec??15} s · cookie_auto_refresh : ${ar.enabled?"on":"off"}</div>`]
+  const kv=(k,v)=>`<div class="kv"><span class="kv-k">${k}</span><span class="kv-v">${v}</span></div>`;
+  const renderCard=(head,badgeHTML,body,foot)=>`<div class="tile"><div class="tile-head"><span class="k">${head}</span><span>${badgeHTML||""}</span></div><div>${body}</div>${foot?`<div class="tile-foot">${foot}</div>`:""}</div>`;
+  const sessionBadge=!s.authenticated?badge("bad","Non connectée"):ss.session_degraded?badge("warn","Session affaiblie : actualiser le cookie"):badge("ok","Connectée");
+  const sessionBody=`<div class="kv-list">`+
+    kv("Âge du jeton",tokAgeHTML)+
+    kv("Actualisation auto :",esc(arState))+
+    (ar.configured?kv("Dernier lancement",esc(arLast)):"")+
+    `</div>`+
+    (ar.configured?`<div style="margin-top:8px">${arBtn}</div>`:"");
+  const proxyBody=`<div class="kv-list">`+
+    kv("Requêtes en cours",`<b>${Math.max(0,s.active_requests-1)}</b>`)+
+    kv("Proxy démarré depuis",age(s.uptime_sec))+
+    kv("Catalogue",`${s.models_count} modèles (${esc(s.models_source)}, ${ss.catalog_age_sec>86400?`<span style="color:var(--warn);font-weight:600">${age(ss.catalog_age_sec)}</span>`:age(ss.catalog_age_sec)})${ss.session_degraded?" "+badge("warn","1 modèle ignoré"):""}`)+
+    kv("Blocage anti-robot",(g.active?badge("bad","Actif, niveau "+g.level):badge("ok","Aucun"))+` <span class="sub">(${g.total} au total)</span>`)+
+    `</div>`;
+  const rotValue=!s.cookie_rotation.enabled?`désactivée (n'a jamais abouti — voir R&D-14)`:((s.cookie_rotation.suspended?badge("warn","Rotation suspendue")+" ":"")+age(s.cookie_rotation.last_success_age_sec)+(s.cookie_rotation.last_result?` <span class="sub">(${esc(s.cookie_rotation.last_result)})</span>`:""));
+  const rotFoot=s.cookie_rotation.suspended?`<div class="sub">Âge du jeton (__Secure-1PSIDTS) : ${age(s.cookie_rotation.token_age_sec)} — Le renouvellement automatique est arrêté : relancer le raccourci 7 (choix 2) pour garder la session</div>`:"";
+  const healthBody=`<div class="kv-list">`+
+    kv("Appels de fond vers Google",bgMain)+
+    (bg.last_at?kv("Dernier appel de fond",`${hm(bg.last_at)}${bg.last_family?" ("+esc(bg.last_family)+(bg.last_reason?", "+esc(bg.last_reason):"")+")":""}`):"")+
+    kv("Paramètres fond",`calme : ${bg.idle_quiet_min||0} min · rotation : ${bg.cookie_rotation?"on":"off"} · reprise auth : ${bg.auth_recovery?"on":"off"}${bg.refused_24h?` · refusés (24 h) : ${bg.refused_24h}`:""}`)+
+    kv("Dernière rotation du cookie",rotValue)+
+    `</div>`;
+  const envHeadBadge=badge(s.env_modified_since_start?"warn":"ok",s.env_modified_since_start?"modifié depuis démarrage":"à jour")+` <button id="env-reload-tile" style="margin-left:4px;padding:2px 8px;font-size:12px">Recharger .env</button>`;
+  const envBody=`<div class="kv-list">`+
+    kv("<code>code_ref_fastpath</code>",s.code_ref_fastpath?"on":"off")+
+    kv("<code>no_internal_code_exec_rule</code>",s.no_internal_code_exec_rule?"on":"off")+
+    kv("<code>wait_note_sec</code>",`${s.wait_note_sec??15} s`)+
+    kv("<code>cookie_auto_refresh</code>",ar.enabled?"on":"off")+
+    `</div>`;
+  const behaviorBody=`<div class="kv-list">`+
+    kv("Niveau de réflexion par défaut",`<b>${esc(s.thinking_level_default||"non envoyé")}</b>`)+
+    kv("Outils internes Gemini",badge(s.internal_tool_action==="retry"?"warn":s.internal_tool_action==="off"?"none":"info",esc(s.internal_tool_action||"notify")))+
+    kv("Relance erreur interne",badge(s.canned_error_retry==="once"?"warn":"none",esc(s.canned_error_retry||"off"))+(s.canned_error_retry==="once"?` <span class="sub">max ${s.canned_error_retry_sec||25} s</span>`:""))+
+    `</div>`;
+  const behaviorFoot=`<span class="sub">notify = note · retry = relance (1 quota en plus) · off = pas de relance</span>`;
+  const privacyBody=`<div class="kv-list">`+
+    kv("Trace des échanges",s.content_trace_enabled?badge("info","Activée"):badge("none","Désactivée"))+
+    kv("Conversations temporaires",s.temporary_chat?badge("info","Activées"):badge("none","Désactivées"))+
+    `</div>`;
+  const groups=[
+    {title:"Session, Proxy & Santé",cols:"tiles-3",cards:[
+      renderCard("Session Google",sessionBadge,sessionBody,arRunBtn),
+      renderCard("Proxy & Catalogue",badge("ok","En ligne"),proxyBody,""),
+      renderCard("Appels de fond & Rotation","",healthBody,rotFoot),
+    ]},
+    {title:"Garde-fous & Compteurs",cols:"tiles-4",cards:[
+      renderCard("Arrêts anticipés",s.counters?.early_stop?badge("warn",String(s.counters.early_stop)):badge("none","0"),`<div class="kv-list">${kv("Marqueur",s.counters?.early_stop_marker||0)}${kv("Taille",s.counters?.early_stop_size||0)}${kv("Durée",s.counters?.early_stop_duration||0)}</div>`,""),
+      renderCard("Appels non convertis",s.counters?.tool_call_unconverted?badge("bad",String(s.counters.tool_call_unconverted)):badge("none","0"),`<div class="sub">Filet de sécurité sur les blocs <code>tool_call</code> non reconnus en première passe.</div>`,""),
+      renderCard("Raccourci code_reference",badge(s.code_ref_fastpath?"info":"none",s.code_ref_fastpath?"on":"off")+" "+(s.counters?.code_ref_fastpath?badge("warn",String(s.counters.code_ref_fastpath)):badge("none","0")),`<div class="sub">Conversion directe <code>GEMINI_CODE_REF_FASTPATH</code> (0 = attente normale).</div>`,""),
+      renderCard("Réponses vides Google",s.counters?.upstream_empty_reply?badge("bad",String(s.counters.upstream_empty_reply)):badge("none","0"),`<div class="sub">Flux clos sans candidat, texte ni pensée.</div>`,""),
+    ]},
+    {title:"Réglages actifs & Confidentialité",cols:"tiles-3",cards:[
+      renderCard("Réglages .env",envHeadBadge,envBody,""),
+      renderCard("Comportement modèle",badge("none","Paramètres"),behaviorBody,behaviorFoot),
+      renderCard("Journal & Confidentialité","",privacyBody,""),
+    ]},
   ];
-  $("tiles").innerHTML=t.map(([k,v])=>`<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+  $("tiles").innerHTML=groups.map(grp=>`<div><div class="group-title">${grp.title}</div><div class="tiles ${grp.cols}">${grp.cards.join("")}</div></div>`).join("");
   const envReloadTile=$("env-reload-tile");
   if(envReloadTile){envReloadTile.onclick=async()=>{envReloadTile.disabled=true;try{await fetch("/_ui/api/config/reload",{method:"POST",headers:{"X-GMINI-UI":TOKEN}});}finally{load();}};}
   const arToggle=$("ar-toggle");
@@ -229,16 +294,19 @@ function syncRefresh(){
     const err=$("refreshmsg").dataset.err||"";
     if(err||$("refreshmsg").dataset.auto==="1"){
       $("refreshmsg").textContent=(err?err+" — ":"")+"Prochain essai autorisé dans "+fmtCooldown(rem)+".";
+      $("refreshmsg").style.display="block";
     }
   }else{
     b.disabled=false;
     b.textContent="Actualiser le catalogue";
     if($("refreshmsg").dataset.auto==="1"){$("refreshmsg").textContent="";$("refreshmsg").dataset.auto="";}
+    $("refreshmsg").style.display=$("refreshmsg").textContent?"block":"none";
   }
 }
 $("refresh").onclick=async()=>{
   $("refreshmsg").dataset.err="";$("refreshmsg").dataset.auto="";
   $("refreshmsg").textContent="Demande en cours (un seul appel à Google)…";
+  $("refreshmsg").style.display="block";
   try{const r=await fetch("/_ui/api/models/refresh",{method:"POST",headers:{"X-GMINI-UI":TOKEN}});const j=await r.json();
     if(j.cooldown_sec>0)refreshNextMs=Date.now()+j.cooldown_sec*1000;
     if(j.refreshed){$("refreshmsg").textContent=`Catalogue actualisé : ${j.models_count} modèles.`;}
