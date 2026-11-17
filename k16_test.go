@@ -396,3 +396,54 @@ func TestK16_B2_UpstreamEmptyReplyNoRetryAndMetrics(t *testing.T) {
 		t.Fatalf("stream with candidate/thought must not be classified as upstream_empty_reply")
 	}
 }
+
+func TestK16_B3_PromptWarnKBConfigStatusAndUI(t *testing.T) {
+	noEnv := filepath.Join(t.TempDir(), "missing.env")
+	t.Setenv("GEMINI_PROMPT_WARN_KB", "")
+	cfg := loadConfig(noEnv)
+	if cfg.PromptWarnKB != 300 {
+		t.Fatalf("default PromptWarnKB = %d, want 300", cfg.PromptWarnKB)
+	}
+	sDef := newTestServer(t, cfg)
+	rr := httptest.NewRecorder()
+	sDef.handler().ServeHTTP(rr, newReq(http.MethodGet, "/_status", nil))
+	var stDef struct {
+		PromptWarnKB int `json:"prompt_warn_kb"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &stDef); err != nil || stDef.PromptWarnKB != 300 {
+		t.Fatalf("/_status default prompt_warn_kb = %d (err=%v), want 300", stDef.PromptWarnKB, err)
+	}
+
+	t.Setenv("GEMINI_PROMPT_WARN_KB", "150")
+	cfgCustom := loadConfig(noEnv)
+	cfgCustom.UIEnabled = true
+	sCustom := newTestServer(t, cfgCustom)
+	rr2 := httptest.NewRecorder()
+	sCustom.handler().ServeHTTP(rr2, newReq(http.MethodGet, "/_status", nil))
+	var stCustom struct {
+		PromptWarnKB int `json:"prompt_warn_kb"`
+	}
+	if err := json.Unmarshal(rr2.Body.Bytes(), &stCustom); err != nil || stCustom.PromptWarnKB != 150 {
+		t.Fatalf("/_status custom prompt_warn_kb = %d (err=%v), want 150", stCustom.PromptWarnKB, err)
+	}
+
+	t.Setenv("GEMINI_PROMPT_WARN_KB", "0")
+	cfgOff := loadConfig(noEnv)
+	sOff := newTestServer(t, cfgOff)
+	rr3 := httptest.NewRecorder()
+	sOff.handler().ServeHTTP(rr3, newReq(http.MethodGet, "/_status", nil))
+	var stOff struct {
+		PromptWarnKB int `json:"prompt_warn_kb"`
+	}
+	if err := json.Unmarshal(rr3.Body.Bytes(), &stOff); err != nil || stOff.PromptWarnKB != 0 {
+		t.Fatalf("/_status disabled prompt_warn_kb = %d (err=%v), want 0", stOff.PromptWarnKB, err)
+	}
+
+	wHTML := uiDo(sCustom.handler(), http.MethodGet, "/_ui", "127.0.0.1:5000", "")
+	html := wHTML.Body.String()
+	for _, want := range []string{"koKB", "prompt_warn_kb", "fmtPrompt(c.prompt_bytes)"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("ui.html missing %q", want)
+		}
+	}
+}

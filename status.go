@@ -36,6 +36,7 @@ type statusResponse struct {
 	StreamThoughts      bool                    `json:"stream_thoughts"`            // GEMINI_STREAM_THOUGHTS
 	ThinkingLevel       string                  `json:"thinking_level_default"`     // GEMINI_THINKING_LEVEL ("" = not sent)
 	MaxPromptBytes      int                     `json:"max_prompt_bytes"`           // GEMINI_MAX_PROMPT_BYTES (0 = no limit)
+	PromptWarnKB        int                     `json:"prompt_warn_kb"`             // GEMINI_PROMPT_WARN_KB (default 300; 0 = off)
 	MaxHeldBytes        int                     `json:"max_held_bytes"`             // GEMINI_MAX_HELD_BYTES (0 = no limit)
 	MaxHeldSec          int                     `json:"max_held_sec"`               // GEMINI_MAX_HELD_SEC (0 = no limit)
 	InternalToolAction  string                  `json:"internal_tool_action"`       // GEMINI_INTERNAL_TOOL_ACTION (notify|retry|off)
@@ -326,6 +327,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	resp.MarkerNeutralized = apiconv.MarkerNeutralization()
 	resp.StreamProgress, resp.StreamThoughts = s.cfg.StreamToolsProgress, s.cfg.StreamThoughts
 	resp.ThinkingLevel, resp.MaxPromptBytes = s.cfg.DefaultThinkingLevel, s.cfg.MaxPromptBytes
+	resp.PromptWarnKB = s.promptWarnKB()
 	resp.MaxHeldBytes, resp.MaxHeldSec = s.maxHeldBytes(), int(s.maxHeldDuration().Seconds())
 	resp.TraceEnabled = s.client.TraceEnabled()
 	resp.TemporaryChat = s.cfg.Gemini.TemporaryChat

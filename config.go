@@ -108,8 +108,10 @@ type Config struct {
 	ThinkingModes         map[string]int
 	ThinkingModesExplicit bool
 	// MaxPromptBytes refuses (413) a prompt larger than this (GEMINI_MAX_PROMPT_BYTES,
-	// 0 = no limit).
+	// 0 = no limit). PromptWarnKB highlights prompt sizes in orange above N KiB on
+	// GMINI Control (GEMINI_PROMPT_WARN_KB, default 300; 0 disables via -1).
 	MaxPromptBytes int
+	PromptWarnKB   int
 	// AllowedHosts are extra Host header values accepted beside the loopback names
 	// (GEMINI_ALLOWED_HOSTS, comma-separated).
 	AllowedHosts []string
@@ -183,6 +185,7 @@ func loadConfig(envFile string) *Config {
 		ThinkingModes:               parseModeCodes(getEnv("GEMINI_THINKING_MODE_CODES", defaultThinkingModeCodes)),
 		ThinkingModesExplicit:       strings.TrimSpace(getEnv("GEMINI_THINKING_MODE_CODES", "")) != "",
 		MaxPromptBytes:              getEnvInt("GEMINI_MAX_PROMPT_BYTES", 0),
+		PromptWarnKB:                capWithDisable(getEnvInt("GEMINI_PROMPT_WARN_KB", 300), 300),
 		CORSOrigins:                 splitKeys(getEnv("GEMINI_CORS_ORIGINS", "")),
 		AllowedHosts:                splitKeys(getEnv("GEMINI_ALLOWED_HOSTS", "")),
 		ModelsRefreshHours:          nonNegative(getEnvInt("GEMINI_MODELS_REFRESH_HOURS", 0), 0),

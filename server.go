@@ -1719,6 +1719,16 @@ func (s *Server) silenceWarningSec() int {
 	return 45
 }
 
+func (s *Server) promptWarnKB() int {
+	if s.cfg.PromptWarnKB < 0 {
+		return 0
+	}
+	if s.cfg.PromptWarnKB == 0 {
+		return 300
+	}
+	return s.cfg.PromptWarnKB
+}
+
 func (s *Server) maxHeldBytes() int {
 	if s.cfg.MaxHeldBytes < 0 {
 		return 0
