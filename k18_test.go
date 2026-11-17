@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
+	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
 )
 
 // K18 T1: GEMINI_CODE_REF_FASTPATH defaults to true, BuildCommandToolCallFromCodeRef
@@ -228,5 +229,77 @@ func TestK18_T3_PrepareRequestBlindSpot10To90Min(t *testing.T) {
 	waitForCondition(t, 2*time.Second, func() bool { return !ar.Status().Running })
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("expected refresh script to have run: %v", err)
+	}
+}
+
+// K18 T4: auto_refresh_enabled persists in .state.json on UI toggle and restores on restart,
+// and GEMINI_COOKIE_AUTO_REFRESH_ENABLED in .env can also set it (default false if unset).
+func TestK18_T4_AutoRefreshPersistAndEnv(t *testing.T) {
+	dir := t.TempDir()
+	cookieFile := filepath.Join(dir, "cookie.txt")
+	stateFile := filepath.Join(dir, "cookie.txt.state.json")
+	if err := os.WriteFile(cookieFile, []byte("SAPISID=s1; __Secure-1PSIDTS=t1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := writeFakeScript(t, "echo ok")
+
+	newClient := func() *gemini.Client {
+		c, err := gemini.New(gemini.Config{
+			GeminiBL:   "bl_old",
+			CookieFile: cookieFile,
+			StateFile:  stateFile,
+		}, testLogger())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.RestoreState()
+		return c
+	}
+
+	// 1. Fresh start -> disabled by default.
+	c1 := newClient()
+	cfg1 := testConfig()
+	cfg1.UIEnabled = true
+	cfg1.CookieRefreshCmd = script
+	cfg1.CookieAutoRefreshMin = 90
+	s1 := newServer(cfg1, c1, testLogger())
+	if s1.autoRefresh.Status().Enabled {
+		t.Fatal("expected disabled on fresh start")
+	}
+
+	// 2. Toggle ON via UI API -> persisted to .state.json.
+	uiRec := uiDo(s1.handler(), http.MethodPost, "/_ui/api/cookie-refresh/toggle", "127.0.0.1:12345", s1.uiToken)
+	if uiRec.Code != http.StatusOK {
+		t.Fatalf("toggle status=%d body=%s", uiRec.Code, uiRec.Body.String())
+	}
+	if !s1.autoRefresh.Status().Enabled {
+		t.Fatal("expected enabled after toggle")
+	}
+
+	// 3. Simulated proxy restart -> restored as enabled from .state.json!
+	c2 := newClient()
+	s2 := newServer(cfg1, c2, testLogger())
+	if !s2.autoRefresh.Status().Enabled {
+		t.Fatal("expected auto_refresh_enabled=true to persist across restart")
+	}
+
+	// 4. Toggle OFF -> persisted as false across restart.
+	uiDo(s2.handler(), http.MethodPost, "/_ui/api/cookie-refresh/toggle", "127.0.0.1:12345", s2.uiToken)
+	c3 := newClient()
+	s3 := newServer(cfg1, c3, testLogger())
+	if s3.autoRefresh.Status().Enabled {
+		t.Fatal("expected auto_refresh_enabled=false to persist after disabling")
+	}
+
+	// 5. Env var GEMINI_COOKIE_AUTO_REFRESH_ENABLED=true overrides when set.
+	t.Setenv("GEMINI_COOKIE_AUTO_REFRESH_ENABLED", "true")
+	cfgEnv := loadConfig("")
+	if !cfgEnv.CookieAutoRefreshEnabledSet || !cfgEnv.CookieAutoRefreshEnabled {
+		t.Fatalf("expected CookieAutoRefreshEnabled=true from env, got %+v", cfgEnv)
+	}
+	cfgEnv.CookieRefreshCmd = script
+	s4 := newServer(cfgEnv, c3, testLogger())
+	if !s4.autoRefresh.Status().Enabled {
+		t.Fatal("expected GEMINI_COOKIE_AUTO_REFRESH_ENABLED=true to enable auto-refresh")
 	}
 }

@@ -153,15 +153,20 @@ func TestK16_A4_StartupDisabledSixHoursWithAndWithoutRequests(t *testing.T) {
 	}
 
 	// 4. Simulated restart (new client + new server on the same state/cookie files):
-	//    must be disabled again!
+	//    K18 T4 persists the user's explicit UI toggle across restarts; toggling off
+	//    persists disabled as well.
 	client2, err := gemini.New(cfg.Gemini, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
 	client2.RestoreState()
 	s2 := newServer(cfg, client2, logger)
-	if st2 := s2.autoRefresh.Status(); st2.Enabled {
-		t.Fatalf("after simulated restart, auto-refresh must be disabled again, got %+v", st2)
+	if st2 := s2.autoRefresh.Status(); !st2.Enabled {
+		t.Fatalf("after simulated restart, persisted auto-refresh must remain enabled, got %+v", st2)
+	}
+	wOff := uiDo(s2.handler(), http.MethodPost, "/_ui/api/cookie-refresh/toggle", "127.0.0.1:12345", s2.uiToken)
+	if wOff.Code != http.StatusOK {
+		t.Fatalf("toggle off = %d %s", wOff.Code, wOff.Body.String())
 	}
 	s2.autoRefresh.nowFn = func() time.Time { return now.Add(6 * time.Hour) }
 	s2.autoRefresh.PrepareRequest(context.Background(), nil)
@@ -169,7 +174,7 @@ func TestK16_A4_StartupDisabledSixHoursWithAndWithoutRequests(t *testing.T) {
 	s2.autoRefresh.TriggerEarly()
 	time.Sleep(40 * time.Millisecond)
 	if _, err := os.Stat(markerFile); !os.IsNotExist(err) {
-		t.Fatal("restarted server launched process without UI toggle")
+		t.Fatal("disabled server launched process unexpectedly")
 	}
 
 	// 5. Manual refresh still works when auto-refresh is disabled and leaves it disabled.

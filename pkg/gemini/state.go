@@ -27,19 +27,20 @@ const stateVersion = 1
 // token): the file is written 0600, atomically, and its content is never logged
 // nor exposed (only ages are).
 type persistedState struct {
-	Version     int               `json:"version"`
-	SavedAt     time.Time         `json:"saved_at"`
-	Session     string            `json:"session_fingerprint,omitempty"` // truncated SHA-256 of SAPISID
-	At          string            `json:"at,omitempty"`
-	AtAt        time.Time         `json:"at_at,omitempty"`
-	BL          string            `json:"bl,omitempty"`
-	BLAt        time.Time         `json:"bl_at,omitempty"`
-	PSIDTSAt    time.Time         `json:"psidts_at,omitempty"`   // last real __Secure-1PSIDTS change (R&D-14 R4)
-	PSIDTSHash  string            `json:"psidts_hash,omitempty"` // truncated SHA-256 of __Secure-1PSIDTS
-	Models      []*AvailableModel `json:"models,omitempty"`
-	ModelsAt    time.Time         `json:"models_at,omitempty"`
-	ModelsSaved string            `json:"models_source,omitempty"`
-	Withdrawn   []WithdrawnModel  `json:"withdrawn,omitempty"` // models a later catalogue dropped
+	Version            int               `json:"version"`
+	SavedAt            time.Time         `json:"saved_at"`
+	Session            string            `json:"session_fingerprint,omitempty"` // truncated SHA-256 of SAPISID
+	At                 string            `json:"at,omitempty"`
+	AtAt               time.Time         `json:"at_at,omitempty"`
+	BL                 string            `json:"bl,omitempty"`
+	BLAt               time.Time         `json:"bl_at,omitempty"`
+	PSIDTSAt           time.Time         `json:"psidts_at,omitempty"`   // last real __Secure-1PSIDTS change (R&D-14 R4)
+	PSIDTSHash         string            `json:"psidts_hash,omitempty"` // truncated SHA-256 of __Secure-1PSIDTS
+	Models             []*AvailableModel `json:"models,omitempty"`
+	ModelsAt           time.Time         `json:"models_at,omitempty"`
+	ModelsSaved        string            `json:"models_source,omitempty"`
+	Withdrawn          []WithdrawnModel  `json:"withdrawn,omitempty"` // models a later catalogue dropped
+	AutoRefreshEnabled *bool             `json:"auto_refresh_enabled,omitempty"`
 }
 
 func psidtsHash(cookie string) string {
@@ -114,6 +115,10 @@ func (c *Client) saveState() {
 		}
 	}
 	c.modelMu.Unlock()
+	if v := c.autoRefreshPref.Load(); v >= 0 {
+		b := v == 1
+		st.AutoRefreshEnabled = &b
+	}
 
 	data, err := json.Marshal(st)
 	if err != nil {
@@ -275,6 +280,10 @@ func (c *Client) restoreCatalog(st persistedState) (bool, time.Time) {
 		}
 	}
 	c.modelMu.Unlock()
+	if v := c.autoRefreshPref.Load(); v >= 0 {
+		b := v == 1
+		st.AutoRefreshEnabled = &b
+	}
 	return true, st.ModelsAt
 }
 
@@ -286,6 +295,13 @@ func (c *Client) RestoreState() StateRestore {
 	st, mtime, ok := c.readPersistedState()
 	if !ok {
 		return out
+	}
+	if st.AutoRefreshEnabled != nil {
+		if *st.AutoRefreshEnabled {
+			c.autoRefreshPref.Store(1)
+		} else {
+			c.autoRefreshPref.Store(0)
+		}
 	}
 	out.CatalogRestored, out.CatalogAt = c.restoreCatalog(st)
 	out.CatalogFresh = out.CatalogRestored && time.Since(out.CatalogAt) < DefaultModelsRefreshInterval
@@ -301,6 +317,25 @@ func (c *Client) RestoreState() StateRestore {
 		"token_age_sec", ageSeconds(st.AtAt), "catalog_restored", out.CatalogRestored,
 		"catalog_age_sec", ageSeconds(out.CatalogAt))
 	return out
+}
+
+// AutoRefreshEnabled reports the persisted auto-refresh toggle preference, if any (K18 T4).
+func (c *Client) AutoRefreshEnabled() (enabled bool, set bool) {
+	v := c.autoRefreshPref.Load()
+	if v < 0 {
+		return false, false
+	}
+	return v == 1, true
+}
+
+// SetAutoRefreshEnabled updates and persists the auto-refresh toggle preference (K18 T4).
+func (c *Client) SetAutoRefreshEnabled(on bool) {
+	if on {
+		c.autoRefreshPref.Store(1)
+	} else {
+		c.autoRefreshPref.Store(0)
+	}
+	c.saveState()
 }
 
 func ageSeconds(t time.Time) int64 {

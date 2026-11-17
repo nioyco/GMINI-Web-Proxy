@@ -247,7 +247,7 @@ func TestUISessionDegradedExposedAndCleared(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Actualisation auto :",
-		"activée jusqu'à l'arrêt du proxy — toutes les ",
+		"activée (conservée au redémarrage) — toutes les ",
 		"fait piloter Chrome sur Gemini sans demande de votre part",
 		"Actualiser le cookie maintenant",
 	} {

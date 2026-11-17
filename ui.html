@@ -131,7 +131,7 @@ async function load(){
   const tokAge=s.cookie_rotation.token_age_sec;
   const tokAgeHTML=!ar.enabled&&tokAge!=null&&tokAge>7200?`<span style="color:var(--bad);font-weight:600">${age(tokAge)} — pensez à actualiser</span>`:!ar.enabled&&tokAge!=null&&tokAge>5400?`<span style="color:var(--warn);font-weight:600">${age(tokAge)} — pensez à actualiser</span>`:age(tokAge);
   const arDetail=ar.running?" · en cours…":ar.paused?" · arrêtée (2 échecs — changer cookie.txt)":ar.next_refresh_in_sec!=null?` (prochaine dans ${age(ar.next_refresh_in_sec)} à ${hmShort(ar.next_refresh_at)})`:"";
-  const arState=!ar.configured?"commande non réglée — ajouter GEMINI_COOKIE_REFRESH_CMD dans .env":!ar.enabled?"désactivée":`activée jusqu'à l'arrêt du proxy — toutes les ${ar.interval_min||90} min${arDetail}`;
+  const arState=!ar.configured?"commande non réglée — ajouter GEMINI_COOKIE_REFRESH_CMD dans .env":!ar.enabled?"désactivée":`activée (conservée au redémarrage) — toutes les ${ar.interval_min||90} min${arDetail}`;
   const arLast=ar.running?`en cours… (${esc(ar.last_trigger||"manual")})`:ar.last_ok==null?"aucun":`${ar.last_ok?"OK":"échec (code "+ar.last_exit_code+")"} · ${dur(ar.last_duration_ms)} (${hmShort(ar.last_attempt_at)}, ${esc(ar.last_trigger||"—")})`;
   const arBtn=ar.configured?` <button id="ar-toggle" style="padding:2px 8px;font-size:12px">${ar.enabled?"Désactiver":"Activer"}</button><div class="sub">fait piloter Chrome sur Gemini sans demande de votre part</div>`:"";
   const arRunDis=ar.running||ar.manual_cooldown_sec>0?"disabled":"";

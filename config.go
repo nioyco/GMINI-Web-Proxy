@@ -31,9 +31,11 @@ type Config struct {
 	// unset or <=0) used once auto-refresh is turned on via the UI toggle; it
 	// never enables auto-refresh on startup. CookieRefreshCmd is the external
 	// command executed without a shell.
-	CookieAutoRefreshMin int
-	CookieRefreshCmd     string
-	APIKeys              []string // allowed client keys; empty means open access
+	CookieAutoRefreshMin        int
+	CookieAutoRefreshEnabled    bool // GEMINI_COOKIE_AUTO_REFRESH_ENABLED (default false)
+	CookieAutoRefreshEnabledSet bool // true when GEMINI_COOKIE_AUTO_REFRESH_ENABLED is set
+	CookieRefreshCmd            string
+	APIKeys                     []string // allowed client keys; empty means open access
 	// SSEKeepaliveSec is the interval (seconds) between ": keepalive" SSE comments
 	// sent while a stream+tools request waits for the blocking generation (0 = off,
 	// which restores the legacy "single chunk after generation" behaviour).
@@ -163,14 +165,16 @@ func loadConfig(envFile string) *Config {
 	loadDotenv(envFile)
 
 	cfg := &Config{
-		Listen:               normalizeListen(getEnv("GEMINI_LISTEN", defaultListen)),
-		LogRequests:          getEnvBool("GEMINI_LOG_REQUESTS", false),
-		LogFormat:            strings.ToLower(strings.TrimSpace(getEnv("GEMINI_LOG_FORMAT", "text"))),
-		CookieRotation:       getEnvBool("GEMINI_COOKIE_ROTATION", false),
-		CookieRefresh:        getEnvInt("GEMINI_COOKIE_REFRESH_MIN", 9),
-		CookieAutoRefreshMin: positive(getEnvInt("GEMINI_COOKIE_AUTO_REFRESH_MIN", 90), 90),
-		CookieRefreshCmd:     strings.TrimSpace(getEnv("GEMINI_COOKIE_REFRESH_CMD", "")),
-		APIKeys:              splitKeys(getEnv("GEMINI_API_KEYS", "")),
+		Listen:                      normalizeListen(getEnv("GEMINI_LISTEN", defaultListen)),
+		LogRequests:                 getEnvBool("GEMINI_LOG_REQUESTS", false),
+		LogFormat:                   strings.ToLower(strings.TrimSpace(getEnv("GEMINI_LOG_FORMAT", "text"))),
+		CookieRotation:              getEnvBool("GEMINI_COOKIE_ROTATION", false),
+		CookieRefresh:               getEnvInt("GEMINI_COOKIE_REFRESH_MIN", 9),
+		CookieAutoRefreshMin:        positive(getEnvInt("GEMINI_COOKIE_AUTO_REFRESH_MIN", 90), 90),
+		CookieAutoRefreshEnabled:    getEnvBool("GEMINI_COOKIE_AUTO_REFRESH_ENABLED", false),
+		CookieAutoRefreshEnabledSet: strings.TrimSpace(getEnv("GEMINI_COOKIE_AUTO_REFRESH_ENABLED", "")) != "",
+		CookieRefreshCmd:            strings.TrimSpace(getEnv("GEMINI_COOKIE_REFRESH_CMD", "")),
+		APIKeys:                     splitKeys(getEnv("GEMINI_API_KEYS", "")),
 
 		SSEKeepaliveSec:             getEnvInt("GEMINI_SSE_KEEPALIVE_SEC", 15),
 		ShutdownGraceSec:            shutdownGrace(getEnvInt("GEMINI_SHUTDOWN_GRACE_SEC", defaultShutdownGraceSec)),

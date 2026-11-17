@@ -100,6 +100,16 @@ func newCookieAutoRefresher(cfg *Config, client *gemini.Client, log *slog.Logger
 	}
 	interval := time.Duration(intervalMin) * time.Minute
 	now := time.Now().Round(0)
+	enabled := false
+	if len(args) > 0 {
+		if cfg.CookieAutoRefreshEnabledSet {
+			enabled = cfg.CookieAutoRefreshEnabled
+		} else if client != nil {
+			if persisted, ok := client.AutoRefreshEnabled(); ok {
+				enabled = persisted
+			}
+		}
+	}
 	return &cookieAutoRefresher{
 		client:             client,
 		log:                log,
@@ -112,7 +122,7 @@ func newCookieAutoRefresher(cfg *Config, client *gemini.Client, log *slog.Logger
 		waitTimeout:        defaultAutoRefreshWaitTimeout,
 		pollInterval:       defaultAutoRefreshPollInterval,
 		nowFn:              func() time.Time { return time.Now().Round(0) },
-		enabled:            false,
+		enabled:            enabled,
 		interval:           interval,
 		startedAt:          now,
 	}
@@ -473,6 +483,9 @@ func (r *cookieAutoRefresher) ToggleFrom(on *bool, source string) cookieAutoRefr
 		intervalMin = int(r.interval / time.Minute)
 	}
 	r.mu.Unlock()
+	if changed && r.client != nil {
+		r.client.SetAutoRefreshEnabled(enabled)
+	}
 	if changed {
 		r.log.Info("cookie_auto_refresh_toggle",
 			"enabled", enabled,

@@ -167,9 +167,10 @@ type Client struct {
 	sessionAccountStatus int // body[14] from degraded listModels response (0 = absent)
 
 	// Session state file (AUDIT-13 A5).
-	stateMu      sync.Mutex
-	stateSavedAt time.Time
-	stateMtime   time.Time
+	stateMu         sync.Mutex
+	stateSavedAt    time.Time
+	stateMtime      time.Time
+	autoRefreshPref atomic.Int32 // -1 unset, 0 false, 1 true (K18 T4)
 
 	// Content-free journal of generations (served.go).
 	calls callJournal
@@ -210,6 +211,7 @@ func New(cfg Config, logger *slog.Logger) (*Client, error) {
 	}
 	c.http.Transport = &googleTransport{base: transport, c: c}
 	c.imageHTTP = c.newImageHTTPClient()
+	c.autoRefreshPref.Store(-1)
 	c.loadCalls()
 	return c, nil
 }
