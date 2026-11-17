@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -49,6 +51,7 @@ func sanitizeRequestID(in string) string {
 // the middleware reads them once the handler returns), so they need no lock.
 type reqInfo struct {
 	id         string
+	convID     string
 	method     string
 	route      string
 	start      time.Time
@@ -181,9 +184,12 @@ func (ri *reqInfo) takeStaleStreamNote() string {
 	return note
 }
 
-// InFlightRequest summarizes one request currently in progress (K7, K8, K9, B1).
+// InFlightRequest summarizes one request currently in progress or in the recent
+// per-conversation history (K7, K8, K9, B1).
 type InFlightRequest struct {
 	ID              string  `json:"id"`
+	ConvID          string  `json:"conv_id,omitempty"`
+	State           string  `json:"state,omitempty"`
 	Model           string  `json:"model"`
 	ServedID        string  `json:"served_id,omitempty"`
 	ServedName      string  `json:"served_name,omitempty"`
@@ -216,6 +222,8 @@ func (ri *reqInfo) inFlightSnapshot(now time.Time) InFlightRequest {
 	}
 	return InFlightRequest{
 		ID:              ri.id,
+		ConvID:          ri.convID,
+		State:           "En cours",
 		Model:           ri.model,
 		ServedID:        ri.servedID,
 		ServedName:      ri.servedName,
@@ -246,6 +254,41 @@ func setReqMeta(ctx context.Context, model string, stream bool) {
 	if ri := reqFrom(ctx); ri != nil {
 		ri.model, ri.stream = model, stream
 	}
+}
+
+// setReqConvID records a content-free conversation identifier on the request.
+func setReqConvID(ctx context.Context, convID string) {
+	if ri := reqFrom(ctx); ri != nil {
+		ri.convID = convID
+	}
+}
+
+var convIDLineRe = regexp.MustCompile(`(?m)^Conversation ID:\s*([A-Za-z0-9_-]{8,64})\s*$`)
+
+// convFingerprintFromPrompt computes an opaque 6-hex content-free conversation
+// identifier from the conversation UUID (when present) or the initial prompt turn.
+func convFingerprintFromPrompt(prompt string) string {
+	key := ""
+	if m := convIDLineRe.FindStringSubmatch(prompt); len(m) == 2 {
+		key = "cid:" + m[1]
+	} else {
+		p := prompt
+		if idx := strings.Index(p, "\n[Assistant]:"); idx > 0 {
+			p = p[:idx]
+		}
+		if idx := strings.Index(p, "\n[User]:"); idx >= 0 {
+			p = p[idx:]
+		}
+		if len(p) > 4096 {
+			p = p[:4096]
+		}
+		key = p
+	}
+	if strings.TrimSpace(key) == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:3])
 }
 
 // addKeepalive counts one keepalive comment sent for this request.
@@ -293,6 +336,54 @@ type statsCounters struct {
 type activeSet struct {
 	mu sync.Mutex
 	m  map[*reqInfo]struct{}
+}
+
+const (
+	inFlightHistoryMaxConvs   = 5
+	inFlightHistoryMaxEntries = 200
+)
+
+// inFlightHistory retains finished request snapshots for the last N distinct
+// conversations (newest first), capped at inFlightHistoryMaxEntries total rows.
+type inFlightHistory struct {
+	mu      sync.Mutex
+	entries []InFlightRequest
+}
+
+func (h *inFlightHistory) record(snap InFlightRequest) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	combined := make([]InFlightRequest, 0, len(h.entries)+1)
+	combined = append(combined, snap)
+	combined = append(combined, h.entries...)
+
+	seenConvs := map[string]bool{}
+	kept := make([]InFlightRequest, 0, len(combined))
+	for _, e := range combined {
+		key := e.ConvID
+		if key == "" {
+			key = e.ID
+		}
+		if !seenConvs[key] {
+			if len(seenConvs) >= inFlightHistoryMaxConvs {
+				continue
+			}
+			seenConvs[key] = true
+		}
+		kept = append(kept, e)
+		if len(kept) >= inFlightHistoryMaxEntries {
+			break
+		}
+	}
+	h.entries = kept
+}
+
+func (h *inFlightHistory) list() []InFlightRequest {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]InFlightRequest, len(h.entries))
+	copy(out, h.entries)
+	return out
 }
 
 func (a *activeSet) add(ri *reqInfo) {
@@ -415,6 +506,22 @@ func (s *Server) withTracking(next http.Handler) http.Handler {
 			status := sw.status
 			if status == 0 {
 				status = http.StatusOK
+			}
+			if ri.model != "" {
+				snap := ri.inFlightSnapshot(time.Now())
+				switch {
+				case errors.Is(context.Cause(ctx), errAbortedOnShutdown):
+					snap.State = "Arrêt proxy"
+				case r.Context().Err() != nil:
+					snap.State = "Annulée"
+				case status >= 400:
+					snap.State = fmt.Sprintf("HTTP %d", status)
+				case ri.limitBannerHit.Load():
+					snap.State = "Limite Google"
+				default:
+					snap.State = "Terminée"
+				}
+				s.flightHist.record(snap)
 			}
 			switch {
 			case status >= 500:

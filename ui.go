@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
+	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
 )
 
 // Local management page (GET /_ui). It is served to loopback clients only and
@@ -126,25 +127,42 @@ type uiAntigravityE struct {
 	RelayMS     int64  `json:"relay_keepalive_ms"`
 }
 
+const recentCallsHistoryWindow = 12 * time.Hour
+
+func filterCallsLastHours(calls []gemini.CallRecord, window time.Duration, now time.Time) []gemini.CallRecord {
+	if window <= 0 {
+		return calls
+	}
+	cutoff := now.Add(-window)
+	out := make([]gemini.CallRecord, 0, len(calls))
+	for _, c := range calls {
+		if t, err := time.Parse(time.RFC3339, c.Time); err == nil {
+			if t.Before(cutoff) {
+				continue
+			}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 func (s *Server) handleUIState(w http.ResponseWriter, r *http.Request) {
 	if !s.uiAllowed(w, r, true) {
 		return
 	}
 	st := &bufWriter{h: http.Header{}}
 	s.handleStatus(st, r)
-	calls := s.client.RecentCalls()
-	if len(calls) > 50 {
-		calls = calls[:50]
-	}
+	calls := filterCallsLastHours(s.client.RecentCalls(), recentCallsHistoryWindow, s.currentNow())
 	models := s.uiModels()
 	sendJSON(w, http.StatusOK, map[string]any{
-		"status":      json.RawMessage(st.buf.Bytes()),
-		"models":      models,
-		"calls":       calls,
-		"in_flight":   s.inFlightRequests(),
-		"antigravity": s.uiAntigravity(models),
-		"apps":        listAntigravity(),
-		"listen":      s.cfg.Listen,
+		"status":            json.RawMessage(st.buf.Bytes()),
+		"models":            models,
+		"calls":             calls,
+		"in_flight":         s.inFlightRequests(),
+		"in_flight_history": s.flightHist.list(),
+		"antigravity":       s.uiAntigravity(models),
+		"apps":              listAntigravity(),
+		"listen":            s.cfg.Listen,
 	})
 }
 

@@ -186,7 +186,7 @@ func (s *idScan) classify(requested string, catalogue map[string]struct{}) (seen
 }
 
 const (
-	callLogKeep     = 200  // records kept in memory and served to the page
+	callLogKeep     = 500  // records kept in memory and served to the page
 	callFileMax     = 2000 // lines before the journal file is compacted
 	callFileCompact = 1000
 )

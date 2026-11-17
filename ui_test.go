@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -252,9 +253,61 @@ func TestUISessionDegradedExposedAndCleared(t *testing.T) {
 		"Actualiser le cookie maintenant",
 		`class="calls-scroll"`,
 		"vue scrollable de 15 lignes",
+		"12 dernières heures",
+		"in_flight_history",
 	} {
 		if !strings.Contains(wHTML.Body.String(), want) {
 			t.Errorf("ui.html missing expected text %q", want)
 		}
+	}
+}
+
+func TestUIHistory12HoursAndLast5Conversations(t *testing.T) {
+	now := time.Now().UTC()
+	calls := []gemini.CallRecord{
+		{Time: now.Add(-1 * time.Hour).Format(time.RFC3339), RequestID: "r1"},
+		{Time: now.Add(-11 * time.Hour).Format(time.RFC3339), RequestID: "r2"},
+		{Time: now.Add(-13 * time.Hour).Format(time.RFC3339), RequestID: "r3"},
+	}
+	got12h := filterCallsLastHours(calls, recentCallsHistoryWindow, now)
+	if len(got12h) != 2 || got12h[0].RequestID != "r1" || got12h[1].RequestID != "r2" {
+		t.Fatalf("filterCallsLastHours(12h) = %+v, want r1 and r2 only", got12h)
+	}
+
+	var fh inFlightHistory
+	for convIdx := 1; convIdx <= 6; convIdx++ {
+		convID := fmt.Sprintf("conv%02d", convIdx)
+		for step := 1; step <= 2; step++ {
+			fh.record(InFlightRequest{
+				ID:     fmt.Sprintf("req_%d_%d", convIdx, step),
+				ConvID: convID,
+				State:  "Terminée",
+				Model:  "gemini-3.1-pro",
+			})
+		}
+	}
+	list := fh.list()
+	// Conv 06..02 kept (5 conversations * 2 steps = 10), conv 01 dropped.
+	if len(list) != 10 {
+		t.Fatalf("inFlightHistory len = %d, want 10 (5 convs * 2 steps)", len(list))
+	}
+	for _, item := range list {
+		if item.ConvID == "conv01" {
+			t.Fatalf("oldest 6th conversation conv01 should have been evicted: %+v", item)
+		}
+	}
+
+	// Verify the 200-entry safety cap within 5 conversations.
+	var fhCap inFlightHistory
+	for i := 0; i < 250; i++ {
+		fhCap.record(InFlightRequest{
+			ID:     fmt.Sprintf("r_%03d", i),
+			ConvID: "same_conv",
+			State:  "Terminée",
+			Model:  "gemini-3.1-pro",
+		})
+	}
+	if n := len(fhCap.list()); n != inFlightHistoryMaxEntries {
+		t.Fatalf("inFlightHistory cap len = %d, want %d", n, inFlightHistoryMaxEntries)
 	}
 }

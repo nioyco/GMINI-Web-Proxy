@@ -68,15 +68,15 @@ button:disabled{opacity:.5;cursor:not-allowed}
 </section>
 
 <section class="card">
-<h2>Demandes en cours</h2>
-<table id="inflight"></table>
-<p class="note">État en direct pendant le traitement de la demande (dès la position 39 lue chez Google). Aucun contenu de conversation n'est affiché ici.</p>
+<div class="row"><h2>Demandes en cours</h2><span class="sub" id="inflight-meta">En cours + 5 dernières conversations (max 200 · vue scrollable 15 lignes)</span></div>
+<div class="calls-scroll"><table id="inflight"></table></div>
+<p class="note">État en direct pendant le traitement de la demande (dès la position 39 lue chez Google) et historique des 5 dernières conversations (max 200 demandes). Aucun contenu de conversation n'est affiché ici.</p>
 </section>
 
 <section class="card">
-<div class="row"><h2>Derniers appels</h2><span class="sub" id="calls-meta">50 derniers max · vue scrollable de 15 lignes</span></div>
+<div class="row"><h2>Derniers appels (12 h)</h2><span class="sub" id="calls-meta">12 dernières heures · vue scrollable de 15 lignes</span></div>
 <div class="calls-scroll"><table id="calls"></table></div>
-<p class="note">Tailles et délais uniquement : aucun contenu de conversation n'est affiché ici.</p>
+<p class="note">Historique sur les 12 dernières heures (tailles et délais uniquement : aucun contenu de conversation n'est affiché ici).</p>
 </section>
 
 <section class="card">
@@ -203,14 +203,20 @@ async function load(){
     $("agcmd").innerHTML=`<p class="note">Pour créer ou renommer les entrées (Antigravity fermé), lancer dans le dossier <code>SUIVI_PROJET/5_Outils_et_diagnostics</code> :</p><code class="cmd">python3 synchroniser_modeles_gmini.py --rename --apply</code><p class="note">Variantes par niveau de réflexion :</p><code class="cmd">python3 synchroniser_modeles_gmini.py --efforts low,high --apply</code>`;
   }
   const inflight = d.in_flight || [];
-  $("inflight").innerHTML = "<tr><th>Heure début</th><th>Modèle demandé</th><th>Qui répond (en cours)</th><th class=num>Pensées</th><th class=num>Reçus</th><th class=num>Transmis</th><th class=num>Dernière trame</th><th class=num>Durée</th><th>Requête</th></tr>" +
-    (inflight.length ? inflight.map(c => `<tr><td>${hm(c.start_time)}</td><td><code>${esc(c.model)}</code></td><td>${c.identity ? who(c.identity, "", "", c.served_name) : badge("info", "En attente d'identification…")}${c.internal_tool ? `<div class="sub" style="color:var(--warn);font-weight:600">outil interne détecté : ${esc(c.internal_tool)}</div>` : ""}${c.limit_banner ? `<div class="sub" style="color:var(--bad);font-weight:600">limite annoncée par Google : ${esc(c.limit_banner)}</div>` : ""}${c.stale_token_alert ? `<div class="sub" style="color:var(--bad);font-weight:600">⚠ ${esc(c.stale_token_alert)}</div>` : ""}${c.status_note ? (c.status_note.startsWith("Google : ") ? `<div class="sub" style="color:var(--info);font-weight:600">⏳ ${esc(c.status_note)}</div>` : `<div class="sub" style="color:var(--warn);font-weight:600">⚠ ${esc(c.status_note)}</div>`) : ""}</td><td class=num>${ko(c.thought_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${ko(c.sent_bytes)}</td><td class=num>${c.last_frame_age_sec > 0 ? age(c.last_frame_age_sec) : "à l'instant"}</td><td class=num>${dur(c.duration_ms)}</td><td><code>${esc((c.id||"").slice(0,8))}</code></td></tr>`).join("") : "<tr><td colspan=9 class=sub>Aucune demande en cours d'exécution.</td></tr>");
+  const inflightHist = d.in_flight_history || [];
+  const allInflight = inflight.concat(inflightHist);
+  const convCount = new Set(allInflight.map(c => c.conv_id || c.id)).size;
+  $("inflight-meta").textContent = `${inflight.length} en cours · ${inflightHist.length} en historique (${convCount}/5 conv., max 200 · vue scrollable de 15 lignes)`;
+  const stateBadge = (c, live) => live ? badge("info", "En cours") : c.state === "Terminée" ? badge("ok", "Terminée") : badge("warn", c.state || "Terminée");
+  const rowInflight = (c, live) => `<tr${live ? ' style="background:var(--infobg)"' : ""}><td>${hm(c.start_time)}</td><td><code>${esc(c.conv_id || "—")}</code></td><td>${stateBadge(c, live)}</td><td><code>${esc(c.model)}</code></td><td>${c.identity ? who(c.identity, "", "", c.served_name) : (live ? badge("info", "En attente d'identification…") : badge("none", "Non indiqué"))}${c.internal_tool ? `<div class="sub" style="color:var(--warn);font-weight:600">outil interne détecté : ${esc(c.internal_tool)}</div>` : ""}${c.limit_banner ? `<div class="sub" style="color:var(--bad);font-weight:600">limite annoncée par Google : ${esc(c.limit_banner)}</div>` : ""}${c.stale_token_alert ? `<div class="sub" style="color:var(--bad);font-weight:600">⚠ ${esc(c.stale_token_alert)}</div>` : ""}${c.status_note ? (c.status_note.startsWith("Google : ") ? `<div class="sub" style="color:var(--info);font-weight:600">⏳ ${esc(c.status_note)}</div>` : `<div class="sub" style="color:var(--warn);font-weight:600">⚠ ${esc(c.status_note)}</div>`) : ""}</td><td class=num>${ko(c.thought_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${ko(c.sent_bytes)}</td><td class=num>${live ? (c.last_frame_age_sec > 0 ? age(c.last_frame_age_sec) : "à l'instant") : "—"}</td><td class=num>${dur(c.duration_ms)}</td><td><code>${esc((c.id||"").slice(0,8))}</code></td></tr>`;
+  $("inflight").innerHTML = "<thead><tr><th>Heure début</th><th>Conv.</th><th>État</th><th>Modèle demandé</th><th>Qui répond (déroulé)</th><th class=num>Pensées</th><th class=num>Reçus</th><th class=num>Transmis</th><th class=num>Dernière trame</th><th class=num>Durée</th><th>Requête</th></tr></thead><tbody>" +
+    (allInflight.length ? inflight.map(c => rowInflight(c, true)).join("") + inflightHist.map(c => rowInflight(c, false)).join("") : "<tr><td colspan=11 class=sub>Aucune demande en cours ou récente.</td></tr>") + "</tbody>";
   const promptWarnBytes=(s.prompt_warn_kb!=null?s.prompt_warn_kb:300)*1024;
   const fmtPrompt=n=>{const txt=koKB(n);return promptWarnBytes>0&&n!=null&&n>promptWarnBytes?`<span style="color:var(--warn);font-weight:600">${txt}</span>`:txt;};
-  const callsList=(d.calls||[]).slice(0,50);
-  $("calls-meta").textContent=`${callsList.length} affiché(s) (max 50 · vue scrollable de 15 lignes)`;
+  const callsList=d.calls||[];
+  $("calls-meta").textContent=`${callsList.length} sur les 12 dernières heures (vue scrollable de 15 lignes)`;
   $("calls").innerHTML="<thead><tr><th>Heure</th><th>Modèle demandé</th><th>Qui répond</th><th class=num>Niveau</th><th class=num>Durée</th><th class=num>1re pensée</th><th class=num>1er texte</th><th class=num>Prompt</th><th class=num>Réponse</th><th class=num>Pensées</th><th>Erreur</th><th>Requête</th></tr></thead><tbody>"+
-    (callsList.length?callsList.map(c=>`<tr><td>${hm(c.time)}</td><td><code>${esc(c.model)}</code></td><td>${who(c.identity,c.suspect,(c.seen_model_ids||[]).join(", "),c.served_name)}</td><td class=num>${c.thinking_level||"—"}</td><td class=num>${dur(c.duration_ms)}</td><td class=num>${dur(c.first_thought_ms)}</td><td class=num>${dur(c.first_text_ms)}</td><td class=num>${fmtPrompt(c.prompt_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${ko(c.thought_bytes)}</td><td>${c.error?badge("bad",c.error):""}</td><td><code>${esc((c.request_id||"").slice(0,8))}</code></td></tr>`).join(""):"<tr><td colspan=12 class=sub>Aucun appel enregistré pour l'instant.</td></tr>")+"</tbody>";
+    (callsList.length?callsList.map(c=>`<tr><td>${hm(c.time)}</td><td><code>${esc(c.model)}</code></td><td>${who(c.identity,c.suspect,(c.seen_model_ids||[]).join(", "),c.served_name)}</td><td class=num>${c.thinking_level||"—"}</td><td class=num>${dur(c.duration_ms)}</td><td class=num>${dur(c.first_thought_ms)}</td><td class=num>${dur(c.first_text_ms)}</td><td class=num>${fmtPrompt(c.prompt_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${ko(c.thought_bytes)}</td><td>${c.error?badge("bad",c.error):""}</td><td><code>${esc((c.request_id||"").slice(0,8))}</code></td></tr>`).join(""):"<tr><td colspan=12 class=sub>Aucun appel enregistré sur les 12 dernières heures.</td></tr>")+"</tbody>";
 }
 let refreshNextMs=0;
 let arRunMsg="";

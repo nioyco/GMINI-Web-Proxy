@@ -53,10 +53,11 @@ type Server struct {
 	// uiToken protects the API of the local management page (ui.go); empty: page off.
 	uiToken string
 
-	started time.Time
-	active  activeSet
-	stats   statsCounters
-	ignored ignoredStats
+	started    time.Time
+	active     activeSet
+	flightHist inFlightHistory
+	stats      statsCounters
+	ignored    ignoredStats
 
 	suspectWarnMu sync.Mutex
 	suspectWarn   map[string]suspectWarnState
@@ -341,6 +342,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setReqMeta(r.Context(), m.Name, req.Stream)
+	setReqConvID(r.Context(), convFingerprintFromPrompt(prompt))
 	s.client.RecordUserActivity()
 	cid := apiconv.ID("chatcmpl-", 12)
 	p := m.Params(prompt)
@@ -2207,6 +2209,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setReqMeta(r.Context(), m.Name, req.Stream)
+	setReqConvID(r.Context(), convFingerprintFromPrompt(prompt))
 	s.client.RecordUserActivity()
 	p := m.Params(prompt)
 	p.Images = images
@@ -2327,6 +2330,7 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	stream := strings.Contains(r.URL.Path, ":streamGenerateContent")
 	setReqMeta(r.Context(), m.Name, stream)
+	setReqConvID(r.Context(), convFingerprintFromPrompt(prompt))
 	s.client.RecordUserActivity()
 	p := m.Params(prompt)
 	p.Images = images
@@ -2501,6 +2505,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setReqMeta(r.Context(), m.Name, req.Stream)
+	setReqConvID(r.Context(), convFingerprintFromPrompt(prompt))
 	s.client.RecordUserActivity()
 	p := m.Params(prompt)
 	p.Images = images
