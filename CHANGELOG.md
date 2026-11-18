@@ -25,6 +25,8 @@ Ce fichier recense les versions publiées du proxy **GMINI-Web-Proxy** (dérivé
 - **Retry K19/K20 unifié via `runStreamTools`** : vérifie également les pensées (`thought`) sur la 2e tentative.
 - **GMINI Control (`ui.html`)** : arrêt automatique du polling sur HTTP `401` avec bouton « Recharger la page », regroupement des tuiles de statut, et correction du débordement horizontal dans la tuile *Appels de fond & Rotation* (`min-width: 0; overflow-wrap: anywhere`).
 - **Dépôt & module Go** : module renommé en `github.com/nioyco/GMINI-Web-Proxy`, `.gitignore` durci contre toute fuite de secrets/états, guide d'exploitation complet intégré (`docs/GUIDE_COMPLET_EXPLOITATION_GMINI.md`).
+- **Compatibilité Antigravity `v2.32.1+`** : validée en production (> 500 s continus sans coupure) avec l'Enabler P1/P5a (`ad28f7e`, support de `dist/lsDefaults.js` / `baseLsArgs`) et la console d'administration `GMINI-Proxy-Control v2.0.0`.
+- **Étude R&D-21** : diagnostic complet des `bash?code_reference` après le tour 1 (position du rappel avant `<USER_REQUEST>`), de la latence `3.1 Pro` `thinking_level=4` (`32,7 % > 60 s`) et de l'ordonnancement `served_model` / `request_end`.
 
 ---
 

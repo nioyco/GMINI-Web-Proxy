@@ -39,6 +39,15 @@ Le projet est activement durci autour d'un usage quotidien intensif avec des cli
 | **`v1.0.0`** | **Lots P6 – K13** | Sécurité par défaut (`127.0.0.1:8081`, clé API obligatoire, arrêt propre `SIGINT`/`SIGTERM`, anti-SSRF) ; tableau de bord local **GMINI Control** (`/_ui`) protégé par jeton de session ; lecture d'identité réelle du modèle (`inner[39]`/`inner[42]`) et alerte repli silencieux ; keepalives SSE `15 s`, diffusion des pensées (`reasoning_content`), notes techniques `2 s`/`15 s`, alerte silence `45 s`, anti-écho, `early_stop` (`256 Ko`/`120 s`), traces complètes `0600`. |
 | **`v0.1.0`** | Base initiale | Passerelle Go zéro-dépendance issue de `n0madic/go-gemini-web2api`. |
 
+### Matrice de compatibilité Proxy ↔ Antigravity & Enabler P1/P5a
+
+| Version GMINI-Web-Proxy | Versions Antigravity supportées | Enabler / Relais keepalive (> 300 s) | Panneau de contrôle | Notes techniques |
+|---|---|---|---|---|
+| **`v1.2.0`** *(actuelle)* | **`v2.31.2`** et **`v2.32.1+`** *(vérifié en production > 500 s)* | **Requis** : Enabler P1/P5a commit `ad28f7e` (`dist/lsDefaults.js` / `baseLsArgs` pour `v2.32.1+`) | **`GMINI-Proxy-Control v2.0.0`** (console BIOS 2 colonnes) | Sync auto `4 Argon`, audit outils K20, bascule *Conversations temporaires*, tokens par modèle Google, fix CSS `/_ui`. |
+| **`v1.1.0`** *(Lots K14–K19)* | `v2.31.0` – `v2.31.2` | Enabler P1/P5a (`aece4d6`, layout `args` littéral dans `languageServer.js`) | `GMINI-Proxy-Control v1.1.0` / `v1.2.0` | Compatible `v2.32.1` **uniquement** après mise à jour Enabler `ad28f7e` (sinon `UNSUPPORTED_RUNTIME`). |
+| **`v1.0.0`** *(Lots P6–K13)* | `v2.30.0` – `v2.31.2` | Optionnel sur `v2.30.0` (coupure à 300 s sans relais) ; recommandé P1/P5a sur `v2.31.x` | Raccourcis séparés `1..10` | Keepalives SSE 15 s, `/_ui`, identité réelle `inner[39]/inner[42]`. |
+| **`v0.1.0`** *(base)* | Clients OpenAI / Anthropic / Gemini CLI génériques | Non géré | Aucun | Sans relais anti-coupure, sans sobriété K14 ni garde-fous outils. |
+
 > **Avertissement technique** : ce proxy s'appuie sur les endpoints web internes de Google Gemini (`StreamGenerate`, `otAQ7b`). Google peut faire évoluer ces formats sans préavis. Le build label `GEMINI_BL` est résolu automatiquement depuis `/app` et conservé dans `.state.json` (24 h par défaut).
 
 ---
@@ -147,11 +156,11 @@ Ordre de priorité des paramètres :
 
 ### Mise en route quotidienne avec Antigravity (macOS)
 
-Avec le menu unifié local `GMINI-Proxy-Control_V1.2.0.command` :
-1. Vérifier que le **Cookie** est `présent` (`-rw-------`) et que l'IDE officielle correspond au clone patché **P1/P5a** (qui apporte le relais keepalive anti-coupure > 300 s).
-2. Démarrer le proxy (option `1`) et vérifier `● ACTIF` + les 4 modèles.
-3. Ouvrir **GMINI Control** (`http://127.0.0.1:8081/_ui`, option `3`) et dérouler la checklist (§6).
-4. Lancer le clone **Antigravity P1/P5a** (option `7`) — toujours **une seule** instance Antigravity ouverte à la fois.
+Avec la console d'administration dédiée **`GMINI-Proxy-Control_V2.0.0.command`** (interface BIOS 2 colonnes sans saut, état complet permanent à droite, navigation par sous-menus `↑`/`↓`/`Entrée`/`←`) :
+1. Ouvrir la console : vérifier dans la colonne de droite le bandeau **`● EN SERVICE`** / **`■ ARRÊTÉ`**, le **Cookie** (`présent`, `0600`) et la synchronisation **Officielle ↔ Clone P1/P5a** (`v2.32.1`, `relais : oui`).
+2. Sous-menu **Proxy GMINI** → *Démarrer le proxy GMINI*, puis *Ouvrir GMINI Control* (`http://127.0.0.1:8081/_ui`) et dérouler la checklist (§6).
+3. Sous-menu **Modèles Antigravity** *(séparé)* → *Synchroniser les modèles* (aperçu ou appliquer avec sauvegarde `0600`) ou *Restaurer les modèles depuis une sauvegarde*.
+4. Sous-menu **Antigravity (IDE & Mises à jour)** → *Lancer Antigravity CLONE patché (P1/P5a)* — toujours **une seule** instance Antigravity ouverte à la fois.
 
 ---
 
