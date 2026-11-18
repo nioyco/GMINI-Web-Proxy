@@ -349,7 +349,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	resp.EnvModifiedSinceStart = s.envModifiedSinceStart()
 	resp.TraceEnabled = s.client.TraceEnabled()
-	resp.TemporaryChat = s.cfg.Gemini.TemporaryChat
+	resp.TemporaryChat = s.client.TemporaryChat()
 	resp.IgnoredFields = ignoredFields{
 		Note:   "top-level fields received from clients that the proxy parses or forwards nowhere (e.g. temperature, reasoning_effort); counted since start",
 		Counts: s.ignored.snapshot(),

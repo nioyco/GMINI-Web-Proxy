@@ -70,9 +70,9 @@ func (c *Client) UpstreamParams() UpstreamParams {
 		DynamicSlots:  map[string]string{"0": "prompt + image refs", "59": "per-request uuid (also in header x-goog-ext-525005358-jspb)", "at": "XSRF token form field (authenticated sessions only)"},
 		HeaderNames:   append([]string(nil), headerNames...),
 		ThinkingLevel: "not sent (inner[17] is the constant [[0]]; web Bas/Moyen/Élevé level is not controllable)",
-		TemporaryChat: c.cfg.TemporaryChat,
+		TemporaryChat: c.TemporaryChat(),
 	}
-	if c.cfg.TemporaryChat {
+	if up.TemporaryChat {
 		up.DynamicSlots["45"] = "1 (GEMINI_TEMPORARY_CHAT)"
 	}
 	for _, bc := range bodyConstants {
@@ -106,7 +106,7 @@ func (c *Client) logUpstreamParams(p GenParams) {
 		consts[strconv.Itoa(bc.Index)] = string(b)
 	}
 	attrs := []any{"inner_17", consts["17"], "body_constants", consts, "header_names", headerNames, "images", len(p.Images),
-		"thinking_level", p.Level, "mode", p.Mode, "temporary_chat", c.cfg.TemporaryChat}
+		"thinking_level", p.Level, "mode", p.Mode, "temporary_chat", c.TemporaryChat()}
 	if p.Model != nil {
 		attrs = append(attrs, "model", p.Model.Name, "model_id", p.Model.ModelID,
 			"capacity", p.Model.Capacity, "capacity_field", p.Model.CapacityField,

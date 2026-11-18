@@ -175,6 +175,7 @@ type Client struct {
 	stateSavedAt    time.Time
 	stateMtime      time.Time
 	autoRefreshPref atomic.Int32 // -1 unset, 0 false, 1 true (K18 T4)
+	tempChatPref    atomic.Int32 // -1 unset (uses cfg.TemporaryChat), 0 false, 1 true
 
 	// Content-free journal of generations (served.go) & token ledger (tokens.go).
 	calls  callJournal
@@ -217,6 +218,7 @@ func New(cfg Config, logger *slog.Logger) (*Client, error) {
 	c.http.Transport = &googleTransport{base: transport, c: c}
 	c.imageHTTP = c.newImageHTTPClient()
 	c.autoRefreshPref.Store(-1)
+	c.tempChatPref.Store(-1)
 	c.loadCalls()
 	c.loadTokens()
 	return c, nil
@@ -259,7 +261,7 @@ func (c *Client) buildBody(p GenParams, images []uploadedImage) (body, reqUUID s
 		inner[bc.Index] = bc.Value
 	}
 	inner[59] = reqUUID
-	if c.cfg.TemporaryChat {
+	if c.TemporaryChat() {
 		inner[45] = 1
 	}
 	if p.Level > 0 || p.Mode > 0 {

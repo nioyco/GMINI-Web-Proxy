@@ -194,6 +194,26 @@ func (s *Server) handleUICookieRefreshToggle(w http.ResponseWriter, r *http.Requ
 	sendJSON(w, http.StatusOK, st)
 }
 
+func (s *Server) handleUITemporaryChatToggle(w http.ResponseWriter, r *http.Request) {
+	if !s.uiAllowed(w, r, true) {
+		return
+	}
+	s.client.RecordUserActivity()
+	var req struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	next := !s.client.TemporaryChat()
+	if req.Enabled != nil {
+		next = *req.Enabled
+	}
+	s.client.SetTemporaryChat(next)
+	s.log.Info("temporary_chat_toggle", "enabled", next, "source", "ui")
+	sendJSON(w, http.StatusOK, map[string]any{"temporary_chat": next})
+}
+
 func (s *Server) handleUICookieRefreshRun(w http.ResponseWriter, r *http.Request) {
 	if !s.uiAllowed(w, r, true) {
 		return

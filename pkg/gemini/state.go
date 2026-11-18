@@ -41,6 +41,7 @@ type persistedState struct {
 	ModelsSaved        string            `json:"models_source,omitempty"`
 	Withdrawn          []WithdrawnModel  `json:"withdrawn,omitempty"` // models a later catalogue dropped
 	AutoRefreshEnabled *bool             `json:"auto_refresh_enabled,omitempty"`
+	TemporaryChat      *bool             `json:"temporary_chat,omitempty"`
 }
 
 func psidtsHash(cookie string) string {
@@ -118,6 +119,10 @@ func (c *Client) saveState() {
 	if v := c.autoRefreshPref.Load(); v >= 0 {
 		b := v == 1
 		st.AutoRefreshEnabled = &b
+	}
+	if v := c.tempChatPref.Load(); v >= 0 {
+		b := v == 1
+		st.TemporaryChat = &b
 	}
 
 	data, err := json.Marshal(st)
@@ -284,6 +289,10 @@ func (c *Client) restoreCatalog(st persistedState) (bool, time.Time) {
 		b := v == 1
 		st.AutoRefreshEnabled = &b
 	}
+	if v := c.tempChatPref.Load(); v >= 0 {
+		b := v == 1
+		st.TemporaryChat = &b
+	}
 	return true, st.ModelsAt
 }
 
@@ -301,6 +310,13 @@ func (c *Client) RestoreState() StateRestore {
 			c.autoRefreshPref.Store(1)
 		} else {
 			c.autoRefreshPref.Store(0)
+		}
+	}
+	if st.TemporaryChat != nil && !c.cfg.TemporaryChat {
+		if *st.TemporaryChat {
+			c.tempChatPref.Store(1)
+		} else {
+			c.tempChatPref.Store(0)
 		}
 	}
 	out.CatalogRestored, out.CatalogAt = c.restoreCatalog(st)
@@ -334,6 +350,24 @@ func (c *Client) SetAutoRefreshEnabled(on bool) {
 		c.autoRefreshPref.Store(1)
 	} else {
 		c.autoRefreshPref.Store(0)
+	}
+	c.saveState()
+}
+
+// TemporaryChat reports whether StreamGenerate requests set inner[45] = 1.
+func (c *Client) TemporaryChat() bool {
+	if v := c.tempChatPref.Load(); v >= 0 {
+		return v == 1
+	}
+	return c.cfg.TemporaryChat
+}
+
+// SetTemporaryChat updates the live temporary-chat mode and persists it in .state.json.
+func (c *Client) SetTemporaryChat(on bool) {
+	if on {
+		c.tempChatPref.Store(1)
+	} else {
+		c.tempChatPref.Store(0)
 	}
 	c.saveState()
 }

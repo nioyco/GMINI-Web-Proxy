@@ -237,8 +237,9 @@ async function load(){
   const behaviorFoot=`<span class="sub">notify = note · retry = relance (1 quota en plus) · off = pas de relance</span>`;
   const privacyBody=`<div class="kv-list">`+
     kv("Trace des échanges",s.content_trace_enabled?badge("info","Activée"):badge("none","Désactivée"))+
-    kv("Conversations temporaires",s.temporary_chat?badge("info","Activées"):badge("none","Désactivées"))+
+    kv("Conversations temporaires",(s.temporary_chat?badge("info","Activées"):badge("none","Désactivées"))+` <button id="tc-toggle" style="margin-left:6px;padding:2px 8px;font-size:12px">${s.temporary_chat?"Désactiver":"Activer"}</button>`)+
     `</div>`;
+  const privacyFoot=`<span class="sub">inner[45]=1 : n'enregistre pas les échanges dans l'historique web Gemini (conservé au redémarrage).</span>`;
   const groups=[
     {title:"Session, Proxy & Santé",cols:"tiles-3",cards:[
       renderCard("Session Google",sessionBadge,sessionBody,arRunBtn),
@@ -254,7 +255,7 @@ async function load(){
     {title:"Réglages actifs & Confidentialité",cols:"tiles-3",cards:[
       renderCard("Réglages .env",envHeadBadge,envBody,""),
       renderCard("Comportement modèle",badge("none","Paramètres"),behaviorBody,behaviorFoot),
-      renderCard("Journal & Confidentialité","",privacyBody,""),
+      renderCard("Journal & Confidentialité","",privacyBody,privacyFoot),
     ]},
   ];
   $("tiles").innerHTML=groups.map(grp=>`<div><div class="group-title">${grp.title}</div><div class="tiles ${grp.cols}">${grp.cards.join("")}</div></div>`).join("");
@@ -262,6 +263,8 @@ async function load(){
   if(envReloadTile){envReloadTile.onclick=async()=>{envReloadTile.disabled=true;try{await fetch("/_ui/api/config/reload",{method:"POST",headers:{"X-GMINI-UI":TOKEN}});}finally{load();}};}
   const arToggle=$("ar-toggle");
   if(arToggle){arToggle.onclick=async()=>{arToggle.disabled=true;try{await fetch("/_ui/api/cookie-refresh/toggle",{method:"POST",headers:{"X-GMINI-UI":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({enabled:!ar.enabled})});}finally{load();}};}
+  const tcToggle=$("tc-toggle");
+  if(tcToggle){tcToggle.onclick=async()=>{tcToggle.disabled=true;try{await fetch("/_ui/api/temporary-chat/toggle",{method:"POST",headers:{"X-GMINI-UI":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({enabled:!s.temporary_chat})});}finally{load();}};}
   const arRun=$("ar-run");
   if(arRun){arRun.onclick=async()=>{arRun.disabled=true;arRun.textContent="en cours…";arRunMsg="";try{const r=await fetch("/_ui/api/cookie-refresh/run",{method:"POST",headers:{"X-GMINI-UI":TOKEN}});const j=await r.json();if(!r.ok){arRunMsg=(j.error||("Erreur "+r.status))+(j.cooldown_sec>0?" ("+fmtCooldown(j.cooldown_sec)+")":"");}}catch(e){arRunMsg="Échec : "+e.message;}finally{load();}};}
   if(ar.running){setTimeout(()=>{if(!document.hidden)load();},1000);}

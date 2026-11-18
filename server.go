@@ -201,6 +201,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /_ui/api/models/refresh", s.handleUIRefresh)
 	mux.HandleFunc("POST /_ui/api/cookie-refresh/toggle", s.handleUICookieRefreshToggle)
 	mux.HandleFunc("POST /_ui/api/cookie-refresh/run", s.handleUICookieRefreshRun)
+	mux.HandleFunc("POST /_ui/api/temporary-chat/toggle", s.handleUITemporaryChatToggle)
 	mux.HandleFunc("POST /_ui/api/config/reload", s.handleUIConfigReload)
 	mux.HandleFunc("POST /_ui/api/antigravity/launch", s.handleUILaunch)
 	mux.HandleFunc("/", s.handleNotFound)

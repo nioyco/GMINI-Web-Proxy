@@ -162,3 +162,48 @@ func TestK20_AutoRefreshStatusDeferredIdleOnDemand(t *testing.T) {
 		t.Fatalf("expected deferred_reason=idle_on_demand and nil NextRefreshInSec, got: %s", raw)
 	}
 }
+
+func TestK20_TemporaryChatToggleAndPersist(t *testing.T) {
+	client, cookieFile, stateFile := newCookieTestClient(t, "SAPISID=s1; __Secure-1PSIDTS=t1", 5*time.Minute)
+	cfg := testConfig()
+	cfg.UIEnabled = true
+	cfg.Gemini.Cookie = ""
+	cfg.Gemini.CookieFile = cookieFile
+	cfg.Gemini.StateFile = stateFile
+	srv := newServer(cfg, client, testLogger())
+	h := srv.handler()
+
+	// Missing token -> 401
+	w401 := uiDo(h, "POST", "/_ui/api/temporary-chat/toggle", "127.0.0.1:5000", "")
+	if w401.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without token, got %d", w401.Code)
+	}
+
+	// Toggle ON
+	wOn := uiDo(h, "POST", "/_ui/api/temporary-chat/toggle", "127.0.0.1:5000", srv.uiToken)
+	if wOn.Code != http.StatusOK || !strings.Contains(wOn.Body.String(), `"temporary_chat":true`) {
+		t.Fatalf("toggle ON failed: code=%d body=%s", wOn.Code, wOn.Body.String())
+	}
+	if !client.TemporaryChat() || !client.UpstreamParams().TemporaryChat {
+		t.Fatal("client.TemporaryChat() must be true after toggle ON")
+	}
+
+	// Restarted client restores persisted temporary_chat=true from .state.json
+	client2, err := gemini.New(gemini.Config{CookieFile: cookieFile, StateFile: stateFile}, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client2.RestoreState()
+	if !client2.TemporaryChat() {
+		t.Fatal("restarted client did not restore persisted temporary_chat=true")
+	}
+
+	// Toggle OFF
+	wOff := uiDo(h, "POST", "/_ui/api/temporary-chat/toggle", "127.0.0.1:5000", srv.uiToken)
+	if wOff.Code != http.StatusOK || !strings.Contains(wOff.Body.String(), `"temporary_chat":false`) {
+		t.Fatalf("toggle OFF failed: code=%d body=%s", wOff.Code, wOff.Body.String())
+	}
+	if client.TemporaryChat() {
+		t.Fatal("client.TemporaryChat() must be false after toggle OFF")
+	}
+}
