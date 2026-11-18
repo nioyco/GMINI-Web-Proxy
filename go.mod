@@ -1,3 +1,3 @@
-module github.com/n0madic/go-gemini-web2api
+module github.com/nioyco/GMINI-Web-Proxy
 
 go 1.22

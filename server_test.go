@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
+	"github.com/nioyco/GMINI-Web-Proxy/pkg/gemini"
 )
 
 // testConfig is the app config used by handler tests. Its Gemini settings mirror

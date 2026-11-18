@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
-	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
+	"github.com/nioyco/GMINI-Web-Proxy/pkg/apiconv"
+	"github.com/nioyco/GMINI-Web-Proxy/pkg/gemini"
 )
 
 // Local management page (GET /_ui). It is served to loopback clients only and

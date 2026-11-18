@@ -17,8 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
-	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
+	"github.com/nioyco/GMINI-Web-Proxy/pkg/apiconv"
+	"github.com/nioyco/GMINI-Web-Proxy/pkg/gemini"
 )
 
 // headerRequestID is the correlation header accepted from clients and echoed back.

@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
-	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
+	"github.com/nioyco/GMINI-Web-Proxy/pkg/apiconv"
+	"github.com/nioyco/GMINI-Web-Proxy/pkg/gemini"
 )
 
 // K15 Q1: An ordinary exotic-tag fence before tool_call blocks in runStreamTools

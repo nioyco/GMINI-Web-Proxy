@@ -37,7 +37,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/n0madic/go-gemini-web2api/pkg/util"
+	"github.com/nioyco/GMINI-Web-Proxy/pkg/util"
 )
 
 // geminiBaseURL is the public Gemini host serving the BardChatUi batchexecute endpoint.

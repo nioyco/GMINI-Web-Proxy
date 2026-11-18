@@ -9,5 +9,12 @@
 # Editor / OS
 .DS_Store
 
-# Persisted session state (secret: XSRF token)
+# Persisted session state and runtime journals (secrets / local usage)
 *.state.json
+*.calls.jsonl
+*.tokens.jsonl
+*.flights.json
+*.bak.*
+
+# Local analysis artifacts
+graphify-out/

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
+	"github.com/nioyco/GMINI-Web-Proxy/pkg/gemini"
 )
 
 func startRealServer(t *testing.T, s *Server) (base string, hs *http.Server) {

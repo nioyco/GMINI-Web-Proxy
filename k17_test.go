@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
+	"github.com/nioyco/GMINI-Web-Proxy/pkg/apiconv"
 )
 
 // K17 S2: Explicit rule against built-in code execution and code_reference blocks

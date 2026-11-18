@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
+	"github.com/nioyco/GMINI-Web-Proxy/pkg/apiconv"
 )
 
 func wrbBodyFrame(inner []any) string {

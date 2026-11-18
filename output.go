@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
+	"github.com/nioyco/GMINI-Web-Proxy/pkg/apiconv"
 )
 
 // noteEcho records history-echo removals for the request and the process

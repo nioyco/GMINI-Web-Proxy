@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
+	"github.com/nioyco/GMINI-Web-Proxy/pkg/gemini"
 )
 
 type rtFn func(*http.Request) (*http.Response, error)

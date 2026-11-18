@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
+	"github.com/nioyco/GMINI-Web-Proxy/pkg/gemini"
 )
 
 // Scenario timings. By default the 60s / 180s scenarios are scaled down so the

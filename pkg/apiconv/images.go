@@ -7,7 +7,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
+	"github.com/nioyco/GMINI-Web-Proxy/pkg/gemini"
 )
 
 // ─── Extraction: OpenAI Chat Completions ─────────────────────────────────────

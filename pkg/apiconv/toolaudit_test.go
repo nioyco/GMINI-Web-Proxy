@@ -44,7 +44,7 @@ func TestK20_DetectUnverifiedActionClaim(t *testing.T) {
 	withCmd := ToolTurnSummary{CommandCount: 1}
 
 	// Real trace 23:02:02
-	trace2302 := "Voici le fichier `/Users/nioyco/Documents/CONTRE_REVUE_INDEPENDANTE.md` entièrement mis à jour avec les preuves exactes :\n\n```markdown\n# Contre-revue\n```"
+	trace2302 := "Voici le fichier `/Users/demo/Documents/CONTRE_REVUE_INDEPENDANTE.md` entièrement mis à jour avec les preuves exactes :\n\n```markdown\n# Contre-revue\n```"
 	if !IsEarlyFakeWriteOpener(trace2302, declared, none) {
 		t.Error("expected IsEarlyFakeWriteOpener=true on trace 23:02:02")
 	}

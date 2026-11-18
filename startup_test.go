@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
+	"github.com/nioyco/GMINI-Web-Proxy/pkg/gemini"
 )
 
 // googleSim answers like Gemini (signed-in /app page, a listModels catalog,
