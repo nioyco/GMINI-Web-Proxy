@@ -33,6 +33,8 @@ type statusResponse struct {
 	ToolPromptRules        bool                    `json:"tool_prompt_noecho_rules"`   // GEMINI_TOOL_PROMPT_NOECHO_RULES
 	NoInternalCodeExecRule bool                    `json:"no_internal_code_exec_rule"` // GEMINI_NO_INTERNAL_CODE_EXEC_RULE
 	CodeRefFastpath        bool                    `json:"code_ref_fastpath"`          // GEMINI_CODE_REF_FASTPATH
+	ToolAuditNote          bool                    `json:"tool_audit_note"`            // GEMINI_TOOL_AUDIT_NOTE
+	SplitReadWriteBatch    bool                    `json:"split_read_write_batch"`     // GEMINI_SPLIT_READ_WRITE_BATCH
 	MarkerNeutralized      bool                    `json:"neutralize_history_markers"` // GEMINI_NEUTRALIZE_HISTORY_MARKERS
 	StreamProgress         bool                    `json:"stream_tools_progress"`      // GEMINI_STREAM_TOOLS_PROGRESS
 	StreamThoughts         bool                    `json:"stream_thoughts"`            // GEMINI_STREAM_THOUGHTS
@@ -239,6 +241,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			"early_stop_marker":         s.stats.earlyStopMarker.Load(),
 			"early_stop_size":           s.stats.earlyStopSize.Load(),
 			"early_stop_duration":       s.stats.earlyStopDuration.Load(),
+			"unverified_action_claim":   s.stats.unverifiedClaim.Load(),
+			"read_write_batch_split":    s.stats.readWriteBatchSplit.Load(),
 			"upstream_requests":         s.stats.upstreamRequests.Load(),
 			"upstream_attempts":         s.stats.upstreamAttempts.Load(),
 			"upstream_retries":          s.stats.upstreamRetries.Load(),
@@ -332,6 +336,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	resp.ToolPromptRules = apiconv.ToolPromptRules()
 	resp.NoInternalCodeExecRule = apiconv.NoInternalCodeExecRule()
 	resp.CodeRefFastpath = s.cfg.CodeRefFastpath
+	resp.ToolAuditNote = s.cfg.ToolAuditNote
+	resp.SplitReadWriteBatch = s.cfg.SplitReadWriteBatch
 	resp.MarkerNeutralized = apiconv.MarkerNeutralization()
 	resp.StreamProgress, resp.StreamThoughts = s.cfg.StreamToolsProgress, s.cfg.StreamThoughts
 	resp.ThinkingLevel, resp.MaxPromptBytes = s.cfg.DefaultThinkingLevel, s.cfg.MaxPromptBytes

@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/n0madic/go-gemini-web2api/pkg/apiconv"
 	"github.com/n0madic/go-gemini-web2api/pkg/gemini"
 )
 
@@ -87,6 +88,9 @@ type reqInfo struct {
 	limitBanner      string
 	staleTokenAlert  string
 	staleStreamNote  string
+	toolFacts        apiconv.ConversationToolFacts
+	emittedTools     []string
+	unverifiedClaim  string
 }
 
 func (ri *reqInfo) setServed(id, name, verdict string) {
@@ -193,30 +197,32 @@ func (ri *reqInfo) takeStaleStreamNote() string {
 // InFlightRequest summarizes one request currently in progress or in the recent
 // per-conversation history (K7, K8, K9, B1).
 type InFlightRequest struct {
-	ID              string  `json:"id"`
-	ConvID          string  `json:"conv_id,omitempty"`
-	State           string  `json:"state,omitempty"`
-	Model           string  `json:"model"`
-	ServedID        string  `json:"served_id,omitempty"`
-	ServedName      string  `json:"served_name,omitempty"`
-	GoogleModel     string  `json:"google_model,omitempty"`
-	Identity        string  `json:"identity,omitempty"`
-	StartTime       string  `json:"start_time"`
-	DurationMS      int64   `json:"duration_ms"`
-	PromptBytes     int     `json:"prompt_bytes,omitempty"`
-	ImageCount      int     `json:"image_count,omitempty"`
-	ThoughtBytes    int     `json:"thought_bytes"`
-	TextBytes       int     `json:"text_bytes"`
-	SentBytes       int     `json:"sent_bytes"`
-	InputTokens     int     `json:"input_tokens,omitempty"`
-	ThoughtTokens   int     `json:"thought_tokens,omitempty"`
-	TextTokens      int     `json:"text_tokens,omitempty"`
-	TotalTokens     int     `json:"total_tokens,omitempty"`
-	LastFrameAgeSec float64 `json:"last_frame_age_sec"`
-	StatusNote      string  `json:"status_note,omitempty"`
-	InternalTool    string  `json:"internal_tool,omitempty"`
-	LimitBanner     string  `json:"limit_banner,omitempty"`
-	StaleTokenAlert string  `json:"stale_token_alert,omitempty"`
+	ID              string   `json:"id"`
+	ConvID          string   `json:"conv_id,omitempty"`
+	State           string   `json:"state,omitempty"`
+	Model           string   `json:"model"`
+	ServedID        string   `json:"served_id,omitempty"`
+	ServedName      string   `json:"served_name,omitempty"`
+	GoogleModel     string   `json:"google_model,omitempty"`
+	Identity        string   `json:"identity,omitempty"`
+	StartTime       string   `json:"start_time"`
+	DurationMS      int64    `json:"duration_ms"`
+	PromptBytes     int      `json:"prompt_bytes,omitempty"`
+	ImageCount      int      `json:"image_count,omitempty"`
+	ThoughtBytes    int      `json:"thought_bytes"`
+	TextBytes       int      `json:"text_bytes"`
+	SentBytes       int      `json:"sent_bytes"`
+	InputTokens     int      `json:"input_tokens,omitempty"`
+	ThoughtTokens   int      `json:"thought_tokens,omitempty"`
+	TextTokens      int      `json:"text_tokens,omitempty"`
+	TotalTokens     int      `json:"total_tokens,omitempty"`
+	LastFrameAgeSec float64  `json:"last_frame_age_sec"`
+	StatusNote      string   `json:"status_note,omitempty"`
+	InternalTool    string   `json:"internal_tool,omitempty"`
+	LimitBanner     string   `json:"limit_banner,omitempty"`
+	StaleTokenAlert string   `json:"stale_token_alert,omitempty"`
+	EmittedTools    []string `json:"emitted_tools,omitempty"`
+	UnverifiedClaim string   `json:"unverified_claim,omitempty"`
 }
 
 func (ri *reqInfo) inFlightSnapshot(now time.Time) InFlightRequest {
@@ -265,6 +271,8 @@ func (ri *reqInfo) inFlightSnapshot(now time.Time) InFlightRequest {
 		InternalTool:    ri.internalToolName,
 		LimitBanner:     ri.limitBanner,
 		StaleTokenAlert: ri.staleTokenAlert,
+		EmittedTools:    append([]string(nil), ri.emittedTools...),
+		UnverifiedClaim: ri.unverifiedClaim,
 	}
 }
 
@@ -299,6 +307,43 @@ func setReqInput(ctx context.Context, promptBytes, promptRunes, imageCount int) 
 		ri.imageCount = imageCount
 		ri.inFlightMu.Unlock()
 	}
+}
+
+// setReqToolFacts records verified historical tool executions extracted from
+// structured conversation messages (never model-controlled text).
+func setReqToolFacts(ctx context.Context, facts apiconv.ConversationToolFacts) {
+	if ri := reqFrom(ctx); ri != nil {
+		ri.inFlightMu.Lock()
+		ri.toolFacts = facts
+		ri.inFlightMu.Unlock()
+	}
+}
+
+func reqToolFacts(ctx context.Context) apiconv.ConversationToolFacts {
+	if ri := reqFrom(ctx); ri != nil {
+		ri.inFlightMu.RLock()
+		defer ri.inFlightMu.RUnlock()
+		return ri.toolFacts
+	}
+	return apiconv.ConversationToolFacts{}
+}
+
+func (ri *reqInfo) setEmittedTools(tools []string) {
+	if ri == nil {
+		return
+	}
+	ri.inFlightMu.Lock()
+	ri.emittedTools = append([]string(nil), tools...)
+	ri.inFlightMu.Unlock()
+}
+
+func (ri *reqInfo) setUnverifiedClaim(kind string) {
+	if ri == nil || kind == "" {
+		return
+	}
+	ri.inFlightMu.Lock()
+	ri.unverifiedClaim = kind
+	ri.inFlightMu.Unlock()
 }
 
 var convIDLineRe = regexp.MustCompile(`(?m)^Conversation ID:\s*([A-Za-z0-9_-]{8,64})\s*$`)
@@ -359,6 +404,8 @@ type statsCounters struct {
 	earlyStopMarker      atomic.Int64
 	earlyStopSize        atomic.Int64
 	earlyStopDuration    atomic.Int64
+	unverifiedClaim      atomic.Int64
+	readWriteBatchSplit  atomic.Int64
 
 	// Upstream aggregates (only requests that reached Gemini).
 	upstreamRequests  atomic.Int64

@@ -66,6 +66,13 @@ type Config struct {
 	// or when an explicit shell block is emitted with a unique command tool,
 	// without waiting for the upstream pause (GEMINI_CODE_REF_FASTPATH, default on; K18 T1).
 	CodeRefFastpath bool
+	// ToolAuditNote emits a short verified mechanical tool summary in
+	// reasoning_content at the end of a tool-enabled final turn (GEMINI_TOOL_AUDIT_NOTE, default on; K20).
+	ToolAuditNote bool
+	// SplitReadWriteBatch defers full-file write_file calls when mixed in the
+	// same batch as read_file calls so the model writes only after reading real
+	// file contents (GEMINI_SPLIT_READ_WRITE_BATCH, default on; K20).
+	SplitReadWriteBatch bool
 	// InternalToolAction controls how the proxy reacts when an internal Google tool
 	// is detected (GEMINI_INTERNAL_TOOL_ACTION = notify | retry | off; default notify).
 	InternalToolAction string
@@ -198,6 +205,8 @@ func loadConfig(envFile string) *Config {
 		ToolPromptReminder:          getEnvBool("GEMINI_TOOL_PROMPT_REMINDER", true),
 		NoInternalCodeExecRule:      getEnvBool("GEMINI_NO_INTERNAL_CODE_EXEC_RULE", true),
 		CodeRefFastpath:             getEnvBool("GEMINI_CODE_REF_FASTPATH", true),
+		ToolAuditNote:               getEnvBool("GEMINI_TOOL_AUDIT_NOTE", true),
+		SplitReadWriteBatch:         getEnvBool("GEMINI_SPLIT_READ_WRITE_BATCH", true),
 		InternalToolAction:          normalizeInternalToolAction(getEnv("GEMINI_INTERNAL_TOOL_ACTION", "notify")),
 		CannedErrorRetry:            normalizeCannedErrorRetry(getEnv("GEMINI_CANNED_ERROR_RETRY", "off")),
 		CannedErrorRetrySec:         positive(getEnvInt("GEMINI_CANNED_ERROR_RETRY_SEC", 25), 25),
@@ -467,6 +476,12 @@ func reloadNonSecretDotenv(path string, cfg *Config) (time.Time, error) {
 	vals := parseDotenvMap(path)
 	if v, ok := vals["GEMINI_CODE_REF_FASTPATH"]; ok {
 		cfg.CodeRefFastpath = parseBoolStr(v, true)
+	}
+	if v, ok := vals["GEMINI_TOOL_AUDIT_NOTE"]; ok {
+		cfg.ToolAuditNote = parseBoolStr(v, true)
+	}
+	if v, ok := vals["GEMINI_SPLIT_READ_WRITE_BATCH"]; ok {
+		cfg.SplitReadWriteBatch = parseBoolStr(v, true)
 	}
 	if v, ok := vals["GEMINI_NO_INTERNAL_CODE_EXEC_RULE"]; ok {
 		cfg.NoInternalCodeExecRule = parseBoolStr(v, true)

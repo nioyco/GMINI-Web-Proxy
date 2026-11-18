@@ -353,6 +353,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	setReqMeta(r.Context(), m.Name, req.Stream)
 	setReqConvID(r.Context(), convFingerprintFromPrompt(prompt))
 	setReqInput(r.Context(), len(prompt), utf8.RuneCountInString(prompt), len(images))
+	setReqToolFacts(r.Context(), apiconv.ExtractConversationToolFacts(req.Messages))
 	s.client.RecordUserActivity()
 	cid := apiconv.ID("chatcmpl-", 12)
 	p := m.Params(prompt)
@@ -633,8 +634,8 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 		return
 	}
 	if res.earlyStopReason == "" && (res.genErr != nil || res.rawText == "") {
-		if !res.forwarded && (res.genErr == nil || gemini.Retryable(res.genErr)) && !errors.Is(res.genErr, gemini.ErrSessionAuth) {
-			// Nothing reached the client yet: let the buffered path retry.
+		if !res.modelForwarded && (res.genErr == nil || gemini.Retryable(res.genErr)) && !errors.Is(res.genErr, gemini.ErrSessionAuth) {
+			// Nothing from the model reached the client yet (only GMINI wait notes): let the buffered path retry.
 			s.rlog(ctx).Warn("progressive stream gave nothing; falling back to the buffered path", "err", res.genErr)
 			bres := s.awaitGenerate(ctx, sse, p, interval)
 			switch {
@@ -665,10 +666,15 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 	}
 
 	if res.earlyStopReason == "" {
+		toolFacts := reqToolFacts(ctx)
 		isCannedErr := !res.released && apiconv.IsUpstreamCannedErrorWithMarker(res.rawText, res.errorMarker)
 		isGlitch := !res.released && !isCannedErr && apiconv.IsUpstreamGlitch(res.rawText)
 		isToolRefusal := !res.released && !isCannedErr && len(declared) > 0 &&
 			(apiconv.IsUpstreamToolRefusal(res.rawText) || apiconv.IsThoughtToolRefusalOrSimulation(res.thoughtText, res.rawText))
+		fakeClaimKind, isFakeClaim := "", false
+		if !res.released && !isCannedErr && !isToolRefusal && len(declared) > 0 {
+			fakeClaimKind, isFakeClaim = apiconv.DetectUnverifiedActionClaim(res.rawText, declared, toolFacts.SinceLastUser)
+		}
 		if isCannedErr {
 			if normalizeCannedErrorRetry(s.cfg.CannedErrorRetry) != "once" {
 				s.recordModelFailure(model)
@@ -761,15 +767,18 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 			}
 			return
 		}
-		if isGlitch || isToolRefusal {
+		if isGlitch || isToolRefusal || isFakeClaim {
 			// Gemini sent a canned non-answer ("can't use Workspace", a bare widget
-			// placeholder, or claimed local tools are not declared/accessible).
+			// placeholder, claimed local tools are not declared/accessible, or
+			// dumped/claimed a file write without calling any tool).
 			// Nothing of it reached the client: try once more with corrective note.
-			s.rlog(ctx).Warn("upstream_glitch", "bytes", len(res.rawText), "tool_refusal", isToolRefusal, "action", "retry_once")
+			s.rlog(ctx).Warn("upstream_glitch", "bytes", len(res.rawText), "tool_refusal", isToolRefusal, "unverified_claim", fakeClaimKind, "action", "retry_once")
 			if s.cfg.StreamThoughts {
 				retryMsg := "Gemini a renvoyé un message de service au lieu de traiter la demande : nouvelle tentative…"
 				if isToolRefusal {
 					retryMsg = "Gemini affirme ne pas avoir d'outils locaux : nouvelle tentative avec consigne corrective…"
+				} else if isFakeClaim {
+					retryMsg = "Gemini affirme avoir agi sur le disque sans appeler d'outil : nouvelle tentative avec consigne corrective…"
 				}
 				if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, proxyWaitNote(s.currentNow(), retryMsg))); err != nil {
 					s.rlog(ctx).Warn("sse write failed", "err", err)
@@ -777,10 +786,52 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 				}
 			}
 			retryParams := p
-			if isToolRefusal {
+			if isFakeClaim {
+				retryParams = unverifiedActionRetryParams(p)
+			} else if isToolRefusal {
 				retryParams = toolRefusalRetryParams(p)
 			} else if isGlitch {
 				retryParams = glitchRetryParams(p)
+			}
+			// Run the K19/K20 retry via runStreamTools when available so thought
+			// simulations are also caught on the 2nd attempt (not only text).
+			if (isToolRefusal || isFakeClaim) && s.streamEvents != nil {
+				var gate2 apiconv.ProgressGate
+				var echo2 apiconv.EchoFilter
+				rres := s.runStreamTools(ctx, sse, retryParams, interval, declared, &streamToolsHooks{
+					progressive:     true,
+					noInternalRetry: true,
+					cid:             cid,
+					created:         res.created,
+					model:           model,
+					gate:            &gate2,
+					echo:            &echo2,
+				})
+				if rres.aborted {
+					return
+				}
+				if rres.earlyStopMsg != "" {
+					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, rres.earlyStopMsg, nil)), sse.done())
+					return
+				}
+				if rres.earlyStopReason == "" && (rres.genErr != nil || rres.rawText == "") {
+					genErr := rres.genErr
+					if genErr == nil {
+						genErr = gemini.ErrEmptyResponse
+					}
+					s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+genErr.Error())), sse.done())
+					return
+				}
+				if rres.earlyStopReason == "" && !rres.released {
+					if apiconv.IsUpstreamToolRefusal(rres.rawText) || apiconv.IsThoughtToolRefusalOrSimulation(rres.thoughtText, rres.rawText) {
+						s.rlog(ctx).Warn("upstream_tool_refusal", "bytes", len(rres.rawText), "action", "reported")
+						msg := "GMINI : Gemini a refusé ou simulé deux fois sans appeler les outils locaux. Relancez la demande ou ouvrez une nouvelle conversation."
+						s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
+						return
+					}
+				}
+				s.finishStreamProgress(ctx, sse, cid, model, declared, rres, &gate2, &echo2)
+				return
 			}
 			bres := s.awaitGenerate(ctx, sse, retryParams, interval)
 			switch {
@@ -854,12 +905,40 @@ func (s *Server) finishStreamProgress(ctx context.Context, sse *sseStream, cid, 
 		}
 	}
 	text, toolCalls := s.finishText(ctx, strings.TrimSpace(res.rawText), true, declared)
+	if len(toolCalls) > 0 && s.cfg.SplitReadWriteBatch {
+		if kept, deferred := apiconv.SplitPrematureReadWriteBatch(toolCalls); deferred > 0 {
+			toolCalls = kept
+			s.stats.readWriteBatchSplit.Add(1)
+			s.rlog(ctx).Warn("read_write_batch_split", "deferred_writes", deferred, "kept_calls", len(kept))
+			if s.cfg.StreamThoughts {
+				_ = sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, proxyWaitNoteWithTitle(s.currentNow(), "Écriture prématurée retenue", "GMINI a retenu write_file car des lectures (read_file) sont demandées dans le même tour : le modèle rédigera après réception des fichiers lus.")))
+			}
+		}
+	}
+	if ri != nil {
+		ri.setEmittedTools(apiconv.SummarizeToolCalls(toolCalls))
+	}
 	if text != "" || len(toolCalls) > 0 {
 		s.recordModelSuccess(model)
 	}
 	rest, ok := gate.Rest(text)
 	if !ok {
 		s.rlog(ctx).Warn("progress_text_mismatch", "sent_bytes", len(gate.Sent()), "final_bytes", len(text))
+	}
+	if len(toolCalls) == 0 && len(declared) > 0 {
+		toolFacts := reqToolFacts(ctx)
+		if kind, suspect := apiconv.DetectUnverifiedActionClaim(text, declared, toolFacts.SinceLastUser); suspect {
+			s.stats.unverifiedClaim.Add(1)
+			if ri != nil {
+				ri.setUnverifiedClaim(kind)
+			}
+			s.rlog(ctx).Warn("unverified_action_claim", "kind", kind, "bytes", len(text))
+			rest += unverifiedActionWarning(kind)
+		}
+		if s.cfg.ToolAuditNote && s.cfg.StreamThoughts {
+			summary := "Depuis votre dernière demande : " + toolFacts.SinceLastUser.FormatSummary() + "."
+			_ = sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, proxyWaitNoteWithTitle(s.currentNow(), "Bilan vérifié des outils", summary)))
+		}
 	}
 	ri.setSent(sentBytes + len(rest))
 	s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, rest, toolCalls)), sse.done())
@@ -890,6 +969,7 @@ type streamToolsResult struct {
 	emptyReply          bool
 	genErr              error
 	forwarded           bool
+	modelForwarded      bool // true only once real model thought or text was sent (excludes GMINI wait notes)
 	released            bool
 	early               string
 	warnEmitted         bool
@@ -1254,6 +1334,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 					ri.setReceived(thoughtBytes, raw.Len())
 				}
 				res.forwarded = true
+				res.modelForwarded = true
 				return write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, e.thought)))
 			}
 			return true
@@ -1345,9 +1426,11 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 				// The first few hundred bytes are held back: a canned non-answer of
 				// Gemini is short, and holding it lets the request be retried instead.
 				early.WriteString(out)
+				toolFacts := reqToolFacts(ctx)
 				holdForRefusal := len(declared) > 0 &&
 					(apiconv.IsThoughtToolRefusalOrSimulation(thoughtBuilder.String(), raw.String()) ||
-						(raw.Len() <= 2000 && apiconv.IsUpstreamToolRefusal(raw.String())))
+						(raw.Len() <= 2000 && apiconv.IsUpstreamToolRefusal(raw.String())) ||
+						(raw.Len() <= 16384 && apiconv.IsEarlyFakeWriteOpener(raw.String(), declared, toolFacts.SinceLastUser)))
 				if raw.Len() >= earlyHold && !holdForRefusal {
 					res.released, out = true, early.String()
 				} else {
@@ -1356,6 +1439,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			}
 			if res.released && out != "" {
 				res.forwarded = true
+				res.modelForwarded = true
 				rawAtLastUsefulTx = raw.Len()
 				heldSince = time.Time{}
 				res.transmittedBytes += len(out)
@@ -1675,6 +1759,22 @@ const toolRefusalRetryNote = "\n\n[Retry instruction: The listed tools are NOT b
 func toolRefusalRetryParams(p gemini.GenParams) gemini.GenParams {
 	p.Prompt += toolRefusalRetryNote
 	return p
+}
+
+const unverifiedActionRetryNote = "\n\n[Retry instruction: You wrote a plain text reply claiming you updated/saved a file on disk or executed a command, WITHOUT emitting any tool_call block. Nothing was actually written or executed on disk! Output the real ```tool_call block (write_file / edit_file / run_command) now instead of pasting the file content in chat.]"
+
+func unverifiedActionRetryParams(p gemini.GenParams) gemini.GenParams {
+	p.Prompt += unverifiedActionRetryNote
+	return p
+}
+
+func unverifiedActionWarning(kind string) string {
+	switch kind {
+	case "command_without_tool":
+		return "\n\n> ⚠ **GMINI (vérification mécanique)** : le modèle affirme avoir exécuté une commande ou des tests, mais **aucun appel `run_command` n'a été transmis par le proxy** depuis votre dernière demande."
+	default:
+		return "\n\n> ⚠ **GMINI (vérification mécanique)** : le modèle affirme avoir mis à jour ou écrit un fichier sur le disque, mais **aucun appel `write_file` / `edit_file` n'a été transmis par le proxy** depuis votre dernière demande. Vérifiez le disque avant de valider."
+	}
 }
 
 const internalToolRetryNote = "\n\n[CRITICAL REMINDER: Do NOT invoke any internal Google tool, Canvas, artifact generator, widget, Google Search, Drive, or Docs. Use ONLY the provided local tools, or reply directly in plain text.]"
@@ -2796,11 +2896,16 @@ type sseStream struct {
 	err error
 }
 
-// openSSE writes SSE response headers and returns the stream.
+// openSSE writes SSE response headers and returns the stream. If the response
+// headers were already sent on this request (e.g. during an on-demand cookie
+// refresh wait note), it reuses the open stream without calling WriteHeader twice.
 func openSSE(w http.ResponseWriter) (*sseStream, bool) {
 	f, ok := w.(http.Flusher)
 	if !ok {
 		return nil, false
+	}
+	if sw, ok := w.(*statusWriter); ok && sw.status != 0 {
+		return &sseStream{w: w, f: f}, true
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

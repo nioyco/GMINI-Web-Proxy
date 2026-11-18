@@ -152,11 +152,18 @@ function why(e){
   if(/google blocked/.test(e))return "Google a refusé cet appel (page anti-robot). Le catalogue déjà connu reste utilisé ; ne pas réessayer tout de suite.";
   return e;
 }
+let pollTimer=null;
 async function load(){
   let d;
   try{
     const r=await fetch("/_ui/api/state",{headers:{"X-GMINI-UI":TOKEN},cache:"no-store"});
-    if(!r.ok)throw new Error(r.status===401?"Rechargez la page (le proxy a redémarré).":"Erreur "+r.status);
+    if(r.status===401){
+      if(pollTimer){clearInterval(pollTimer);pollTimer=null;}
+      $("err").innerHTML=`Le proxy a redémarré : cette page utilise un ancien jeton. <button onclick="location.reload()" style="margin-left:8px;padding:3px 10px;font-size:12px">Recharger la page</button>`;
+      $("err").style.display="block";
+      return;
+    }
+    if(!r.ok)throw new Error("Erreur "+r.status);
     d=await r.json();$("err").style.display="none";
   }catch(e){$("err").textContent="Proxy injoignable : "+e.message;$("err").style.display="block";return}
   const s=d.status,g=s.google_block,ss=s.session_state||{};
@@ -178,8 +185,8 @@ async function load(){
   }else{$("envwarn").style.display="none";$("envwarn").innerHTML="";}
   const ar=s.cookie_auto_refresh||{};
   const tokAge=s.cookie_rotation.token_age_sec;
-  const tokAgeHTML=!ar.enabled&&tokAge!=null&&tokAge>7200?`<span style="color:var(--bad);font-weight:600">${age(tokAge)} — pensez à actualiser</span>`:!ar.enabled&&tokAge!=null&&tokAge>5400?`<span style="color:var(--warn);font-weight:600">${age(tokAge)} — pensez à actualiser</span>`:age(tokAge);
-  const arDetail=ar.running?" · en cours…":ar.paused?" · arrêtée (2 échecs — changer cookie.txt)":ar.next_refresh_in_sec!=null?` (prochaine dans ${age(ar.next_refresh_in_sec)} à ${hmShort(ar.next_refresh_at)})`:"";
+  const tokAgeHTML=!ar.enabled&&tokAge!=null&&tokAge>7200?`<span style="color:var(--bad);font-weight:600">${age(tokAge)} — pensez à actualiser</span>`:!ar.enabled&&tokAge!=null&&tokAge>5400?`<span style="color:var(--warn);font-weight:600">${age(tokAge)} — pensez à actualiser</span>`:ar.enabled&&ar.deferred_reason==="idle_on_demand"?`${age(tokAge)} <span class="sub">(auto prêt au prochain appel)</span>`:age(tokAge);
+  const arDetail=ar.running?" · en cours…":ar.paused?" · arrêtée (2 échecs — changer cookie.txt)":ar.deferred_reason==="idle_on_demand"?" · en veille (calme) : s'actualisera automatiquement à la prochaine demande":ar.deferred_reason==="google_blocked"?" · en attente (blocage anti-robot actif)":ar.next_refresh_in_sec!=null?` (prochaine dans ${age(ar.next_refresh_in_sec)} à ${hmShort(ar.next_refresh_at)})`:"";
   const arState=!ar.configured?"commande non réglée — ajouter GEMINI_COOKIE_REFRESH_CMD dans .env":!ar.enabled?"désactivée":`activée (conservée au redémarrage) — toutes les ${ar.interval_min||90} min${arDetail}`;
   const arLast=ar.running?`en cours… (${esc(ar.last_trigger||"manual")})`:ar.last_ok==null?"aucun":`${ar.last_ok?"OK":"échec (code "+ar.last_exit_code+")"} · ${dur(ar.last_duration_ms)} (${hmShort(ar.last_attempt_at)}, ${esc(ar.last_trigger||"—")})`;
   const arBtn=ar.configured?` <button id="ar-toggle" style="padding:2px 8px;font-size:12px">${ar.enabled?"Désactiver":"Activer"}</button><div class="sub">fait piloter Chrome sur Gemini sans demande de votre part</div>`:"";
@@ -218,6 +225,7 @@ async function load(){
   const envBody=`<div class="kv-list">`+
     kv("<code>code_ref_fastpath</code>",s.code_ref_fastpath?"on":"off")+
     kv("<code>no_internal_code_exec_rule</code>",s.no_internal_code_exec_rule?"on":"off")+
+    kv("<code>tool_audit_note</code> / <code>split_rw</code>",`${s.tool_audit_note?"on":"off"} / ${s.split_read_write_batch?"on":"off"}`)+
     kv("<code>wait_note_sec</code>",`${s.wait_note_sec??15} s`)+
     kv("<code>cookie_auto_refresh</code>",ar.enabled?"on":"off")+
     `</div>`;
@@ -239,7 +247,7 @@ async function load(){
     ]},
     {title:"Garde-fous & Compteurs",cols:"tiles-4",cards:[
       renderCard("Arrêts anticipés",s.counters?.early_stop?badge("warn",String(s.counters.early_stop)):badge("none","0"),`<div class="kv-list">${kv("Marqueur",s.counters?.early_stop_marker||0)}${kv("Taille",s.counters?.early_stop_size||0)}${kv("Durée",s.counters?.early_stop_duration||0)}</div>`,""),
-      renderCard("Appels non convertis",s.counters?.tool_call_unconverted?badge("bad",String(s.counters.tool_call_unconverted)):badge("none","0"),`<div class="sub">Filet de sécurité sur les blocs <code>tool_call</code> non reconnus en première passe.</div>`,""),
+      renderCard("Appels non convertis",s.counters?.tool_call_unconverted?badge("bad",String(s.counters.tool_call_unconverted)):badge("none","0"),`<div class="kv-list">${kv("Action non vérifiée",s.counters?.unverified_action_claim||0)}${kv("Lot lecture+écriture coupé",s.counters?.read_write_batch_split||0)}</div>`,""),
       renderCard("Raccourci code_reference",badge(s.code_ref_fastpath?"info":"none",s.code_ref_fastpath?"on":"off")+" "+(s.counters?.code_ref_fastpath?badge("warn",String(s.counters.code_ref_fastpath)):badge("none","0")),`<div class="sub">Conversion directe <code>GEMINI_CODE_REF_FASTPATH</code> (0 = attente normale).</div>`,""),
       renderCard("Réponses vides Google",s.counters?.upstream_empty_reply?badge("bad",String(s.counters.upstream_empty_reply)):badge("none","0"),`<div class="sub">Flux clos sans candidat, texte ni pensée.</div>`,""),
     ]},
@@ -301,7 +309,7 @@ async function load(){
   const convCount = new Set(allInflight.map(c => c.conv_id || c.id)).size;
   $("inflight-meta").textContent = `${inflight.length} en cours · ${inflightHist.length} en historique (${convCount}/5 conv., max 200 · vue scrollable de 15 lignes)`;
   const stateBadge = (c, live) => live ? badge("info", "En cours") : c.state === "Terminée" ? badge("ok", "Terminée") : badge("warn", c.state || "Terminée");
-  const rowInflight = (c, live) => `<tr${live ? ' style="background:var(--infobg)"' : ""}><td>${hm(c.start_time)}</td><td><code>${esc(c.conv_id || "—")}</code></td><td>${stateBadge(c, live)}</td><td><code>${esc(c.model)}</code></td><td>${c.identity ? who(c.identity, "", "", c.served_name) : (live ? badge("info", "En attente d'identification…") : badge("none", "Non indiqué"))}${c.internal_tool ? `<div class="sub" style="color:var(--warn);font-weight:600">outil interne détecté : ${esc(c.internal_tool)}</div>` : ""}${c.limit_banner ? `<div class="sub" style="color:var(--bad);font-weight:600">limite annoncée par Google : ${esc(c.limit_banner)}</div>` : ""}${c.stale_token_alert ? `<div class="sub" style="color:var(--bad);font-weight:600">⚠ ${esc(c.stale_token_alert)}</div>` : ""}${c.status_note ? (c.status_note.startsWith("Google : ") ? `<div class="sub" style="color:var(--info);font-weight:600">⏳ ${esc(c.status_note)}</div>` : `<div class="sub" style="color:var(--warn);font-weight:600">⚠ ${esc(c.status_note)}</div>`) : ""}</td><td class=num>${fmtPrompt(c.prompt_bytes)}</td><td class=num>${ko(c.thought_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${ko(c.sent_bytes)}</td><td class=num>${tokCell(c)}</td><td class=num>${live ? (c.last_frame_age_sec > 0 ? age(c.last_frame_age_sec) : "à l'instant") : "—"}</td><td class=num>${dur(c.duration_ms)}</td><td><code>${esc((c.id||"").slice(0,8))}</code></td></tr>`;
+  const rowInflight = (c, live) => `<tr${live ? ' style="background:var(--infobg)"' : ""}><td>${hm(c.start_time)}</td><td><code>${esc(c.conv_id || "—")}</code></td><td>${stateBadge(c, live)}</td><td><code>${esc(c.model)}</code></td><td>${c.identity ? who(c.identity, "", "", c.served_name) : (live ? badge("info", "En attente d'identification…") : badge("none", "Non indiqué"))}${(c.emitted_tools && c.emitted_tools.length) ? `<div class="sub" style="color:var(--ok);font-weight:600">outils : ${esc(c.emitted_tools.join(", "))}</div>` : ""}${c.unverified_claim ? `<div class="sub" style="color:var(--bad);font-weight:600">⚠ action prétendue sans outil (${esc(c.unverified_claim)})</div>` : ""}${c.internal_tool ? `<div class="sub" style="color:var(--warn);font-weight:600">outil interne détecté : ${esc(c.internal_tool)}</div>` : ""}${c.limit_banner ? `<div class="sub" style="color:var(--bad);font-weight:600">limite annoncée par Google : ${esc(c.limit_banner)}</div>` : ""}${c.stale_token_alert ? `<div class="sub" style="color:var(--bad);font-weight:600">⚠ ${esc(c.stale_token_alert)}</div>` : ""}${c.status_note ? (c.status_note.startsWith("Google : ") ? `<div class="sub" style="color:var(--info);font-weight:600">⏳ ${esc(c.status_note)}</div>` : `<div class="sub" style="color:var(--warn);font-weight:600">⚠ ${esc(c.status_note)}</div>`) : ""}</td><td class=num>${fmtPrompt(c.prompt_bytes)}</td><td class=num>${ko(c.thought_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${ko(c.sent_bytes)}</td><td class=num>${tokCell(c)}</td><td class=num>${live ? (c.last_frame_age_sec > 0 ? age(c.last_frame_age_sec) : "à l'instant") : "—"}</td><td class=num>${dur(c.duration_ms)}</td><td><code>${esc((c.id||"").slice(0,8))}</code></td></tr>`;
   $("inflight").innerHTML = "<thead><tr><th>Heure début</th><th>Conv.</th><th>État</th><th>Modèle demandé</th><th>Qui répond (déroulé)</th><th class=num>Prompt</th><th class=num>Pensées</th><th class=num>Reçus</th><th class=num>Transmis</th><th class=num>Tokens (est.)</th><th class=num>Dernière trame</th><th class=num>Durée</th><th>Requête</th></tr></thead><tbody>" +
     (allInflight.length ? inflight.map(c => rowInflight(c, true)).join("") + inflightHist.map(c => rowInflight(c, false)).join("") : "<tr><td colspan=13 class=sub>Aucune demande en cours ou récente.</td></tr>") + "</tbody>";
   const callsList=d.calls||[];
@@ -340,7 +348,7 @@ $("refresh").onclick=async()=>{
   }catch(e){$("refreshmsg").textContent="Échec : "+e.message}
   syncRefresh();load();
 };
-load();setInterval(()=>{if(!document.hidden)load()},5000);setInterval(()=>{if(!document.hidden&&refreshNextMs>0)syncRefresh()},1000);
+load();pollTimer=setInterval(()=>{if(!document.hidden)load()},5000);setInterval(()=>{if(!document.hidden&&refreshNextMs>0)syncRefresh()},1000);
 </script>
 </body>
 </html>

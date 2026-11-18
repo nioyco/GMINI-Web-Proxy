@@ -159,6 +159,10 @@ type Client struct {
 	// withdrawn holds models that a later catalogue no longer lists (observed when
 	// the web usage limit is reached). In memory only (guarded by modelMu).
 	withdrawn map[string]WithdrawnModel
+	// confirmedNames maps ModelID -> latest confirmed ServedName from Google's
+	// real StreamGenerate responses (inner[39]/inner[42]), used to keep catalog
+	// names accurate when otAQ7b lags behind (e.g. 95a4c0abcba24364 -> "4 Argon").
+	confirmedNames map[string]string
 	// suspectCheckAt is the last catalogue check triggered by a suspect reply.
 	suspectCheckAt time.Time
 	// sessionDegraded is set when listModels shrinks to <=1 model while >=2 were known.

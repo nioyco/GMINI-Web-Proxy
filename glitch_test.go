@@ -213,41 +213,43 @@ func TestK19QuotaRefusalAndThoughtSimulationRetried(t *testing.T) {
 	text2114 := "Voici le contenu de la contre-revue indépendante pour le lot 4+5 :\n\n" + strings.Repeat("Ligne de rapport simulé sans appel d'outil.\n", 20)
 
 	// 1. 21:55:25 quota refusal (> 400B)
-	f1 := progressServer(t, func(_ context.Context, _ gemini.GenParams, h gemini.StreamHandlers) error {
-		h.Text(trace2155)
+	var retryPrompt1 string
+	attempts1 := 0
+	f1 := progressServer(t, func(_ context.Context, p gemini.GenParams, h gemini.StreamHandlers) error {
+		attempts1++
+		if attempts1 == 1 {
+			h.Text(trace2155)
+			return nil
+		}
+		retryPrompt1 = p.Prompt
+		h.Text("```tool_call\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.go\"}}\n```")
 		return nil
 	})
-	var retryPrompt1 string
-	calls1 := 0
-	f1.srv.generate = func(_ context.Context, p gemini.GenParams) (string, error) {
-		calls1++
-		retryPrompt1 = p.Prompt
-		return "```tool_call\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.go\"}}\n```", nil
-	}
 	c1 := readSSE(t, context.Background(), f1.url, body(""))
 	all1 := strings.Join(c1.dataFrames, "\n")
-	if calls1 != 1 || strings.Contains(all1, "limite technique maximale") || !strings.Contains(all1, "read_file") {
-		t.Fatalf("21:55:25 case failed: calls=%d all=%s", calls1, all1)
+	if attempts1 != 2 || strings.Contains(all1, "limite technique maximale") || !strings.Contains(all1, "read_file") {
+		t.Fatalf("21:55:25 case failed: attempts=%d all=%s", attempts1, all1)
 	}
 	if !strings.Contains(retryPrompt1, "NO tool call limit or quota") || !strings.Contains(retryPrompt1, "NEVER simulate or invent a report") {
 		t.Fatalf("retryPrompt missing K19 rules: %q", retryPrompt1)
 	}
 
 	// 2. 21:14:27 thought simulation (> 400B)
+	attempts2 := 0
 	f2 := progressServer(t, func(_ context.Context, _ gemini.GenParams, h gemini.StreamHandlers) error {
-		h.Thought(thought2114)
-		h.Text(text2114)
+		attempts2++
+		if attempts2 == 1 {
+			h.Thought(thought2114)
+			h.Text(text2114)
+			return nil
+		}
+		h.Text("```tool_call\n{\"name\":\"write_file\",\"arguments\":{\"path\":\"CONTRE_REVUE.md\"}}\n```")
 		return nil
 	})
-	calls2 := 0
-	f2.srv.generate = func(_ context.Context, p gemini.GenParams) (string, error) {
-		calls2++
-		return "```tool_call\n{\"name\":\"write_file\",\"arguments\":{\"path\":\"CONTRE_REVUE.md\"}}\n```", nil
-	}
 	c2 := readSSE(t, context.Background(), f2.url, body(""))
 	all2 := strings.Join(c2.dataFrames, "\n")
-	if calls2 != 1 || strings.Contains(all2, "Ligne de rapport simulé") || !strings.Contains(all2, "write_file") {
-		t.Fatalf("21:14:27 case failed: calls=%d all=%s", calls2, all2)
+	if attempts2 != 2 || strings.Contains(all2, "Ligne de rapport simulé") || !strings.Contains(all2, "write_file") {
+		t.Fatalf("21:14:27 case failed: attempts=%d all=%s", attempts2, all2)
 	}
 
 	// 3. Genuine final answer after report written -> no retry

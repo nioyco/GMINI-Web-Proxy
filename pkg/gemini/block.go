@@ -476,6 +476,25 @@ func (c *Client) AcquireBackground(f CallFamily, reason string) bool {
 	return allowed
 }
 
+// IsIdleForBackground reports whether the idle-quiet guard would currently
+// refuse a background call (pure read-only check; never logs or mutates state).
+func (c *Client) IsIdleForBackground(now time.Time) bool {
+	if c.cfg.IdleQuiet <= 0 {
+		return false
+	}
+	if now.IsZero() {
+		now = nowFn()
+	}
+	now = now.Round(0)
+	b := &c.block
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.activeUserReqs > 0 {
+		return false
+	}
+	return b.lastUserActivity.IsZero() || now.Sub(b.lastUserActivity.Round(0)) > c.cfg.IdleQuiet
+}
+
 func (c *Client) acquireBackground(f CallFamily) bool {
 	return c.AcquireBackground(f, "background")
 }

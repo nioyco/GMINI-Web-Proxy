@@ -224,31 +224,40 @@ func (c *Client) loadCalls() {
 	if path == "" {
 		return
 	}
-	c.calls.mu.Lock()
-	defer c.calls.mu.Unlock()
-	c.calls.path = path
-	f, err := os.Open(path)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 64*1024), 1024*1024)
-	for sc.Scan() {
-		var r CallRecord
-		if json.Unmarshal(sc.Bytes(), &r) == nil && r.Model != "" {
-			PopulateCallTokens(&r, nil)
-			c.calls.recs = append(c.calls.recs, r)
-			c.calls.lines++
-			t, _ := time.Parse(time.RFC3339, r.Time)
-			c.calls.updateModelIdentity(r, t)
-			if len(c.calls.recs) > callFileCompact {
-				c.calls.recs = c.calls.recs[len(c.calls.recs)-callLogKeep:]
+	var confirmedPairs [][2]string
+	func() {
+		c.calls.mu.Lock()
+		defer c.calls.mu.Unlock()
+		c.calls.path = path
+		f, err := os.Open(path)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 64*1024), 1024*1024)
+		for sc.Scan() {
+			var r CallRecord
+			if json.Unmarshal(sc.Bytes(), &r) == nil && r.Model != "" {
+				PopulateCallTokens(&r, nil)
+				c.calls.recs = append(c.calls.recs, r)
+				c.calls.lines++
+				t, _ := time.Parse(time.RFC3339, r.Time)
+				c.calls.updateModelIdentity(r, t)
+				if r.Identity == "confirmed" && r.ServedID != "" && r.ServedName != "" {
+					confirmedPairs = append(confirmedPairs, [2]string{r.ServedID, r.ServedName})
+				}
+				if len(c.calls.recs) > callFileCompact {
+					c.calls.recs = c.calls.recs[len(c.calls.recs)-callLogKeep:]
+				}
 			}
 		}
-	}
-	if len(c.calls.recs) > callLogKeep {
-		c.calls.recs = c.calls.recs[len(c.calls.recs)-callLogKeep:]
+		if len(c.calls.recs) > callLogKeep {
+			c.calls.recs = c.calls.recs[len(c.calls.recs)-callLogKeep:]
+		}
+	}()
+	for _, pair := range confirmedPairs {
+		c.syncConfirmedServedName(pair[0], pair[1])
 	}
 }
 
@@ -377,10 +386,11 @@ func (c *Client) recordCall(r CallRecord, scan *idScan) {
 			"seen_model_ids", strings.Join(r.SeenModelIDs, ","), "suspect", r.Suspect,
 			"first_text_ms", r.FirstTextMS, "thought_bytes", r.ThoughtBytes)
 	} else {
-		if r.Identity == "confirmed" && r.ServedName != "" {
-			if m, err := c.ResolveModel(r.Model); err == nil && m != nil && m.Description != "" && r.ServedName != m.Description {
+		if r.Identity == "confirmed" && r.ServedID != "" && r.ServedName != "" {
+			if prevDesc, changed := c.syncConfirmedServedName(r.ServedID, r.ServedName); changed {
 				c.log.Info("served_name_changed", "request_id", r.RequestID, "model", r.Model, "model_id", r.ModelID,
-					"catalog_name", m.Description, "served_name", r.ServedName)
+					"catalog_name", prevDesc, "served_name", r.ServedName, "synced", true)
+				c.saveState()
 			}
 		}
 		if c.cfg.LogParams || r.Identity == "canned_error" {

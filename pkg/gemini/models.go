@@ -352,16 +352,25 @@ func (c *Client) RefreshCatalogAfterCookie(ctx context.Context) error {
 // storeModels atomically replaces the registry with the given models, preserving
 // their order and recording the source and fetch time.
 func (c *Client) storeModels(models []*AvailableModel, source string) {
+	c.modelMu.Lock()
 	reg := make(map[string]*AvailableModel, len(models))
 	order := make([]string, 0, len(models))
 	for _, m := range models {
+		if m == nil {
+			continue
+		}
 		if _, dup := reg[m.Name]; dup {
 			continue
 		}
-		reg[m.Name] = m
-		order = append(order, m.Name)
+		cp := *m
+		if (source == "dynamic" || source == "persisted") && cp.ModelID != "" {
+			if cn := c.confirmedNames[cp.ModelID]; cn != "" && cp.Description != cn {
+				cp.Description = cn
+			}
+		}
+		reg[cp.Name] = &cp
+		order = append(order, cp.Name)
 	}
-	c.modelMu.Lock()
 	// A model that disappears from a catalogue fetched from Google is remembered
 	// as withdrawn; it is forgotten again when it comes back.
 	if source == "dynamic" {
@@ -381,6 +390,31 @@ func (c *Client) storeModels(models []*AvailableModel, source string) {
 	c.modelOrder = order
 	c.modelsSource = source
 	c.modelMu.Unlock()
+}
+
+// syncConfirmedServedName records the real backend name Google confirmed for
+// modelID (inner[39]/inner[42]) and updates the in-memory catalog description
+// when it differs from otAQ7b (e.g. "4 Carbon" -> "4 Argon").
+func (c *Client) syncConfirmedServedName(modelID, servedName string) (prevDesc string, changed bool) {
+	modelID = strings.TrimSpace(modelID)
+	servedName = strings.TrimSpace(servedName)
+	if modelID == "" || servedName == "" {
+		return "", false
+	}
+	c.modelMu.Lock()
+	if c.confirmedNames == nil {
+		c.confirmedNames = map[string]string{}
+	}
+	c.confirmedNames[modelID] = servedName
+	for _, m := range c.models {
+		if m.ModelID == modelID && m.Description != servedName {
+			prevDesc = m.Description
+			m.Description = servedName
+			changed = true
+		}
+	}
+	c.modelMu.Unlock()
+	return prevDesc, changed
 }
 
 // WithdrawnModel is a model that was in the catalogue and no longer is.

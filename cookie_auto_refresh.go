@@ -42,6 +42,7 @@ type cookieAutoRefreshStatus struct {
 	LastOK              *bool   `json:"last_ok,omitempty"`
 	NextRefreshAt       *string `json:"next_refresh_at,omitempty"`
 	NextRefreshInSec    *int64  `json:"next_refresh_in_sec,omitempty"`
+	DeferredReason      string  `json:"deferred_reason,omitempty"`
 	ManualCooldownSec   int64   `json:"manual_cooldown_sec,omitempty"`
 }
 
@@ -556,10 +557,25 @@ func (r *cookieAutoRefresher) Status() cookieAutoRefreshStatus {
 		if rem < 0 {
 			rem = 0
 		}
-		nextAt := now.Add(rem)
-		sec := int64(rem.Seconds())
-		st.NextRefreshAt = rfc3339Ptr(nextAt)
-		st.NextRefreshInSec = &sec
+		activeRecently := !r.lastActivityAt.IsZero() && now.Round(0).Sub(r.lastActivityAt.Round(0)) <= r.activityWindow
+		if rem == 0 {
+			switch {
+			case r.client != nil && r.client.GoogleBlockStatus().Active:
+				st.DeferredReason = "google_blocked"
+			case !activeRecently || (r.client != nil && r.client.IsIdleForBackground(now)):
+				st.DeferredReason = "idle_on_demand"
+			default:
+				nextAt := now.Add(rem)
+				sec := int64(rem.Seconds())
+				st.NextRefreshAt = rfc3339Ptr(nextAt)
+				st.NextRefreshInSec = &sec
+			}
+		} else {
+			nextAt := now.Add(rem)
+			sec := int64(rem.Seconds())
+			st.NextRefreshAt = rfc3339Ptr(nextAt)
+			st.NextRefreshInSec = &sec
+		}
 	}
 	return st
 }
