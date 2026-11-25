@@ -120,8 +120,8 @@ func TestK43_InitialSilence35sAndChainsIntoNoContentCap(t *testing.T) {
 	if elapsed >= 350*time.Millisecond {
 		t.Fatalf("elapsed = %s, expected capped noContentTimeout after initial_silence_retry", elapsed)
 	}
-	if seen[0].Level != 4 || seen[1].Level != 2 || seen[2].Level != 2 {
-		t.Errorf("level progression = %d -> %d -> %d, want 4 -> 2 -> 2", seen[0].Level, seen[1].Level, seen[2].Level)
+	if seen[0].Level != 4 || seen[1].Level != 2 || seen[2].Level != 1 {
+		t.Errorf("level progression = %d -> %d -> %d, want 4 -> 2 -> 1", seen[0].Level, seen[1].Level, seen[2].Level)
 	}
 	if seen[0].TemporaryChat || seen[1].TemporaryChat || seen[2].TemporaryChat {
 		t.Errorf("TemporaryChat progression = %v/%v/%v, want false/false/false", seen[0].TemporaryChat, seen[1].TemporaryChat, seen[2].TemporaryChat)

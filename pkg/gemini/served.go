@@ -52,11 +52,12 @@ type CallRecord struct {
 	// body positions 39 and 42, located in real traces on 2026-11-14).
 	ServedID     string   `json:"served_id,omitempty"`
 	ServedName   string   `json:"served_name,omitempty"`
-	SeenModelIDs []string `json:"seen_model_ids"`  // catalogue ids present in the raw reply
-	OtherHexIDs  int      `json:"other_hex_ids"`   // 16-hex tokens that are not catalogue ids
-	Identity     string   `json:"identity"`        // confirmed | other_model | name_only | canned_error | not_stated
-	Suspect      string   `json:"suspect"`         // "" | no_thoughts
-	Error        string   `json:"error,omitempty"` // error kind, never content
+	SeenModelIDs []string `json:"seen_model_ids"`         // catalogue ids present in the raw reply
+	OtherHexIDs  int      `json:"other_hex_ids"`          // 16-hex tokens that are not catalogue ids
+	Identity     string   `json:"identity"`               // confirmed | other_model | name_only | canned_error | not_stated
+	Suspect      string   `json:"suspect"`                // "" | no_thoughts
+	Error        string   `json:"error,omitempty"`        // error kind, never content
+	LimitBanner  string   `json:"limit_banner,omitempty"` // quota/limit banner from body[52]/body[54]
 }
 
 // hexIDRe matches a bare 16-hex token (the shape of a model id). A leading "_"

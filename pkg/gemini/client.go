@@ -884,6 +884,7 @@ func (c *Client) generateAttempts(ctx context.Context, p GenParams, images []upl
 						})
 						rec := newCallRecord(met, p, t0)
 						rec.Frames = shape.frames
+						rec.LimitBanner = shape.limitBanner
 						rec.TextBytes, rec.ThoughtBytes = len(text), shape.thought
 						rec.TextTokens = EstimateTokensForText(text)
 						rec.ThoughtTokens = EstimateTokensForBytes(shape.thought)
@@ -1030,6 +1031,7 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 		if sent {
 			rec := newCallRecord(met, p, t0)
 			rec.Stream, rec.Frames = true, shape.frames
+			rec.LimitBanner = shape.limitBanner
 			rec.FirstTextMS, rec.FirstThoughtMS = shape.firstTextMS, shape.firstThoughtMS
 			rec.TextBytes, rec.ThoughtBytes = len(prevText), len(prevThought)
 			rec.TextTokens, rec.ThoughtTokens = EstimateTokensForText(prevText), EstimateTokensForText(prevThought)
@@ -1505,6 +1507,105 @@ func parseBody52Limit(inner2 []any) string {
 	return ""
 }
 
+func jsonFloat(v any) (float64, bool) {
+	f, ok := v.(float64)
+	return f, ok
+}
+
+func jsonSlice(v any) ([]any, bool) {
+	s, ok := v.([]any)
+	return s, ok
+}
+
+func containsLimitResets(v any, depth int) bool {
+	if depth > 4 {
+		return false
+	}
+	switch x := v.(type) {
+	case string:
+		return strings.Contains(strings.ToLower(x), "limit resets")
+	case []any:
+		for _, e := range x {
+			if containsLimitResets(e, depth+1) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func extractResetUnixSec(v any) int64 {
+	s, ok := v.([]any)
+	if !ok || len(s) == 0 {
+		return 0
+	}
+	if f, ok := s[0].(float64); ok && int64(f) > 1_700_000_000 {
+		return int64(f)
+	}
+	return 0
+}
+
+// parseBody54Limit extracts Google's quota/limit state from inner2[54] (K58).
+// Early warnings with b54[2]==0 and b54[4] non-empty are ignored so normal turns continue.
+func parseBody54Limit(inner2 []any) string {
+	if len(inner2) <= 54 {
+		return ""
+	}
+	b54, ok := inner2[54].([]any)
+	if !ok || len(b54) == 0 {
+		return ""
+	}
+	at := func(idx int) any {
+		if idx < len(b54) {
+			return b54[idx]
+		}
+		return nil
+	}
+	v0, _ := jsonSlice(at(0))
+	v2, _ := jsonFloat(at(2))
+	v3, _ := jsonSlice(at(3))
+	v4, _ := jsonSlice(at(4))
+	v5, _ := jsonFloat(at(5))
+
+	limitReached := v5 >= 1 ||
+		v2 >= 2 ||
+		len(v0) > 0 ||
+		containsLimitResets(v3, 0) ||
+		(v2 >= 1 && len(v4) > 0)
+	if !limitReached {
+		return ""
+	}
+
+	var resetSec int64
+	if resetSec == 0 {
+		resetSec = extractResetUnixSec(at(6))
+	}
+	if resetSec == 0 {
+		for _, item := range v3 {
+			if row, ok := item.([]any); ok && len(row) > 4 {
+				if sec := extractResetUnixSec(row[4]); sec > 0 {
+					resetSec = sec
+					break
+				}
+			}
+		}
+	}
+	if resetSec == 0 {
+		for _, item := range v4 {
+			if row, ok := item.([]any); ok && len(row) > 1 {
+				if sec := extractResetUnixSec(row[1]); sec > 0 {
+					resetSec = sec
+					break
+				}
+			}
+		}
+	}
+	if resetSec > 0 {
+		return fmt.Sprintf("Limite de quota Google atteinte (réinitialisation à %s)", time.Unix(resetSec, 0).In(time.Local).Format("15:04"))
+	}
+	return "Limite de quota Google atteinte"
+}
+
 // parseBody2Status extracts Google's internal tool progress text from body[2]["7"]
 // (e.g. {"7":[null,null,null,null,null,["Analyzing user requests"]]}). Any
 // unexpected shape is ignored without error.
@@ -1565,6 +1666,9 @@ func parseFrame(line string) (frame, bool) {
 	}
 	body24Tools := parseBody24AllToolNames(inner2)
 	limitBanner := parseBody52Limit(inner2)
+	if limitBanner == "" {
+		limitBanner = parseBody54Limit(inner2)
+	}
 	var cands []any
 	if len(inner2) > 4 {
 		cands, _ = inner2[4].([]any)
@@ -1655,6 +1759,7 @@ type frameShape struct {
 	firstThoughtMS, firstTextMS, lastFrameMS int64
 	thoughts                                 []int
 	times                                    []int64 // arrival of each frame (first 24)
+	limitBanner                              string
 }
 
 func newFrameShape() *frameShape {
@@ -1673,6 +1778,9 @@ func (s *frameShape) add(fr frame, at time.Duration) {
 	}
 	if fr.text != "" && s.firstTextMS < 0 {
 		s.firstTextMS = ms
+	}
+	if fr.limitBanner != "" && s.limitBanner == "" {
+		s.limitBanner = fr.limitBanner
 	}
 	if len(fr.thoughts) > 0 {
 		s.thoughts = fr.thoughts

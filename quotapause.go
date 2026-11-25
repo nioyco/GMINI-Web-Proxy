@@ -111,16 +111,25 @@ func cleanLimitBanner(msg string) string {
 // servedOtherModel reports whether Google served a model other than the premium
 // one requested (a name-only difference is not a fallback).
 func servedOtherModel(m *gemini.AvailableModel, servedID, servedName string) bool {
-	if m == nil || m.ModelID == "" || servedID == "" || servedID == m.ModelID {
+	if m == nil {
 		return false
 	}
 	if isAutoOrFlashModel(m) {
 		return false
 	}
-	if m.Description != "" && servedName == m.Description {
-		return false
+	if servedID != "" {
+		if m.ModelID == "" || servedID == m.ModelID {
+			return false
+		}
+		if m.Description != "" && servedName == m.Description {
+			return false
+		}
+		return true
 	}
-	return true
+	if servedName != "" && m.Description != "" && servedName != m.Description && (m.DisplayName == "" || servedName != m.DisplayName) {
+		return true
+	}
+	return false
 }
 
 func modelLabel(m *gemini.AvailableModel) string {
@@ -357,10 +366,16 @@ func (s *Server) quotaAfterGenerate(ctx context.Context, p gemini.GenParams) boo
 		return false
 	}
 	rec, ok := s.client.CallByRequest(ri.id)
-	if !ok || !servedOtherModel(p.Model, rec.ServedID, rec.ServedName) {
+	if !ok {
 		return false
 	}
-	return s.triggerQuotaPause(ctx, p.Model, rec.ServedID, rec.ServedName, "other_model", "")
+	if rec.LimitBanner != "" {
+		return s.triggerQuotaPause(ctx, p.Model, rec.ServedID, rec.ServedName, "limit_banner", rec.LimitBanner)
+	}
+	if servedOtherModel(p.Model, rec.ServedID, rec.ServedName) {
+		return s.triggerQuotaPause(ctx, p.Model, rec.ServedID, rec.ServedName, "other_model", "")
+	}
+	return false
 }
 
 // quotaGuard wires Identity / LimitBanner stream handlers for the no-tools

@@ -142,7 +142,10 @@ type uiAntigravityE struct {
 	RelayMS     int64  `json:"relay_keepalive_ms"`
 }
 
-const recentCallsHistoryWindow = 12 * time.Hour
+const (
+	recentCallsHistoryWindow = 12 * time.Hour
+	recentCallsMinCount      = 200
+)
 
 func filterCallsLastHours(calls []gemini.CallRecord, window time.Duration, now time.Time) []gemini.CallRecord {
 	if window <= 0 {
@@ -161,6 +164,40 @@ func filterCallsLastHours(calls []gemini.CallRecord, window time.Duration, now t
 	return out
 }
 
+// selectRecentCalls keeps all calls within window and pads with older calls
+// (even > 24 h) up to minCount while preserving newest-first order without duplicates.
+func selectRecentCalls(calls []gemini.CallRecord, minCount int, window time.Duration, now time.Time) []gemini.CallRecord {
+	if window <= 0 || len(calls) <= minCount {
+		return calls
+	}
+	cutoff := now.Add(-window)
+	keep := make([]bool, len(calls))
+	kept := 0
+	for i, c := range calls {
+		inWin := true
+		if t, err := time.Parse(time.RFC3339, c.Time); err == nil && t.Before(cutoff) {
+			inWin = false
+		}
+		if inWin {
+			keep[i] = true
+			kept++
+		}
+	}
+	for i := 0; i < len(calls) && kept < minCount; i++ {
+		if !keep[i] {
+			keep[i] = true
+			kept++
+		}
+	}
+	out := make([]gemini.CallRecord, 0, kept)
+	for i, c := range calls {
+		if keep[i] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func (s *Server) handleUIState(w http.ResponseWriter, r *http.Request) {
 	if !s.uiAllowed(w, r, true) {
 		return
@@ -168,7 +205,7 @@ func (s *Server) handleUIState(w http.ResponseWriter, r *http.Request) {
 	st := &bufWriter{h: http.Header{}}
 	s.handleStatus(st, r)
 	now := s.currentNow()
-	calls := filterCallsLastHours(s.client.RecentCalls(), recentCallsHistoryWindow, now)
+	calls := selectRecentCalls(s.client.RecentCalls(), recentCallsMinCount, recentCallsHistoryWindow, now)
 	models := s.uiModels()
 	sendJSON(w, http.StatusOK, map[string]any{
 		"status":            json.RawMessage(st.buf.Bytes()),

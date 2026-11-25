@@ -25,13 +25,7 @@ func main() {
 	flag.Parse()
 
 	cfg := loadConfig(*configPath)
-	if *cookieFile != "" {
-		cfg.Gemini.CookieFile = *cookieFile
-		cfg.Gemini.StateFile = stateFilePath(os.Getenv("GEMINI_STATE_FILE"), cfg.Gemini.CookieFile, cfg.Gemini.Cookie)
-		cfg.Gemini.CallsFile = callsFilePath(os.Getenv("GEMINI_CALLS_FILE"), cfg.Gemini.StateFile)
-		cfg.Gemini.TokensFile = tokensFilePath(os.Getenv("GEMINI_TOKENS_FILE"), cfg.Gemini.StateFile)
-		cfg.FlightsFile = flightsFilePath(os.Getenv("GEMINI_FLIGHTS_FILE"), cfg.Gemini.StateFile)
-	}
+	applyCookieFileOverride(cfg, *cookieFile)
 	if *listenAddr != "" {
 		cfg.Listen = normalizeListen(*listenAddr)
 	}
@@ -93,6 +87,19 @@ func main() {
 		logger.Error("server error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// applyCookieFileOverride updates cookie-derived sidecar paths when -cookie-file is passed.
+func applyCookieFileOverride(cfg *Config, cookieFile string) {
+	if cfg == nil || cookieFile == "" {
+		return
+	}
+	cfg.Gemini.CookieFile = cookieFile
+	cfg.Gemini.StateFile = stateFilePath(os.Getenv("GEMINI_STATE_FILE"), cfg.Gemini.CookieFile, cfg.Gemini.Cookie)
+	cfg.Gemini.CallsFile = callsFilePath(os.Getenv("GEMINI_CALLS_FILE"), cfg.Gemini.StateFile)
+	cfg.Gemini.TokensFile = tokensFilePath(os.Getenv("GEMINI_TOKENS_FILE"), cfg.Gemini.StateFile)
+	cfg.FlightsFile = flightsFilePath(os.Getenv("GEMINI_FLIGHTS_FILE"), cfg.Gemini.StateFile)
+	cfg.DiagFile = diagFilePath(os.Getenv("GEMINI_DIAGNOSTICS_FILE"), cfg.Gemini.StateFile)
 }
 
 // shutdownFn is shutdownServer; a variable so tests can observe the call.

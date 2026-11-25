@@ -274,9 +274,12 @@ func TestUIHistory12HoursAndLast5Conversations(t *testing.T) {
 	}
 
 	var fh inFlightHistory
+	// Insert > inFlightHistoryMinEntries across > inFlightHistoryMaxConvs so that
+	// once the 200-entry minimum floor is reached, older conversations beyond the
+	// 20-conversation cap are evicted.
 	for convIdx := 1; convIdx <= inFlightHistoryMaxConvs+1; convIdx++ {
 		convID := fmt.Sprintf("conv%02d", convIdx)
-		for step := 1; step <= 2; step++ {
+		for step := 1; step <= 11; step++ {
 			fh.record(InFlightRequest{
 				ID:     fmt.Sprintf("req_%d_%d", convIdx, step),
 				ConvID: convID,
@@ -286,14 +289,12 @@ func TestUIHistory12HoursAndLast5Conversations(t *testing.T) {
 		}
 	}
 	list := fh.list()
-	// Last inFlightHistoryMaxConvs kept (* 2 steps), conv01 dropped.
-	wantLen := inFlightHistoryMaxConvs * 2
-	if len(list) != wantLen {
-		t.Fatalf("inFlightHistory len = %d, want %d (%d convs * 2 steps)", len(list), wantLen, inFlightHistoryMaxConvs)
+	if len(list) < inFlightHistoryMinEntries {
+		t.Fatalf("inFlightHistory len = %d, want >= %d", len(list), inFlightHistoryMinEntries)
 	}
 	for _, item := range list {
 		if item.ConvID == "conv01" {
-			t.Fatalf("oldest conversation conv01 should have been evicted: %+v", item)
+			t.Fatalf("oldest conversation conv01 should have been evicted once >= %d entries: %+v", inFlightHistoryMinEntries, item)
 		}
 	}
 

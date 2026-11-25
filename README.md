@@ -1,18 +1,19 @@
 # GMINI-Web-Proxy
 
 ![Version](https://img.shields.io/badge/version-v1.2.0-blue)
-![UI](https://img.shields.io/badge/Web%20UI-v3.0.9-0ea5e9)
-![Build](https://img.shields.io/badge/Build-K55%20(0581e87--k55)-1a7f4b)
+![UI](https://img.shields.io/badge/Web%20UI-v3.0.10-0ea5e9)
+![Build](https://img.shields.io/badge/Build-K58%20(0581e87--k58)-1a7f4b)
+![Modèles](https://img.shields.io/badge/Gemini%20Web-4%20Neon%20%7C%204%20Hydrogen-8b5cf6)
 ![Go](https://img.shields.io/badge/Go-stdlib%20z%C3%A9ro%20d%C3%A9pendance-00ADD8)
 ![Antigravity](https://img.shields.io/badge/Antigravity-%E2%89%A4%20v2.44%2B-6366f1)
 ![Plateforme](https://img.shields.io/badge/plateforme-macOS%20%2F%20Linux-lightgrey)
 ![Licence](https://img.shields.io/badge/licence-MIT-green)
 
-**GMINI-Web-Proxy** est un proxy HTTP local écrit en Go (**bibliothèque standard uniquement, zéro dépendance externe**) qui vous permet d'utiliser **les quotas de votre propre compte Google Gemini Web** — particulièrement utile lorsque vous avez atteint votre limite de quota sur **Antigravity** — tout en exposant des API compatibles **OpenAI**, **Anthropic**, **OpenAI Responses** et **Google native**, avec un tableau de bord local (**GMINI Console-Web-UI v3.0.9** sur `/_ui`).
+**GMINI-Web-Proxy** est un proxy HTTP local écrit en Go (**bibliothèque standard uniquement, zéro dépendance externe**) qui vous permet d'utiliser **les quotas de votre propre compte Google Gemini Web** — particulièrement utile lorsque vous avez atteint votre limite de quota sur **Antigravity** — tout en exposant des API compatibles **OpenAI**, **Anthropic**, **OpenAI Responses** et **Google native**, avec un tableau de bord local (**GMINI Console-Web-UI v3.0.10** sur `/_ui`).
 
 > **Transparence** : GMINI-Web-Proxy **ne contourne aucune limite** et ne fait rien d'autre qu'utiliser les limites normales de **votre propre compte Google**, via l'interface Gemini Web (`gemini.google.com`), distincte de votre quota Antigravity.
 
-**Compatibilité** : testé et vérifié avec **Antigravity jusqu'à `v2.44+`**, ainsi qu'avec tout client OpenAI, Anthropic ou Google CLI. Son architecture modulaire (catalogue dynamique `otAQ7b` et détection en direct) est conçue pour intégrer facilement les futures versions d'Antigravity et les nouveaux modèles Gemini.
+**Compatibilité** : compatible avec les nouveaux modèles **Gemini 4 Neon** et **Gemini 4 Hydrogen** de `gemini.com` (ainsi que 4 Argon, 3.5 Flash et Auto), testé et vérifié avec **Antigravity jusqu'à `v2.44+`**, ainsi qu'avec tout client OpenAI, Anthropic ou Google CLI. Son architecture modulaire (catalogue dynamique `otAQ7b`, détection quota `body[52]`/`body[54]` et pause automatique multi-modèles) est conçue pour intégrer facilement les futures versions d'Antigravity et les nouveaux modèles Gemini.
 
 ---
 

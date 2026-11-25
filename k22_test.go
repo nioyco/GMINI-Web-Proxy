@@ -47,6 +47,7 @@ func TestK22_1_WaitNotesEmittedWithNoContentSecPositive(t *testing.T) {
 	cfg.StreamThoughts = true
 	cfg.SSEKeepaliveSec = 1
 	cfg.NoContentSec = 240
+	cfg.HeldStallRetries = -1
 	s := newServer(cfg, client, slog.New(slog.NewTextHandler(&logBuf, nil)))
 	s.keepaliveOverride = 20 * time.Millisecond
 	s.noContentTimeoutOverride = 150 * time.Millisecond

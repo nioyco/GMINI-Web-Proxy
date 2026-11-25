@@ -54,6 +54,7 @@ type Server struct {
 	statusNoteOverride             time.Duration
 	cannedRetryTimeoutOverride     time.Duration
 	noContentTimeoutOverride       time.Duration
+	firstAttemptNoContentOverride  time.Duration
 	nonFinalStallNoContentOverride time.Duration
 	noContentNoteOverride          time.Duration
 	initialWaitNoteOverride        time.Duration
@@ -808,16 +809,18 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 		return out, g, e, !out.aborted
 	}
 
-	res, gate, echo, ok := runAttempt(curParams, false, maxRetries > 0, 0, 0)
+	firstCap := time.Duration(0)
+	if maxRetries > 0 {
+		firstCap = s.firstAttemptNoContentCap()
+	}
+	res, gate, echo, ok := runAttempt(curParams, false, maxRetries > 0, 0, firstCap)
 	if !ok {
 		return
 	}
-	initSilenceRetried := false
 	if res.earlyStopReason == "initial_silence" && res.transmittedBytes == 0 {
 		if !s.waitRetryBackoff(ctx) {
 			return
 		}
-		initSilenceRetried = true
 		retryParams := curParams
 		stepdown := ""
 		if retryParams.Mode == 1 && retryParams.Level == 4 {
@@ -854,7 +857,7 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 			return
 		}
 	}
-	for attempt := 1; (res.earlyStopReason == "stall" || ((initSilenceRetried || attempt > 1) && res.noContentTimedOut)) && res.transmittedBytes == 0 && attempt <= maxRetries; attempt++ {
+	for attempt := 1; (res.earlyStopReason == "stall" || res.noContentTimedOut) && res.transmittedBytes == 0 && attempt <= maxRetries; attempt++ {
 		nextParams, ok := s.prepareStallRetry(ctx, sse, cid, created, model, true, curParams, res, attempt, maxRetries)
 		if !ok {
 			return
@@ -877,7 +880,7 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 		return
 	}
 	if res.noContentTimedOut {
-		s.finishNoContentTimeout(ctx, sse, cid, model, p, res)
+		s.finishNoContentTimeout(ctx, sse, cid, model, curParams, res)
 		return
 	}
 	finishCommonNonStream := func(out streamToolsResult, rp gemini.GenParams) bool {
@@ -3299,18 +3302,28 @@ func (s *Server) waitRetryBackoff(ctx context.Context) bool {
 	return true
 }
 
-// prepareRecoveryParams steps down 4 Hydrogen (mode=1, level=4) to level=2
-// (the highest-reliability thinking level) on recovery retries, preserving
+// prepareRecoveryParams steps down level=4 to level=2 (the highest-reliability
+// thinking level) on recovery retries across all model modes, preserving
 // p.TemporaryChat as configured.
 func prepareRecoveryParams(p gemini.GenParams) (gemini.GenParams, bool) {
-	if p.Mode == 1 && p.Level == 4 {
+	if p.Level == 4 {
 		p.Level = 2
 		return p, true
 	}
 	return p, false
 }
 
-const nonFinalStallRetryNoContentTimeout = 80 * time.Second
+const (
+	firstAttemptNoContentTimeout       = 90 * time.Second
+	nonFinalStallRetryNoContentTimeout = 80 * time.Second
+)
+
+func (s *Server) firstAttemptNoContentCap() time.Duration {
+	if s.firstAttemptNoContentOverride > 0 {
+		return s.firstAttemptNoContentOverride
+	}
+	return firstAttemptNoContentTimeout
+}
 
 func (s *Server) nonFinalStallNoContentCap() time.Duration {
 	if s.nonFinalStallNoContentOverride > 0 {
@@ -3383,14 +3396,15 @@ func (s *Server) prepareStallRetry(ctx context.Context, sse *sseStream, cid stri
 
 	retryParams := p
 	stepdown := ""
-	if retryParams.Mode == 1 {
-		if attempt == 1 && retryParams.Level == 4 {
-			retryParams.Level = 2
-			stepdown = "4->2"
-		} else if attempt >= 2 && retryParams.Level > 1 {
-			stepdown = fmt.Sprintf("%d->1", retryParams.Level)
-			retryParams.Level = 1
-		}
+	if attempt == 1 && retryParams.Level > 2 {
+		stepdown = fmt.Sprintf("%d->2", retryParams.Level)
+		retryParams.Level = 2
+	} else if attempt == 1 && retryParams.Level == 2 {
+		stepdown = "2->1"
+		retryParams.Level = 1
+	} else if attempt >= 2 && retryParams.Level > 1 {
+		stepdown = fmt.Sprintf("%d->1", retryParams.Level)
+		retryParams.Level = 1
 	}
 	hintAdded := false
 	isWriteStall := strings.Contains(res.rawText, "write_file") || strings.Contains(res.rawText, "edit_file")

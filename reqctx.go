@@ -495,6 +495,7 @@ type activeSet struct {
 }
 
 const (
+	inFlightHistoryMinEntries = 200
 	inFlightHistoryMaxConvs   = 20
 	inFlightHistoryMaxEntries = 500
 )
@@ -526,7 +527,7 @@ func pruneInFlightEntries(combined []InFlightRequest) []InFlightRequest {
 			key = e.ID
 		}
 		if !seenConvs[key] {
-			if len(seenConvs) >= inFlightHistoryMaxConvs {
+			if len(kept) >= inFlightHistoryMinEntries && len(seenConvs) >= inFlightHistoryMaxConvs {
 				continue
 			}
 			seenConvs[key] = true

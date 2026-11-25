@@ -23,7 +23,7 @@ func TestK50_WebUIv307VersionColsLimitAndTempChatAlert(t *testing.T) {
 		"<th>Heure début</th><th>Conv.</th><th>Version</th>",
 		"<th>Heure</th><th>Requête</th><th>Version</th><th>Type / Statut</th>",
 		"limit:200,",
-		"20 conv., max 500",
+		"min. 200, max 500",
 		"GEMINI_TEMPORARY_CHAT=true",
 	} {
 		if !strings.Contains(html, want) {
@@ -50,8 +50,8 @@ func TestK50_ExtendedHistoryCapacityAndBinaryTag(t *testing.T) {
 		})
 	}
 	kept := pruneInFlightEntries(entries)
-	if len(kept) != 20 {
-		t.Fatalf("pruneInFlightEntries kept %d distinct convs, want 20", len(kept))
+	if len(kept) != 25 {
+		t.Fatalf("pruneInFlightEntries kept %d entries (< min 200 floor), want 25", len(kept))
 	}
 	if kept[0].BinaryTag != "K50" {
 		t.Errorf("kept[0].BinaryTag = %q, want K50", kept[0].BinaryTag)

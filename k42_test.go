@@ -79,10 +79,10 @@ func TestK42_PrepareRecoveryParamsStepdownAnyPromptSize(t *testing.T) {
 			wantStep:  false,
 		},
 		{
-			name:      "non_mode_1_no_stepdown",
-			in:        gemini.GenParams{Mode: 0, Level: 4, Prompt: "hello"},
-			wantLevel: 4,
-			wantStep:  false,
+			name:      "non_mode_1_also_steps_down_k57",
+			in:        gemini.GenParams{Mode: 3, Level: 4, Prompt: "hello"},
+			wantLevel: 2,
+			wantStep:  true,
 		},
 	}
 	for _, tc := range cases {

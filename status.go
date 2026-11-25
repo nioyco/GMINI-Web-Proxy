@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const uiVersion = "3.0.9"
+const uiVersion = "3.0.10"
 
 // statusResponse is the read-only diagnostic payload of GET /_status. It never
 // contains secrets: no cookie, key, token or prompt content.
