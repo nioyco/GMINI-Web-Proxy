@@ -153,6 +153,16 @@ func googleContentsToPrompt(req *GenerateContentRequest) string {
 		}
 		text := strings.Join(msgParts, "\n")
 		if content.Role == "model" {
+			hasFnCall := false
+			for _, p := range content.Parts {
+				if p.FunctionCall != nil {
+					hasFnCall = true
+					break
+				}
+			}
+			if !hasFnCall && len(toolDefs) > 0 {
+				text = SanitizeAssistantHistory(text)
+			}
 			parts = append(parts, "[Assistant]: "+text)
 		} else {
 			if text != "" {
@@ -163,7 +173,7 @@ func googleContentsToPrompt(req *GenerateContentRequest) string {
 	}
 
 	if len(toolDefs) > 0 {
-		parts = insertToolPromptReminder(parts, lastUserIdx, commandToolNameFromGoogleDefs(toolDefs))
+		parts = insertToolPromptReminder(parts, lastUserIdx, commandToolNameFromGoogleDefs(toolDefs), true)
 	}
 
 	return joinNonEmpty(parts, "\n\n")

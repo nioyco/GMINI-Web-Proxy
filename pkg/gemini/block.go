@@ -157,6 +157,7 @@ type blockState struct {
 	fams              map[CallFamily]*famBlock
 	lastUserActivity  time.Time // wall clock (.Round(0))
 	activeUserReqs    int
+	userActivityGen   uint64 // bumped on every user activity / request boundary
 	bgEvents          []bgCallEvent
 	lastAllowedAt     time.Time
 	lastAllowedFamily CallFamily
@@ -344,6 +345,7 @@ func (c *Client) RecordUserActivity() {
 	b := &c.block
 	b.mu.Lock()
 	b.lastUserActivity = now
+	b.userActivityGen++
 	b.mu.Unlock()
 }
 
@@ -353,6 +355,7 @@ func (c *Client) beginUserActivity() {
 	b.mu.Lock()
 	b.activeUserReqs++
 	b.lastUserActivity = now
+	b.userActivityGen++
 	b.mu.Unlock()
 }
 
@@ -364,7 +367,17 @@ func (c *Client) endUserActivity() {
 		b.activeUserReqs--
 	}
 	b.lastUserActivity = now
+	b.userActivityGen++
 	b.mu.Unlock()
+}
+
+// UserActivityGen returns a monotonic counter bumped on every user request or
+// page action (read-only; never logs or mutates state).
+func (c *Client) UserActivityGen() uint64 {
+	b := &c.block
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.userActivityGen
 }
 
 func pruneBGEventsLocked(b *blockState, now time.Time) {

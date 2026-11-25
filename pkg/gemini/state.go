@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -27,21 +28,22 @@ const stateVersion = 1
 // token): the file is written 0600, atomically, and its content is never logged
 // nor exposed (only ages are).
 type persistedState struct {
-	Version            int               `json:"version"`
-	SavedAt            time.Time         `json:"saved_at"`
-	Session            string            `json:"session_fingerprint,omitempty"` // truncated SHA-256 of SAPISID
-	At                 string            `json:"at,omitempty"`
-	AtAt               time.Time         `json:"at_at,omitempty"`
-	BL                 string            `json:"bl,omitempty"`
-	BLAt               time.Time         `json:"bl_at,omitempty"`
-	PSIDTSAt           time.Time         `json:"psidts_at,omitempty"`   // last real __Secure-1PSIDTS change (R&D-14 R4)
-	PSIDTSHash         string            `json:"psidts_hash,omitempty"` // truncated SHA-256 of __Secure-1PSIDTS
-	Models             []*AvailableModel `json:"models,omitempty"`
-	ModelsAt           time.Time         `json:"models_at,omitempty"`
-	ModelsSaved        string            `json:"models_source,omitempty"`
-	Withdrawn          []WithdrawnModel  `json:"withdrawn,omitempty"` // models a later catalogue dropped
-	AutoRefreshEnabled *bool             `json:"auto_refresh_enabled,omitempty"`
-	TemporaryChat      *bool             `json:"temporary_chat,omitempty"`
+	Version            int                           `json:"version"`
+	SavedAt            time.Time                     `json:"saved_at"`
+	Session            string                        `json:"session_fingerprint,omitempty"` // truncated SHA-256 of SAPISID
+	At                 string                        `json:"at,omitempty"`
+	AtAt               time.Time                     `json:"at_at,omitempty"`
+	BL                 string                        `json:"bl,omitempty"`
+	BLAt               time.Time                     `json:"bl_at,omitempty"`
+	PSIDTSAt           time.Time                     `json:"psidts_at,omitempty"`   // last real __Secure-1PSIDTS change (R&D-14 R4)
+	PSIDTSHash         string                        `json:"psidts_hash,omitempty"` // truncated SHA-256 of __Secure-1PSIDTS
+	Models             []*AvailableModel             `json:"models,omitempty"`
+	ModelsAt           time.Time                     `json:"models_at,omitempty"`
+	ModelsSaved        string                        `json:"models_source,omitempty"`
+	Withdrawn          []WithdrawnModel              `json:"withdrawn,omitempty"` // models a later catalogue dropped
+	ConfirmedNames     map[string]ConfirmedNameEntry `json:"confirmed_names,omitempty"`
+	AutoRefreshEnabled *bool                         `json:"auto_refresh_enabled,omitempty"`
+	TemporaryChat      *bool                         `json:"temporary_chat,omitempty"`
 }
 
 func psidtsHash(cookie string) string {
@@ -113,6 +115,12 @@ func (c *Client) saveState() {
 		st.ModelsAt, st.ModelsSaved = c.catalogAt, "dynamic"
 		for _, w := range c.withdrawn {
 			st.Withdrawn = append(st.Withdrawn, w)
+		}
+		if len(c.confirmedNames) > 0 {
+			st.ConfirmedNames = make(map[string]ConfirmedNameEntry, len(c.confirmedNames))
+			for k, v := range c.confirmedNames {
+				st.ConfirmedNames[k] = v
+			}
 		}
 	}
 	c.modelMu.Unlock()
@@ -273,11 +281,58 @@ func (c *Client) restoreCatalog(st persistedState) (bool, time.Time) {
 	if len(st.Models) == 0 || st.ModelsAt.IsZero() || time.Since(st.ModelsAt) >= DefaultCatalogMaxRestoreAge {
 		return false, time.Time{}
 	}
+	modelByID := make(map[string]*AvailableModel, len(st.Models))
+	for _, m := range st.Models {
+		if m != nil && m.ModelID != "" {
+			modelByID[m.ModelID] = m
+		}
+	}
+	if len(st.ConfirmedNames) > 0 {
+		c.modelMu.Lock()
+		if c.confirmedNames == nil {
+			c.confirmedNames = map[string]ConfirmedNameEntry{}
+		}
+		for id, savedCN := range st.ConfirmedNames {
+			curCN, hasCur := c.confirmedNames[id]
+			if !hasCur {
+				c.confirmedNames[id] = savedCN
+				continue
+			}
+			if savedCN.Invalidated {
+				invSec := savedCN.InvalidatedAt.Truncate(time.Second)
+				persistedDesc := ""
+				if m := modelByID[id]; m != nil {
+					persistedDesc = m.Description
+				}
+				if curCN.ConfirmedAt.IsZero() || curCN.ConfirmedAt.Before(invSec) ||
+					(curCN.ConfirmedAt.Equal(invSec) && persistedDesc != "" && !strings.EqualFold(curCN.ServedName, persistedDesc)) {
+					c.confirmedNames[id] = savedCN
+				}
+				continue
+			}
+			if curCN.ConfirmedAt.IsZero() || !curCN.ConfirmedAt.After(savedCN.ConfirmedAt) {
+				if curCN.CatalogDisplay == "" {
+					curCN.CatalogDisplay = savedCN.CatalogDisplay
+				}
+				if curCN.CatalogFamily == "" {
+					curCN.CatalogFamily = savedCN.CatalogFamily
+				}
+				c.confirmedNames[id] = curCN
+			}
+		}
+		c.modelMu.Unlock()
+	}
 	c.storeModels(st.Models, "persisted")
 	c.modelMu.Lock()
 	c.catalogAt = st.ModelsAt
+	activeByID := make(map[string]bool, len(c.models))
+	for _, m := range c.models {
+		if m != nil && m.ModelID != "" {
+			activeByID[m.ModelID] = true
+		}
+	}
 	for _, w := range st.Withdrawn {
-		if _, listed := c.models[w.Model.Name]; !listed && w.Model.Name != "" {
+		if _, listed := c.models[w.Model.Name]; !listed && w.Model.Name != "" && !activeByID[w.Model.ModelID] {
 			if c.withdrawn == nil {
 				c.withdrawn = map[string]WithdrawnModel{}
 			}

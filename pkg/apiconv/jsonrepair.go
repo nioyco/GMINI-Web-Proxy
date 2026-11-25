@@ -126,40 +126,251 @@ func closeJSON(s string) (string, bool) {
 	return string(out), true
 }
 
+// repairJSONStringsAndQuotes repairs invalid escapes, raw control chars, and
+// unambiguous unescaped double quotes inside JSON string values (such as HTML/Vue
+// attributes class="card" inside a write_file Content field). It returns the
+// repaired string, sorted insertion offsets, and whether any byte was added.
+func repairJSONStringsAndQuotes(s string) (string, []int, bool) {
+	var sb strings.Builder
+	var ins []int
+	var stack []byte
+	var expectKey []bool
+	inStr := false
+	curIsKey := false
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !inStr {
+			switch c {
+			case '"':
+				curIsKey = len(stack) > 0 && stack[len(stack)-1] == '}' && len(expectKey) > 0 && expectKey[len(expectKey)-1]
+				inStr = true
+			case '{':
+				stack = append(stack, '}')
+				expectKey = append(expectKey, true)
+			case '[':
+				stack = append(stack, ']')
+				expectKey = append(expectKey, false)
+			case ':':
+				if len(expectKey) > 0 {
+					expectKey[len(expectKey)-1] = false
+				}
+			case ',':
+				if len(stack) > 0 && stack[len(stack)-1] == '}' && len(expectKey) > 0 {
+					expectKey[len(expectKey)-1] = true
+				}
+			case '}', ']':
+				if len(stack) > 0 && stack[len(stack)-1] == c {
+					stack = stack[:len(stack)-1]
+					expectKey = expectKey[:len(expectKey)-1]
+				}
+			}
+			sb.WriteByte(c)
+			continue
+		}
+
+		switch {
+		case c == '"':
+			if isClosingJSONQuote(s, i, curIsKey, stack) {
+				inStr = false
+				sb.WriteByte(c)
+			} else {
+				ins = append(ins, sb.Len())
+				sb.WriteString(`\"`)
+			}
+		case c == '\\':
+			valid := false
+			if i+1 < len(s) {
+				switch n := s[i+1]; n {
+				case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+					valid = true
+				case 'u':
+					valid = i+5 < len(s) && isHex4(s[i+2:i+6])
+				}
+			}
+			if valid {
+				sb.WriteByte(c)
+				sb.WriteByte(s[i+1])
+				i++
+			} else {
+				ins = append(ins, sb.Len())
+				sb.WriteString(`\\`)
+			}
+		case c == '\n', c == '\r', c == '\t':
+			ins = append(ins, sb.Len())
+			sb.WriteByte('\\')
+			sb.WriteByte(map[byte]byte{'\n': 'n', '\r': 'r', '\t': 't'}[c])
+		default:
+			sb.WriteByte(c)
+		}
+	}
+	if len(ins) == 0 {
+		return s, nil, false
+	}
+	return sb.String(), ins, true
+}
+
+func skipJSONSpaceAt(s string, i int) int {
+	for i < len(s) && isJSONSpace(s[i]) {
+		i++
+	}
+	return i
+}
+
+// looksLikeJSONObjectKeyColon reports whether s starts (after optional whitespace)
+// with a short single-line JSON string key followed by ":".
+func looksLikeJSONObjectKeyColon(s string) bool {
+	i := skipJSONSpaceAt(s, 0)
+	if i >= len(s) || s[i] != '"' {
+		return false
+	}
+	i++
+	keyStart := i
+	for i < len(s) {
+		c := s[i]
+		if c == '\n' || c == '\r' || i-keyStart > 64 {
+			return false
+		}
+		if c == '\\' {
+			i += 2
+			continue
+		}
+		if c == '"' {
+			j := skipJSONSpaceAt(s, i+1)
+			return j < len(s) && s[j] == ':'
+		}
+		i++
+	}
+	return false
+}
+
+// closesValidObjectChain checks whether a closing '}' or ']' at index j closes
+// the active JSON container chain cleanly (reaching EOF, next object '{', or a
+// valid ", \"key\":" sibling).
+func closesValidObjectChain(s string, j int, stack []byte) bool {
+	if len(stack) == 0 {
+		return true
+	}
+	tmp := append([]byte(nil), stack...)
+	k := j
+	for k < len(s) && len(tmp) > 0 {
+		k = skipJSONSpaceAt(s, k)
+		if k >= len(s) {
+			break
+		}
+		c := s[k]
+		if c == tmp[len(tmp)-1] {
+			tmp = tmp[:len(tmp)-1]
+			k++
+			continue
+		}
+		if c == ',' {
+			if tmp[len(tmp)-1] == '}' {
+				return looksLikeJSONObjectKeyColon(s[k+1:])
+			}
+			return true
+		}
+		return false
+	}
+	if len(tmp) > 0 {
+		return false
+	}
+	k = skipJSONSpaceAt(s, k)
+	return k >= len(s) || s[k] == '{' || s[k] == '['
+}
+
+func isClosingJSONQuote(s string, quoteIdx int, curIsKey bool, stack []byte) bool {
+	j := skipJSONSpaceAt(s, quoteIdx+1)
+	if curIsKey {
+		return j < len(s) && s[j] == ':'
+	}
+	if j >= len(s) {
+		return true
+	}
+	switch s[j] {
+	case ',':
+		if len(stack) > 0 && stack[len(stack)-1] == '}' {
+			return looksLikeJSONObjectKeyColon(s[j+1:])
+		}
+		return true
+	case '}', ']':
+		return closesValidObjectChain(s, j, stack)
+	default:
+		return false
+	}
+}
+
 // originalOffset maps an offset in the repaired text back to the original text.
 func originalOffset(off int, ins []int) int {
 	return off - sort.SearchInts(ins, off)
 }
 
-// jsonValues decodes the consecutive JSON values of body. When the strict decoder
-// finds none, the repaired body is tried; repaired reports that this was needed.
-func jsonValues(body string) (vals []json.RawMessage, repaired bool) {
-	read := func(s string) []json.RawMessage {
-		dec := json.NewDecoder(strings.NewReader(s))
-		var out []json.RawMessage
-		for {
-			var raw json.RawMessage
-			if err := dec.Decode(&raw); err != nil {
-				break
-			}
-			out = append(out, raw)
+func readAllJSON(s string) (vals []json.RawMessage, complete bool) {
+	dec := json.NewDecoder(strings.NewReader(s))
+	for {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			break
 		}
-		return out
+		vals = append(vals, raw)
 	}
-	if vals = read(body); len(vals) > 0 {
-		return vals, false
+	rest := strings.TrimSpace(s[int(dec.InputOffset()):])
+	return vals, rest == ""
+}
+
+// jsonValuesReport decodes consecutive JSON values of body. When strict decoding
+// fails or stops short before EOF, tolerant string/quote/brace repairs are tried.
+// partialTrailing is true when a valid prefix decoded but trailing non-empty text
+// remained unparseable.
+func jsonValuesReport(body string) (vals []json.RawMessage, repaired bool, partialTrailing bool) {
+	trimmed := strings.TrimSpace(body)
+	if trimmed == "" {
+		return nil, false, false
 	}
+	if v, ok := readAllJSON(body); len(v) > 0 && ok {
+		return v, false, false
+	}
+	bestVals, bestRepaired := []json.RawMessage(nil), false
+	if v, ok := readAllJSON(body); len(v) > 0 {
+		bestVals = v
+		_ = ok
+	}
+
 	fixed, ins := repairJSONStrings(body)
 	if len(ins) > 0 {
-		if vals = read(fixed); len(vals) > 0 {
-			return vals, true
+		if v, ok := readAllJSON(fixed); len(v) > 0 && ok {
+			return v, true, false
+		} else if len(v) > len(bestVals) {
+			bestVals, bestRepaired = v, true
 		}
 	}
 	// A single value whose closing brackets are missing.
 	if closed, ok := closeJSON(fixed); ok && json.Valid([]byte(closed)) {
-		return []json.RawMessage{json.RawMessage(closed)}, true
+		return []json.RawMessage{json.RawMessage(closed)}, true, false
 	}
-	return nil, false
+	// Targeted repair for unescaped inner double quotes inside string values
+	// (combined with string escape/newline repair across corrected boundaries).
+	if qFixed, _, qChanged := repairJSONStringsAndQuotes(body); qChanged {
+		if v, ok := readAllJSON(qFixed); len(v) > 0 && ok {
+			return v, true, false
+		} else if len(v) > len(bestVals) {
+			bestVals, bestRepaired = v, true
+		}
+		if closed, ok := closeJSON(qFixed); ok && json.Valid([]byte(closed)) {
+			return []json.RawMessage{json.RawMessage(closed)}, true, false
+		}
+	}
+	if len(bestVals) > 0 {
+		return bestVals, bestRepaired, true
+	}
+	return nil, false, false
+}
+
+// jsonValues decodes the consecutive JSON values of body. When the strict decoder
+// finds none or stops short, the repaired body is tried; repaired reports that this was needed.
+func jsonValues(body string) (vals []json.RawMessage, repaired bool) {
+	vals, repaired, _ = jsonValuesReport(body)
+	return vals, repaired
 }
 
 // dropAfterToolCall removes the text a model writes after its first tool call

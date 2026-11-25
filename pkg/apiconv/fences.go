@@ -70,11 +70,18 @@ func findFences(text string) []fenceBlock {
 // body starts at bodyStart with an opening fence of openLen backticks.
 func fenceClose(text string, bodyStart, openLen int) (bodyEnd, end int) {
 	searchFrom := bodyStart
-	// The JSON may need the tolerant reading (see repairJSONStrings): decode the
-	// repaired text and map the end of the last value back to the original.
+	// The JSON may need the tolerant reading (see repairJSONStrings / quotes):
+	// decode the repaired text and map the end of the last value back to original.
 	src, ins := text[bodyStart:], []int(nil)
 	if lead := strings.TrimLeft(src, " \t\r\n"); lead != "" && (lead[0] == '{' || lead[0] == '[') {
 		src, ins = repairJSONStrings(src)
+		if v, complete := readAllJSON(src); len(v) == 0 || !complete {
+			if qSrc, qIns, qChanged := repairJSONStringsAndQuotes(text[bodyStart:]); qChanged {
+				if qv, qok := readAllJSON(qSrc); len(qv) > len(v) || (qok && !complete) {
+					src, ins = qSrc, qIns
+				}
+			}
+		}
 	}
 	dec := json.NewDecoder(strings.NewReader(src))
 	for {

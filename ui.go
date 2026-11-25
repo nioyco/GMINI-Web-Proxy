@@ -7,11 +7,13 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -70,8 +72,20 @@ func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'")
 	_, _ = w.Write(bytes.Replace(uiHTML, []byte("__UI_TOKEN__"), []byte(s.uiToken), 1))
+}
+
+const defaultFaviconSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="ag" x1="8" y1="54" x2="56" y2="10" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#2563eb"/><stop offset="55%" stop-color="#06b6d4"/><stop offset="100%" stop-color="#f97316"/></linearGradient></defs><circle cx="32" cy="32" r="30" fill="#111827" stroke="#2c313a" stroke-width="2"/><path d="M16 47L30 14c.8-1.9 3.2-1.9 4 0l14 33h-7.2l-3.4-8.5c-3.8-2.6-7.6 1.5-11.4 0L22.6 47H16zm11.8-13.5c2.6 1.1 5.8-1.6 8.4-.5L32 22.5l-4.2 11z" fill="url(#ag)"/><circle cx="51" cy="51" r="9" fill="#3fb950" stroke="#111827" stroke-width="3"/></svg>`
+
+func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
+	if !loopbackRemote(r) {
+		sendError(w, http.StatusForbidden, "the management page is local only")
+		return
+	}
+	w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(defaultFaviconSVG))
 }
 
 type bufWriter struct {
@@ -121,8 +135,9 @@ type uiAntigravity struct {
 
 type uiAntigravityE struct {
 	DisplayName string `json:"display_name"`
-	Model       string `json:"model"`  // externalModelName (may carry @effort)
-	Status      string `json:"status"` // ok | not_in_catalogue
+	Model       string `json:"model"`                  // externalModelName (may carry @effort)
+	Status      string `json:"status"`                 // ok | alias | not_in_catalogue
+	AliasTarget string `json:"alias_target,omitempty"` // target slug when Status == "alias"
 	TimeoutMS   int64  `json:"timeout_ms"`
 	RelayMS     int64  `json:"relay_keepalive_ms"`
 }
@@ -157,6 +172,7 @@ func (s *Server) handleUIState(w http.ResponseWriter, r *http.Request) {
 	models := s.uiModels()
 	sendJSON(w, http.StatusOK, map[string]any{
 		"status":            json.RawMessage(st.buf.Bytes()),
+		"ui_version":        uiVersion,
 		"models":            models,
 		"calls":             calls,
 		"in_flight":         s.inFlightRequests(),
@@ -164,7 +180,11 @@ func (s *Server) handleUIState(w http.ResponseWriter, r *http.Request) {
 		"token_usage":       s.client.TokenUsageSummary(now),
 		"antigravity":       s.uiAntigravity(models),
 		"apps":              listAntigravity(),
+		"antigravity_dmgs":  listAntigravityDMGs(),
+		"antigravity_patch": s.agPatchStatus(),
 		"listen":            s.cfg.Listen,
+		"pause_on_fallback": s.pauseOnFallbackEnabled(),
+		"quota_pause":       s.quotaPauseSnapshot(),
 	})
 }
 
@@ -218,8 +238,37 @@ func (s *Server) handleUICookieRefreshRun(w http.ResponseWriter, r *http.Request
 	if !s.uiAllowed(w, r, true) {
 		return
 	}
+	source := strings.TrimSpace(r.URL.Query().Get("source"))
+	if r.Body != nil {
+		var body struct {
+			Source string `json:"source"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err == nil && strings.TrimSpace(body.Source) != "" {
+			source = strings.TrimSpace(body.Source)
+		}
+	}
+	if source == "" {
+		source = "ui"
+	}
 	s.client.RecordUserActivity()
+	incType := "cookie_refresh"
+	if source == "ui_connect" {
+		incType = "cookie_connect"
+	}
 	if s.autoRefresh == nil {
+		s.log.Warn(incType, "source", source, "started", false, "reason", "unavailable")
+		if s.diag != nil {
+			s.diag.record(DiagEvent{
+				Kind:      "incident",
+				Type:      incType,
+				Detail:    "connexion / actualisation cookie Google",
+				Reason:    "cookie auto-refresh unavailable",
+				Recovered: false,
+				Route:     r.Method + " " + r.URL.Path,
+				Service:   "ui/auth",
+				Func:      "handleUICookieRefreshRun",
+			})
+		}
 		sendError(w, http.StatusServiceUnavailable, "cookie auto-refresh unavailable")
 		return
 	}
@@ -239,6 +288,19 @@ func (s *Server) handleUICookieRefreshRun(w http.ResponseWriter, r *http.Request
 		case "cooldown":
 			msg = "refus : actualisation récente — attendre encore"
 		}
+		s.log.Warn(incType, "source", source, "started", false, "reason", reason)
+		if s.diag != nil {
+			s.diag.record(DiagEvent{
+				Kind:      "incident",
+				Type:      incType,
+				Detail:    "connexion / actualisation cookie Google",
+				Reason:    msg,
+				Recovered: false,
+				Route:     r.Method + " " + r.URL.Path,
+				Service:   "ui/auth",
+				Func:      "handleUICookieRefreshRun",
+			})
+		}
 		sendJSON(w, code, map[string]any{
 			"started":      false,
 			"reason":       reason,
@@ -248,8 +310,22 @@ func (s *Server) handleUICookieRefreshRun(w http.ResponseWriter, r *http.Request
 		})
 		return
 	}
+	s.log.Info(incType, "source", source, "started", true)
+	if s.diag != nil {
+		s.diag.record(DiagEvent{
+			Kind:      "incident",
+			Type:      incType,
+			Detail:    "connexion / actualisation cookie Google lancée (" + source + ")",
+			Reason:    "lancement accepté",
+			Recovered: true,
+			Route:     r.Method + " " + r.URL.Path,
+			Service:   "ui/auth",
+			Func:      "handleUICookieRefreshRun",
+		})
+	}
 	sendJSON(w, code, map[string]any{
 		"started": true,
+		"source":  source,
 		"status":  st,
 	})
 }
@@ -446,7 +522,12 @@ func (s *Server) uiAntigravity(models []uiModel) uiAntigravity {
 		row := uiAntigravityE{DisplayName: e.DisplayName, Model: model, Status: "ok",
 			TimeoutMS: int64(e.Timeout), RelayMS: int64(e.Relay)}
 		if !catalogue[base] {
-			row.Status = "not_in_catalogue"
+			if target, _, isAlias := s.client.ResolveModelAlias(base); isAlias && catalogue[target] {
+				row.Status = "alias"
+				row.AliasTarget = target
+			} else {
+				row.Status = "not_in_catalogue"
+			}
 		}
 		have[base] = true
 		out.Entries = append(out.Entries, row)
@@ -460,7 +541,11 @@ func (s *Server) uiAntigravity(models []uiModel) uiAntigravity {
 }
 
 func (s *Server) envModifiedSinceStart() bool {
+	s.cfgMu.RLock()
 	path := s.cfg.EnvFilePath
+	modTime := s.cfg.EnvFileModTime
+	loadedAt := s.cfg.ConfigLoadedAt
+	s.cfgMu.RUnlock()
 	if path == "" {
 		return false
 	}
@@ -468,11 +553,11 @@ func (s *Server) envModifiedSinceStart() bool {
 	if err != nil {
 		return false
 	}
-	if !s.cfg.EnvFileModTime.IsZero() {
-		return info.ModTime().After(s.cfg.EnvFileModTime)
+	if !modTime.IsZero() {
+		return info.ModTime().After(modTime)
 	}
-	if !s.cfg.ConfigLoadedAt.IsZero() {
-		return info.ModTime().After(s.cfg.ConfigLoadedAt)
+	if !loadedAt.IsZero() {
+		return info.ModTime().After(loadedAt)
 	}
 	return false
 }
@@ -481,15 +566,93 @@ func (s *Server) handleUIConfigReload(w http.ResponseWriter, r *http.Request) {
 	if !s.uiAllowed(w, r, true) {
 		return
 	}
+	s.cfgMu.Lock()
 	reloadedAt, err := reloadNonSecretDotenv(s.cfg.EnvFilePath, s.cfg)
+	noInternalCodeExec := s.cfg.NoInternalCodeExecRule
+	s.cfgMu.Unlock()
 	if err != nil {
 		sendError(w, http.StatusBadRequest, "impossible de lire le fichier .env")
 		return
 	}
-	apiconv.SetNoInternalCodeExecRule(s.cfg.NoInternalCodeExecRule)
+	apiconv.SetNoInternalCodeExecRule(noInternalCodeExec)
 	s.log.Info("config_reloaded_from_ui", "loaded_at", reloadedAt.UTC().Format(time.RFC3339))
 	sendJSON(w, http.StatusOK, map[string]any{
 		"ok":          true,
 		"reloaded_at": reloadedAt.UTC().Format(time.RFC3339),
+	})
+}
+
+// handleUIGuardrailsSet updates GEMINI_CANNED_ERROR_RETRY and GEMINI_NO_CONTENT_SEC
+// in memory and atomically persists them to .env (when EnvFilePath is set),
+// without logging or exposing any other .env key or path.
+func (s *Server) handleUIGuardrailsSet(w http.ResponseWriter, r *http.Request) {
+	if !s.uiAllowed(w, r, true) {
+		return
+	}
+	s.client.RecordUserActivity()
+	var req struct {
+		CannedErrorRetry *string `json:"canned_error_retry"`
+		NoContentSec     *int    `json:"no_content_sec"`
+		PauseOnFallback  *bool   `json:"pause_on_fallback"`
+	}
+	if r.Body != nil {
+		raw, err := io.ReadAll(io.LimitReader(r.Body, 8<<10))
+		if err != nil {
+			sendError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		if len(bytes.TrimSpace(raw)) > 0 {
+			if err := json.Unmarshal(raw, &req); err != nil {
+				sendError(w, http.StatusBadRequest, "invalid JSON")
+				return
+			}
+		}
+	}
+
+	updates := map[string]string{}
+	if req.CannedErrorRetry != nil {
+		updates["GEMINI_CANNED_ERROR_RETRY"] = normalizeCannedErrorRetry(*req.CannedErrorRetry)
+	}
+	if req.NoContentSec != nil {
+		updates["GEMINI_NO_CONTENT_SEC"] = strconv.Itoa(nonNegative(*req.NoContentSec, 0))
+	}
+	if req.PauseOnFallback != nil {
+		updates["GEMINI_PAUSE_ON_FALLBACK"] = strconv.FormatBool(*req.PauseOnFallback)
+	}
+
+	s.cfgMu.Lock()
+	if len(updates) > 0 && s.cfg.EnvFilePath != "" {
+		loadedAt, modTime, err := upsertNonSecretDotenvKeys(s.cfg.EnvFilePath, updates)
+		if err != nil {
+			s.cfgMu.Unlock()
+			sendError(w, http.StatusInternalServerError, "impossible de mettre à jour le fichier .env")
+			return
+		}
+		s.cfg.ConfigLoadedAt = loadedAt
+		s.cfg.EnvFileModTime = modTime
+	}
+	if req.CannedErrorRetry != nil {
+		s.cfg.CannedErrorRetry = updates["GEMINI_CANNED_ERROR_RETRY"]
+	}
+	if req.NoContentSec != nil {
+		s.cfg.NoContentSec = nonNegative(*req.NoContentSec, 0)
+	}
+	if req.PauseOnFallback != nil {
+		s.cfg.PauseOnFallback = *req.PauseOnFallback
+	}
+	pauseOnFallback := s.cfg.PauseOnFallback
+	cannedRetry := normalizeCannedErrorRetry(s.cfg.CannedErrorRetry)
+	noContentSec := nonNegative(s.cfg.NoContentSec, 0)
+	s.cfgMu.Unlock()
+
+	s.log.Info("guardrails_updated_from_ui",
+		"canned_error_retry", cannedRetry,
+		"no_content_sec", noContentSec,
+		"pause_on_fallback", pauseOnFallback)
+	sendJSON(w, http.StatusOK, map[string]any{
+		"ok":                 true,
+		"canned_error_retry": cannedRetry,
+		"no_content_sec":     noContentSec,
+		"pause_on_fallback":  pauseOnFallback,
 	})
 }

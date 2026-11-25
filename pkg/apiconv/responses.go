@@ -80,16 +80,18 @@ func OpenAIModelList(models []*gemini.AvailableModel) any {
 	data := make([]modelObject, 0, len(models))
 	for _, m := range models {
 		data = append(data, modelObject{
-			ID:          m.Name,
-			Object:      "model",
-			Created:     modelCreated,
-			OwnedBy:     "google",
-			Description: m.Description,
-			DisplayName: m.DisplayName,
-			ModelID:     m.ModelID,
-			MenuLabel:   m.MenuLabel,
-			Family:      m.Family,
-			ModeCode:    m.ModeCode,
+			ID:             m.Name,
+			Object:         "model",
+			Created:        modelCreated,
+			OwnedBy:        "google",
+			Description:    m.Description,
+			DisplayName:    m.DisplayName,
+			ModelID:        m.ModelID,
+			MenuLabel:      m.MenuLabel,
+			Family:         m.Family,
+			ModeCode:       m.ModeCode,
+			Locked:         m.Locked,
+			ThinkingLevels: m.ThinkingLevels,
 		})
 	}
 	return modelsListResponse{Object: "list", Data: data}
@@ -256,11 +258,13 @@ type modelObject struct {
 	Description string `json:"description"`
 	// DisplayName is the short label of the real catalog (e.g. "Pro"); ModelID its
 	// stable hexadecimal id. Both help tools map catalog entries to client entries.
-	DisplayName string `json:"display_name,omitempty"`
-	ModelID     string `json:"model_id,omitempty"`
-	MenuLabel   string `json:"menu_label,omitempty"`
-	Family      string `json:"family,omitempty"`
-	ModeCode    int    `json:"mode_code,omitempty"`
+	DisplayName    string `json:"display_name,omitempty"`
+	ModelID        string `json:"model_id,omitempty"`
+	MenuLabel      string `json:"menu_label,omitempty"`
+	Family         string `json:"family,omitempty"`
+	ModeCode       int    `json:"mode_code,omitempty"`
+	Locked         bool   `json:"locked,omitempty"`
+	ThinkingLevels []int  `json:"thinking_levels,omitempty"`
 }
 
 // responseObject is a Responses API response, used for both the non-streaming

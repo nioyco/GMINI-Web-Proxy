@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -73,13 +75,19 @@ type Config struct {
 	// same batch as read_file calls so the model writes only after reading real
 	// file contents (GEMINI_SPLIT_READ_WRITE_BATCH, default on; K20).
 	SplitReadWriteBatch bool
+	// EnforceToolCalls retries once with a corrective note when tools are
+	// declared but the reply emits no tool call and is not a legitimate text
+	// answer (a compaction, an explicit refusal, or a handoff). Off by default
+	// so plain "question" turns are never retried (GEMINI_ENFORCE_TOOL_CALLS,
+	// default false; K40).
+	EnforceToolCalls bool
 	// InternalToolAction controls how the proxy reacts when an internal Google tool
 	// is detected (GEMINI_INTERNAL_TOOL_ACTION = notify | retry | off; default notify).
 	InternalToolAction string
 	// CannedErrorRetry controls whether Gemini's canned internal-error replies are
 	// retried once identically (GEMINI_CANNED_ERROR_RETRY = off | once; default off),
 	// and CannedErrorRetrySec bounds that retry when neither text nor thought arrives
-	// (GEMINI_CANNED_ERROR_RETRY_SEC, default 25).
+	// (GEMINI_CANNED_ERROR_RETRY_SEC, default 55).
 	CannedErrorRetry    string
 	CannedErrorRetrySec int
 	// DisableMarkerNeutralization stops escaping history markers ([User]:, ...) found
@@ -99,6 +107,7 @@ type Config struct {
 	WarnSuspectFallback    bool
 	WarnSuspectCooldownMin int
 	AntigravityModelsFile  string
+	EnablerRepo            string
 	// StreamToolsProgress forwards text and thoughts as they arrive on the
 	// stream+tools chat path instead of one final chunk (GEMINI_STREAM_TOOLS_PROGRESS,
 	// default on; 0 restores the buffered behaviour).
@@ -116,11 +125,22 @@ type Config struct {
 	// thought, text, or body[2]["7"] status frame arrived (GEMINI_NO_CONTENT_SEC,
 	// default 0 = disabled; emits a wait note instead).
 	NoContentSec int
+	// PauseOnFallback globally pauses every premium (non Auto/Flash) model as soon
+	// as Google falls back to another model or sends a limit banner
+	// (GEMINI_PAUSE_ON_FALLBACK, default true; K41).
+	PauseOnFallback bool
 	// MaxHeldBytes and MaxHeldSec cap a retained stream+tools response when no
 	// runaway marker appears (GEMINI_MAX_HELD_BYTES default 256 KiB, GEMINI_MAX_HELD_SEC
-	// default 120 s; 0 disables via -1).
-	MaxHeldBytes int
-	MaxHeldSec   int
+	// default 120 s; 0 disables via -1). HeldStallSec caps a frozen incomplete
+	// opening fence when no new text arrives (GEMINI_HELD_STALL_SEC default 60 s; 0 disables via -1).
+	// HeldStallFastSec caps an unclosed tool/code block when no thoughts arrive and
+	// retries remain (GEMINI_HELD_STALL_FAST_SEC default 25 s; 0 disables via -1).
+	// HeldStallRetries sets the max automatic retries on stalled held streams (0..5, default 2).
+	MaxHeldBytes     int
+	MaxHeldSec       int
+	HeldStallSec     int
+	HeldStallFastSec int
+	HeldStallRetries int
 	// DefaultThinkingLevel is the effort applied when a request names none
 	// (GEMINI_THINKING_LEVEL = low | medium | high; empty = send nothing). EXPERIMENTAL.
 	DefaultThinkingLevel string
@@ -158,7 +178,10 @@ type Config struct {
 	StateMaxAgeMin int
 	// FlightsFile persists the recent in-flight/past requests history (JSON, 0600).
 	// Derived from StateFile by default ("<cookie>.flights.json"); "off" disables it.
-	FlightsFile    string
+	FlightsFile string
+	// DiagFile persists the anonymized diagnostics ring buffer (JSON, 0600).
+	// Derived from StateFile by default ("<cookie>.diagnostics.json"); "off" disables it.
+	DiagFile       string
 	EnvFilePath    string
 	ConfigLoadedAt time.Time
 	EnvFileModTime time.Time
@@ -207,22 +230,28 @@ func loadConfig(envFile string) *Config {
 		CodeRefFastpath:             getEnvBool("GEMINI_CODE_REF_FASTPATH", true),
 		ToolAuditNote:               getEnvBool("GEMINI_TOOL_AUDIT_NOTE", true),
 		SplitReadWriteBatch:         getEnvBool("GEMINI_SPLIT_READ_WRITE_BATCH", true),
-		InternalToolAction:          normalizeInternalToolAction(getEnv("GEMINI_INTERNAL_TOOL_ACTION", "notify")),
+		EnforceToolCalls:            getEnvBool("GEMINI_ENFORCE_TOOL_CALLS", false),
+		InternalToolAction:          normalizeInternalToolAction(getEnv("GEMINI_INTERNAL_TOOL_ACTION", "retry")),
 		CannedErrorRetry:            normalizeCannedErrorRetry(getEnv("GEMINI_CANNED_ERROR_RETRY", "off")),
-		CannedErrorRetrySec:         positive(getEnvInt("GEMINI_CANNED_ERROR_RETRY_SEC", 25), 25),
+		CannedErrorRetrySec:         positive(getEnvInt("GEMINI_CANNED_ERROR_RETRY_SEC", 55), 55),
 		DisableMarkerNeutralization: !getEnvBool("GEMINI_NEUTRALIZE_HISTORY_MARKERS", true),
 		KeepTextAfterToolCall:       !getEnvBool("GEMINI_DROP_TEXT_AFTER_TOOL_CALL", true),
 		UIEnabled:                   getEnvBool("GEMINI_UI", true),
 		WarnSuspectFallback:         getEnvBool("GEMINI_WARN_SUSPECT_FALLBACK", true),
 		WarnSuspectCooldownMin:      getEnvInt("GEMINI_WARN_SUSPECT_COOLDOWN_MIN", 10),
 		AntigravityModelsFile:       getEnv("GEMINI_ANTIGRAVITY_MODELS_FILE", ""),
+		EnablerRepo:                 strings.TrimSpace(getEnv("GEMINI_ENABLER_REPO", "")),
 		StreamToolsProgress:         getEnvBool("GEMINI_STREAM_TOOLS_PROGRESS", true),
 		StreamThoughts:              getEnvBool("GEMINI_STREAM_THOUGHTS", true),
 		SilenceWarningSec:           nonNegative(getEnvInt("GEMINI_SILENCE_WARN_SEC", 45), 45),
 		WaitNoteSec:                 capWithDisable(getEnvInt("GEMINI_WAIT_NOTE_SEC", 15), 15),
 		NoContentSec:                nonNegative(getEnvInt("GEMINI_NO_CONTENT_SEC", 0), 0),
+		PauseOnFallback:             getEnvBool("GEMINI_PAUSE_ON_FALLBACK", true),
 		MaxHeldBytes:                capWithDisable(getEnvInt("GEMINI_MAX_HELD_BYTES", 256*1024), 256*1024),
 		MaxHeldSec:                  capWithDisable(getEnvInt("GEMINI_MAX_HELD_SEC", 120), 120),
+		HeldStallSec:                capWithDisable(getEnvInt("GEMINI_HELD_STALL_SEC", 60), 60),
+		HeldStallFastSec:            capWithDisable(getEnvInt("GEMINI_HELD_STALL_FAST_SEC", 25), 25),
+		HeldStallRetries:            parseStallRetries(getEnvInt("GEMINI_HELD_STALL_RETRIES", 2), 2),
 		DefaultThinkingLevel:        strings.ToLower(strings.TrimSpace(getEnv("GEMINI_THINKING_LEVEL", ""))),
 		ThinkingModes:               parseModeCodes(getEnv("GEMINI_THINKING_MODE_CODES", defaultThinkingModeCodes)),
 		ThinkingModesExplicit:       strings.TrimSpace(getEnv("GEMINI_THINKING_MODE_CODES", "")) != "",
@@ -268,6 +297,7 @@ func loadConfig(envFile string) *Config {
 	cfg.Gemini.CallsFile = callsFilePath(getEnv("GEMINI_CALLS_FILE", ""), cfg.Gemini.StateFile)
 	cfg.Gemini.TokensFile = tokensFilePath(getEnv("GEMINI_TOKENS_FILE", ""), cfg.Gemini.StateFile)
 	cfg.FlightsFile = flightsFilePath(getEnv("GEMINI_FLIGHTS_FILE", ""), cfg.Gemini.StateFile)
+	cfg.DiagFile = diagFilePath(getEnv("GEMINI_DIAGNOSTICS_FILE", ""), cfg.Gemini.StateFile)
 
 	// GEMINI_BL: empty or "auto" → auto-resolve from the Gemini page (with the
 	// baked-in default as fallback); an explicit value disables auto-resolution.
@@ -282,11 +312,11 @@ func loadConfig(envFile string) *Config {
 }
 
 // defaultThinkingModeCodes are the web "mode" codes observed in the real catalog
-// (model id → mode): Pro = 3, Flash-Lite = 6, Hydrogen = 1. They are only sent
-// together with a thinking level. Since the catalogue itself carries the code
-// (AvailableModel.ModeCode), this table is only a fallback for a catalogue
-// restored from an older state file; setting the variable makes it authoritative.
-const defaultThinkingModeCodes = "e6fa609c3fa255c0=3,8c46e95b1a07cecc=6,56fdd199312815e2=1"
+// (model id → mode): Pro/Neon = 3, Flash-Lite/Auto = 6, Hydrogen = 1, Argon/Carbon = 8.
+// They are only sent together with a thinking level. Since the catalogue itself
+// carries the code (AvailableModel.ModeCode), this table is only a fallback for a
+// catalogue restored from an older state file; setting the variable makes it authoritative.
+const defaultThinkingModeCodes = "e6fa609c3fa255c0=3,8c46e95b1a07cecc=6,56fdd199312815e2=1,95a4c0abcba24364=8"
 
 // parseModeCodes parses "id=code,id=code" (invalid entries are skipped).
 func parseModeCodes(s string) map[string]int {
@@ -396,6 +426,21 @@ func capWithDisable(n, def int) int {
 	return n
 }
 
+// parseStallRetries bounds GEMINI_HELD_STALL_RETRIES to 0..5, mapping 0 to -1
+// (explicitly disabled = 0 retries) and negative values to def.
+func parseStallRetries(n, def int) int {
+	if n == 0 {
+		return -1
+	}
+	if n < 0 {
+		return def
+	}
+	if n > 5 {
+		return 5
+	}
+	return n
+}
+
 // validateStartup refuses an unauthenticated configuration unless explicitly
 // allowed with GEMINI_ALLOW_NO_AUTH=1.
 func validateStartup(cfg *Config) error {
@@ -483,6 +528,9 @@ func reloadNonSecretDotenv(path string, cfg *Config) (time.Time, error) {
 	if v, ok := vals["GEMINI_SPLIT_READ_WRITE_BATCH"]; ok {
 		cfg.SplitReadWriteBatch = parseBoolStr(v, true)
 	}
+	if v, ok := vals["GEMINI_ENFORCE_TOOL_CALLS"]; ok {
+		cfg.EnforceToolCalls = parseBoolStr(v, false)
+	}
 	if v, ok := vals["GEMINI_NO_INTERNAL_CODE_EXEC_RULE"]; ok {
 		cfg.NoInternalCodeExecRule = parseBoolStr(v, true)
 	}
@@ -496,13 +544,22 @@ func reloadNonSecretDotenv(path string, cfg *Config) (time.Time, error) {
 		cfg.CannedErrorRetry = normalizeCannedErrorRetry(v)
 	}
 	if v, ok := vals["GEMINI_CANNED_ERROR_RETRY_SEC"]; ok {
-		cfg.CannedErrorRetrySec = positive(parseIntStr(v, 25), 25)
+		cfg.CannedErrorRetrySec = positive(parseIntStr(v, 55), 55)
 	}
 	if v, ok := vals["GEMINI_MAX_HELD_BYTES"]; ok {
 		cfg.MaxHeldBytes = capWithDisable(parseIntStr(v, 256*1024), 256*1024)
 	}
 	if v, ok := vals["GEMINI_MAX_HELD_SEC"]; ok {
 		cfg.MaxHeldSec = capWithDisable(parseIntStr(v, 120), 120)
+	}
+	if v, ok := vals["GEMINI_HELD_STALL_SEC"]; ok {
+		cfg.HeldStallSec = capWithDisable(parseIntStr(v, 60), 60)
+	}
+	if v, ok := vals["GEMINI_HELD_STALL_FAST_SEC"]; ok {
+		cfg.HeldStallFastSec = capWithDisable(parseIntStr(v, 25), 25)
+	}
+	if v, ok := vals["GEMINI_HELD_STALL_RETRIES"]; ok {
+		cfg.HeldStallRetries = parseStallRetries(parseIntStr(v, 2), 2)
 	}
 	if v, ok := vals["GEMINI_PROMPT_WARN_KB"]; ok {
 		cfg.PromptWarnKB = capWithDisable(parseIntStr(v, 300), 300)
@@ -522,10 +579,126 @@ func reloadNonSecretDotenv(path string, cfg *Config) (time.Time, error) {
 	if v, ok := vals["GEMINI_NO_CONTENT_SEC"]; ok {
 		cfg.NoContentSec = nonNegative(parseIntStr(v, 0), 0)
 	}
+	if v, ok := vals["GEMINI_PAUSE_ON_FALLBACK"]; ok {
+		cfg.PauseOnFallback = parseBoolStr(v, true)
+	}
 	now := time.Now()
 	cfg.ConfigLoadedAt = now
 	cfg.EnvFileModTime = info.ModTime()
 	return now, nil
+}
+
+// upsertNonSecretDotenvKey atomically updates or appends one allowlisted
+// non-secret guardrail key in a .env file (0600) without exposing other lines.
+func upsertNonSecretDotenvKey(path, key, value string) (time.Time, time.Time, error) {
+	return upsertNonSecretDotenvKeys(path, map[string]string{key: value})
+}
+
+// upsertNonSecretDotenvKeys atomically updates or appends allowlisted non-secret
+// guardrail keys in a .env file (mode 0600), leaving all comments and other
+// keys untouched in place and never logging or returning their contents.
+func upsertNonSecretDotenvKeys(path string, updates map[string]string) (time.Time, time.Time, error) {
+	if len(updates) == 0 {
+		return time.Time{}, time.Time{}, errors.New("no dotenv keys provided")
+	}
+	clean := make(map[string]string, len(updates))
+	for k, v := range updates {
+		switch k {
+		case "GEMINI_CANNED_ERROR_RETRY":
+			clean[k] = normalizeCannedErrorRetry(v)
+		case "GEMINI_NO_CONTENT_SEC":
+			clean[k] = strconv.Itoa(nonNegative(parseIntStr(v, 0), 0))
+		case "GEMINI_PAUSE_ON_FALLBACK":
+			clean[k] = strconv.FormatBool(parseBoolStr(v, true))
+		default:
+			return time.Time{}, time.Time{}, fmt.Errorf("non-allowlisted dotenv key %q", k)
+		}
+	}
+	if path == "" {
+		path = ".env"
+	}
+
+	var lines []string
+	data, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return time.Time{}, time.Time{}, err
+	}
+	if err == nil {
+		raw := strings.ReplaceAll(string(data), "\r\n", "\n")
+		raw = strings.TrimSuffix(raw, "\n")
+		if raw != "" {
+			lines = strings.Split(raw, "\n")
+		}
+	}
+
+	seen := make(map[string]bool, len(clean))
+	out := make([]string, 0, len(lines)+len(clean))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			active := strings.TrimSpace(strings.TrimPrefix(trimmed, "export "))
+			if k, _, ok := strings.Cut(active, "="); ok {
+				k = strings.TrimSpace(k)
+				if val, target := clean[k]; target {
+					if !seen[k] {
+						out = append(out, k+"="+val)
+						seen[k] = true
+					}
+					continue
+				}
+			}
+		}
+		out = append(out, line)
+	}
+	for _, k := range []string{"GEMINI_CANNED_ERROR_RETRY", "GEMINI_NO_CONTENT_SEC", "GEMINI_PAUSE_ON_FALLBACK"} {
+		if val, target := clean[k]; target && !seen[k] {
+			out = append(out, k+"="+val)
+		}
+	}
+
+	content := ""
+	if len(out) > 0 {
+		content = strings.Join(out, "\n") + "\n"
+	}
+
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".env.tmp.*")
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return time.Time{}, time.Time{}, err
+	}
+	if _, err := tmp.WriteString(content); err != nil {
+		_ = tmp.Close()
+		return time.Time{}, time.Time{}, err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return time.Time{}, time.Time{}, err
+	}
+	if err := tmp.Close(); err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	cleanup = false
+	_ = os.Chmod(path, 0o600)
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Now(), time.Time{}, err
+	}
+	return time.Now(), info.ModTime(), nil
 }
 
 // unquote removes a single matching pair of surrounding single or double quotes.
@@ -593,6 +766,10 @@ func tokensFilePath(explicit, stateFile string) string {
 
 func flightsFilePath(explicit, stateFile string) string {
 	return derivedStateSidecarPath(explicit, stateFile, ".flights.json")
+}
+
+func diagFilePath(explicit, stateFile string) string {
+	return derivedStateSidecarPath(explicit, stateFile, ".diagnostics.json")
 }
 
 func derivedStateSidecarPath(explicit, stateFile, suffix string) string {

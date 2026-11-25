@@ -221,6 +221,14 @@ func markerPrefixStart(s string) int {
 
 var refusalRe = regexp.MustCompile(`(?i)i['’]m having a hard time (fulfilling|completing|processing) (your|that|this) request|i['’]m (just )?a language model and (can['’]t|cannot) help with that|can i help you with something else instead`)
 
+// IsCompaction reports whether text is wrapped in the model's compaction
+// marker (<summary>…</summary>). Compactions are legitimate text-only answers
+// and must never be treated as a skipped tool call.
+func IsCompaction(text string) bool {
+	t := text
+	return strings.Contains(t, "<summary>") || strings.Contains(t, "</summary>")
+}
+
 // IsUpstreamRefusal reports whether text is Gemini web's generic refusal
 // sentence (or an obvious variant). Only short replies qualify, so a long answer
 // merely quoting the phrase is not counted.
@@ -229,7 +237,7 @@ func IsUpstreamRefusal(text string) bool {
 	return t != "" && len(t) <= 300 && refusalRe.MatchString(t)
 }
 
-var glitchRe = regexp.MustCompile(`(?i)can['’]t use workspace because|turn on these settings to continue`)
+var glitchRe = regexp.MustCompile(`(?i)can['’]t use workspace because|turn on these settings to continue|permission\s+to\s+turn\s+on\s+the\s+[^.\n]{1,40}\s+app\b|autorisation\s+d['’]activer\s+l['’]application\b`)
 var widgetOnlyRe = regexp.MustCompile(`^(\s*<GenerateWidget\b[^>]*/>\s*)+$`)
 
 // IsUpstreamGlitch reports whether text is a canned non-answer of Gemini web:
@@ -245,23 +253,47 @@ func IsUpstreamGlitch(text string) bool {
 }
 
 var (
-	toolRefusalEN        = regexp.MustCompile(`(?i)(none of (those|these|the)\b[^.\n]*(tools|commands)\b[^.\n]*(declared|available)|lack local (file|shell|filesystem|command) access|do not have access to (your|the|any) local (filesystem|files|folders|directory)|no (local )?tools are declared or available|tool[^.\n]*call[^.\n]*limit|action limit|maximum[^.\n]*tool|tool[^.\n]*quota)`)
-	toolRefusalFR        = regexp.MustCompile(`(?i)(aucun\b[^.\n]*(outil|des outils)\b[^.\n]*(n['’]est|ne sont)\s*(déclaré|disponible)|n['’]existent? pas dans mes outils actifs|n['’]ai pas accès (à ces|aux|à vos|aux dossiers|aux fichiers)\s*(dossiers|fichiers)?\s*locaux|aucun outil local n['’]est disponible|limite[^.\n]*(appels d['’]outils|d['’]actions|quota d['’]outils)|quota d['’]outils)`)
+	toolRefusalEN        = regexp.MustCompile(`(?i)(none of (those|these|the)\b[^.\n]*(tools|commands)\b[^.\n]*(declared|available)|(?:the\s+)?(?:local\s+)?(?:file(?:\s+access)?\s+)?tools?\b[^.\n]*(?:are|is)\s+not\s+(?:available|declared|accessible|exposed)|only\s+external\s+connectors\b[^.\n]*are\s+declared|lack local (file|shell|filesystem|command|tool) access|do not have (?:direct )?access to (?:your|the|any) (?:local )?(?:environment|terminal|git repositor(?:y|ies)|filesystem|files|folders|directory|tools)|(?:is|are) not exposed in my available tools|no (local )?tools are declared or available|(?:tool\s+execution\s+is\s+disabled|tools\s+are\s+disabled\s+for\s+this\s+turn)|(?:reached|hit|exceeded|exhausted|depleted|capped|reset(?:s|ting)?)\b[^.\n]*(?:tool[^.\n]*call[^.\n]*limit|action\s+limit|maximum[^.\n]*tool|tool[^.\n]*quota)|(?:tool[^.\n]*call[^.\n]*limit|action\s+limit|maximum[^.\n]*tool[^.\n]*calls?|tool[^.\n]*quota)[^.\n]*(?:reached|hit|exceeded|exhausted|depleted|met|blocking)|(?:zero|no|\x60?0\x60?)\s+remaining\s+tool\s+calls?|(?:\x60?0\x60?|zero|no)\s+tool\s+calls?\s+remaining|\x600\x60\s+tool\s+calls?|\b0\s+tool\s+calls?\s+(?:left|remaining)|out\s+of\s+tool\s+calls?|\x600\s+remaining\x60|\b0\s+remaining(?:\s+(?:appels?(?:\s+d['’]outils?)?|tools?|calls?|actions?|restants?)|\s*\))|(?:reply|send|type)\s+(?:(?:simply|just)\s+)?[\x60"*\s]{0,6}continue[\x60"*\s]{0,6}\s+to\s+\p{L}+)`)
+	toolRefusalFR        = regexp.MustCompile(`(?i)(aucun\b[^.\n]*(outil|des outils)\b[^.\n]*(n['’]est|ne sont)\s*(déclaré|disponible)|(?:les\s+)?outils(?:\s+d['’]accès\s+aux\s+fichiers\s+locaux)?\b[^.\n]*(?:ne\s+sont\s+pas|n['’]est\s+pas)\s*(?:disponibles?|déclarés?|accessibles?|exposés?)|seuls\s+des\s+connecteurs\s+externes\b[^.\n]*sont\s+déclarés|n['’]existent? pas dans mes outils actifs|n['’]ai pas (?:d['’])?accès(?:\s+direct)?\s+(?:à\s+(?:votre|l['’]|mon|ces|aux|vos)?|aux)\s*(?:environnement\s+local|terminal|dépôts?(?:\s+git)?|système\s+de\s+fichiers|dossiers|fichiers|outils)(?:\s*locaux)?|(?:ne\s+sont\s+pas\s+exposés?|n['’]est\s+pas\s+exposé)\s+dans\s+mes\s+outils\s+disponibles|aucun outil local n['’]est disponible|(?:l['’])?exécution\s+d['’]outils\s+est\s+désactivée|(?:atteint|dépassé|épuisé|saturé|excédé|bloqué|réinitialiser(?:a)?)\b[^.\n]*(?:limite|quota|nombre\s+maximal|plafond|budget)[^.\n]*(?:appels?|actions?|outils?)|(?:limite|quota|nombre\s+maximal|plafond|budget)[^.\n]*(?:appels?(?:\s+d['’]outils?)?|d['’]actions?|d['’]outils?)[^.\n]*(?:épuisé|atteint|dépassé|saturé|excédé|bloqué|terminé|fini|réinitialis|à\s+zéro|nul|:\s*0\b)|(?:\x60?0\x60?|zéro|aucun)\s+appels?(?:\s+d['’]outils?)?\s+restants?|plus\s+d['’]appels?\s+d['’]outils?|(?:à\s+)?zéro\s*\(\s*0\s+restants?\s*\)|(?:\b0|\x600\x60)\s+restants?\b|(?:envoie|tapez?|réponds?|écris?)\s+(?:simplement\s+)?[\x60«"*\s]{0,6}continue[\x60»"*\s]{0,6}\s+pour\s+\p{L}+|relance(?:r|z)?\s+une\s+nouvelle\s+session)`)
+	postStallHandoffRe   = regexp.MustCompile(`(?i)(état(?:\s+(?:exact|actuel))?\s+d['’]avancement|étapes\s+restantes|fichiers\s+(?:et\s+étapes\s+)?restant(?:s|es)?|dernières\s+actions\s+à\s+exécuter|prochaines\s+étapes|remaining\s+steps|files\s+remaining)`)
 	thoughtToolRefusalRe = regexp.MustCompile(`(?i)(file\s+tools\s+are\s+not\s+available|(?:local\s+|file\s+|command\s+)?tools\s+are\s+(?:not\s+available|unavailable)|no\s+(?:local\s+|file\s+|command\s+)?tools\s+(?:are\s+)?(?:available|declared)|simulated\s+[^.\n]*(?:report|content|counter-review|review|audit|response|output)|drafted\s+a\s+simulated|without\s+(?:any\s+|access\s+to\s+|using\s+|calling\s+)?(?:file\s+|local\s+)?tools?\b)`)
+	proxyInterruptedRe   = regexp.MustCompile(`(?i)^GMINI\s*:\s*(Gemini\s+(s['’]est\s+figé|a\s+renvoyé\s+une\s+erreur\s+interne|a\s+refusé\s+ou\s+simulé|a\s+affirmé\s+deux\s+fois|a\s+répondu\s+deux\s+fois|a\s+tenté\s+deux\s+fois|n['’]a\s+envoyé\s+aucune\s+réponse)|la\s+réponse\s+de\s+Gemini\s+s['’]emballe)`)
 )
 
 // IsUpstreamToolRefusal reports whether text is an upstream non-answer claiming
-// that local tools are undeclared, unavailable, or at an invented limit/quota,
-// without emitting any tool call block.
+// that local tools are undeclared, unavailable, disabled, or at an invented
+// limit/quota, without emitting any tool call block. The whole reply is scanned
+// (not only its head and tail) so a refusal written mid-message in a long recap
+// is still caught.
 func IsUpstreamToolRefusal(text string) bool {
 	t := strings.TrimSpace(text)
-	if t == "" || len(t) > 2000 {
+	if t == "" {
 		return false
 	}
 	if strings.Contains(t, "```tool_call") || strings.Contains(t, "```function_call") {
 		return false
 	}
+	if strings.Contains(t, "<summary>") || strings.Contains(t, "</summary>") {
+		return false
+	}
 	return toolRefusalEN.MatchString(t) || toolRefusalFR.MatchString(t)
+}
+
+// IsPostStallHandoffSummary reports whether a 0-tool-call reply is framed as a
+// progress/remaining-steps handoff checklist rather than executing the next tool.
+// Compactions wrapped in <summary>...</summary> are never flagged.
+func IsPostStallHandoffSummary(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return false
+	}
+	if strings.Contains(t, "```tool_call") || strings.Contains(t, "```function_call") {
+		return false
+	}
+	if strings.Contains(t, "<summary>") || strings.Contains(t, "</summary>") {
+		return false
+	}
+	return postStallHandoffRe.MatchString(t)
 }
 
 // IsThoughtToolRefusalOrSimulation reports whether thought explicitly states
@@ -305,4 +337,45 @@ func IsUpstreamCannedError(text string) bool {
 // known EN/FR canned phrases as fallback.
 func IsUpstreamCannedErrorWithMarker(text string, hasErrorMarker bool) bool {
 	return gemini.IsCannedErrorReply(text, hasErrorMarker)
+}
+
+// SanitizeAssistantHistory neutralizes prior assistant turns that were transient
+// upstream canned errors, GMINI interruption notices, or false tool-quota/refusal
+// replies so they never poison subsequent turns in the same conversation.
+// For tool refusals followed by a factual status recap, only the refusal line(s)
+// are replaced so the model keeps awareness of already-completed work.
+func SanitizeAssistantHistory(content string) string {
+	t := strings.TrimSpace(content)
+	if t == "" {
+		return content
+	}
+	if IsUpstreamCannedError(t) || IsUpstreamGlitch(t) || proxyInterruptedRe.MatchString(t) {
+		return "[Previous turn failed with a transient error — ignored. Continue the task normally using the declared tools.]"
+	}
+	if IsUpstreamToolRefusal(t) {
+		return stripPoisonedHistoryLines(content, "[Previous turn was interrupted before calling tools; all declared tools are active with NO quota or call limit.]", false)
+	}
+	if IsPostStallHandoffSummary(t) {
+		return stripPoisonedHistoryLines(content, "[Previous turn stopped with a partial status checklist instead of calling tools; all declared tools are active — execute the remaining tool calls directly.]", true)
+	}
+	return content
+}
+
+func stripPoisonedHistoryLines(content, note string, dropHandoffLines bool) string {
+	lines := strings.Split(content, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if toolRefusalFR.MatchString(line) || toolRefusalEN.MatchString(line) {
+			continue
+		}
+		if dropHandoffLines && postStallHandoffRe.MatchString(line) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	rest := strings.TrimSpace(strings.Join(kept, "\n"))
+	if rest == "" {
+		return note
+	}
+	return note + "\n" + rest
 }

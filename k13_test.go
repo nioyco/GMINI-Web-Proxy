@@ -40,8 +40,8 @@ func TestN2_ConfigDefaultsAndStatus(t *testing.T) {
 	t.Setenv("GEMINI_CANNED_ERROR_RETRY", "")
 	t.Setenv("GEMINI_CANNED_ERROR_RETRY_SEC", "")
 	cfg := loadConfig(filepath.Join(t.TempDir(), "missing.env"))
-	if cfg.CannedErrorRetry != "off" || cfg.CannedErrorRetrySec != 25 {
-		t.Fatalf("defaults = (%q, %d), want (\"off\", 25)", cfg.CannedErrorRetry, cfg.CannedErrorRetrySec)
+	if cfg.CannedErrorRetry != "off" || cfg.CannedErrorRetrySec != 55 {
+		t.Fatalf("defaults = (%q, %d), want (\"off\", 55)", cfg.CannedErrorRetry, cfg.CannedErrorRetrySec)
 	}
 
 	t.Setenv("GEMINI_CANNED_ERROR_RETRY", "once")
@@ -135,6 +135,7 @@ func TestN2_OnceBoundedTimeoutAbortsStalledRetry(t *testing.T) {
 	s := newServer(cfg, client, testLogger())
 	s.keepaliveOverride = 20 * time.Millisecond
 	s.cannedRetryTimeoutOverride = 60 * time.Millisecond
+	s.stallRetryBackoffOverride = -1
 	ts := httptest.NewServer(s.handler())
 	defer ts.Close()
 
@@ -185,6 +186,7 @@ func TestN2_OnceAllowsSlowRetryOnceThoughtArrives(t *testing.T) {
 	s := newServer(cfg, client, testLogger())
 	s.keepaliveOverride = 20 * time.Millisecond
 	s.cannedRetryTimeoutOverride = 60 * time.Millisecond
+	s.stallRetryBackoffOverride = -1
 	ts := httptest.NewServer(s.handler())
 	defer ts.Close()
 

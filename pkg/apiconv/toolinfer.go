@@ -334,7 +334,7 @@ func toolIntentCalls(raw []byte, tag string, declared []DeclaredTool, rep *Parse
 
 // decodeIntentBlock decodes a tool-intent fence body (one or more JSON values).
 func decodeIntentBlock(body, tag string, declared []DeclaredTool, rep *ParseReport) []ToolCall {
-	vals, repaired := jsonValues(body)
+	vals, repaired, partialTrailing := jsonValuesReport(body)
 	var out []ToolCall
 	for _, raw := range vals {
 		out = append(out, toolIntentCalls(raw, tag, declared, rep)...)
@@ -342,7 +342,9 @@ func decodeIntentBlock(body, tag string, declared []DeclaredTool, rep *ParseRepo
 	if repaired && len(out) > 0 {
 		rep.Repaired++
 	}
-	if len(vals) == 0 && strings.TrimSpace(body) != "" {
+	if partialTrailing {
+		rep.Unparsed = append(rep.Unparsed, Unparsed{Tag: tag, Declared: len(declared), Reason: "trailing invalid JSON in block"})
+	} else if len(vals) == 0 && strings.TrimSpace(body) != "" {
 		rep.Unparsed = append(rep.Unparsed, Unparsed{Tag: tag, Declared: len(declared), Reason: "body is not JSON"})
 	}
 	return out
@@ -389,7 +391,7 @@ func defaultArgForSchemaProp(key, typ string) any {
 		return "."
 	case "waitmsbeforeasync", "timeout_ms", "timeout":
 		if typ == "" || typ == "integer" || typ == "number" {
-			return 5000
+			return 10000
 		}
 	case "safetoautorun", "safe_to_auto_run":
 		if typ == "" || typ == "boolean" {

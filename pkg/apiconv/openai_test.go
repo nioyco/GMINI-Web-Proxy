@@ -2,6 +2,7 @@ package apiconv
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -323,5 +324,32 @@ func TestResponsesFunctionOutputUsesCallID(t *testing.T) {
 	prompt, _, _ := req.Prompt()
 	if !strings.Contains(prompt, "[Tool result for call_xyz]: done") {
 		t.Errorf("expected call_id-labelled tool result, got:\n%s", prompt)
+	}
+}
+
+// K36 anti-hijack: no tool prompt may contain the banned partner-app token as a
+// SUBSTRING (case-insensitive), not only as a standalone word: even a longer
+// word embedding it would re-inject the hijack. Source prompts are already clean;
+// this is the regression guard.
+func TestK36_NoCanvaSubstringInToolPrompts(t *testing.T) {
+	banned := `(?i)canva`
+	re := regexp.MustCompile(banned)
+	prompts := []struct {
+		name string
+		text string
+	}{
+		{"shortToolPromptReminder", shortToolPromptReminder},
+		{"noEchoRules", noEchoRules},
+		{"toolSpecificRules(true,true,run_command)", toolSpecificRules(true, true, "run_command")},
+		{"toolSpecificRules(false,false,empty)", toolSpecificRules(false, false, "")},
+	}
+	for _, tc := range prompts {
+		if re.MatchString(tc.text) {
+			t.Errorf("%s must NEVER contain the banned substring (pattern %s): %q", tc.name, banned, tc.text)
+		}
+	}
+	// The rules must actually say the neutral wording, not just be empty.
+	if !strings.Contains(noEchoRules, "external connector") {
+		t.Errorf("noEchoRules lost its internal/external extension prohibition: %q", noEchoRules)
 	}
 }

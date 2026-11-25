@@ -262,11 +262,11 @@ func TestK16_A3_StaleTokenAlertInStreamInFlightAndUI(t *testing.T) {
 	close(release)
 	<-done1
 
-	if !strings.Contains(inFlightAlert, "GMINI : jeton de ") || !strings.Contains(inFlightAlert, "risque de repli sur un autre modèle ; actualisez le cookie depuis GMINI Control") {
+	if !strings.Contains(inFlightAlert, "GMINI : jeton de ") || !strings.Contains(inFlightAlert, "risque de repli sur un autre modèle ; actualisez le cookie depuis GMINI Console-Web-UI") {
 		t.Fatalf("in-flight stale_token_alert = %q", inFlightAlert)
 	}
 	joined1 := strings.Join(sse1.dataFrames, "\n")
-	if !strings.Contains(joined1, "GMINI : jeton de ") || !strings.Contains(joined1, "risque de repli sur un autre modèle ; actualisez le cookie depuis GMINI Control") {
+	if !strings.Contains(joined1, "GMINI : jeton de ") || !strings.Contains(joined1, "risque de repli sur un autre modèle ; actualisez le cookie depuis GMINI Console-Web-UI") {
 		t.Fatalf("expected stale token note in SSE stream, got:\n%s", joined1)
 	}
 

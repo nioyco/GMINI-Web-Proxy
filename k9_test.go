@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -406,9 +407,20 @@ func TestK9_DurationCapWithAndWithoutToolCall(t *testing.T) {
 			pr, pw := io.Pipe()
 			go func() {
 				defer pw.Close()
-				acc := "```tool_call\n{\"name\":\"write_file\",\"arguments\":{\"path\":\"a.go\",\"content\":\"stuck"
+				acc := "```tool_call\n{\"name\":\"write_file\",\"arguments\":{\"path\":\"a.go\",\"content\":\""
 				pw.Write([]byte(fakeStreamServed(acc, "", "cf41b0e0dd7d53e5", "4 Hydrogen")))
-				<-r.Context().Done()
+				chunk := strings.Repeat("still_streaming_", 8)
+				for {
+					select {
+					case <-r.Context().Done():
+						return
+					case <-time.After(15 * time.Millisecond):
+						acc += chunk
+						if _, err := pw.Write([]byte(fakeStreamServed(acc, "", "cf41b0e0dd7d53e5", "4 Hydrogen"))); err != nil {
+							return
+						}
+					}
+				}
 			}()
 			return &http.Response{StatusCode: 200, Body: pr}, nil
 		}))
@@ -429,6 +441,124 @@ func TestK9_DurationCapWithAndWithoutToolCall(t *testing.T) {
 			t.Fatalf("expected runaway message on duration cap, got %v", c.dataFrames)
 		}
 	})
+}
+
+func TestK9_HeldStallRetrySucceeds(t *testing.T) {
+	const k9RunCmdBody = `{"model":"gemini-everyday-help","stream":true,"messages":[{"role":"user","content":"go"}],` +
+		`"tools":[{"type":"function","function":{"name":"run_command","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}}]}`
+	var attempts atomic.Int32
+	_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+		n := attempts.Add(1)
+		pr, pw := io.Pipe()
+		go func() {
+			defer pw.Close()
+			if n == 1 {
+				acc := "```tool_call\n{\"name\": \"run_command\", \"arguments" // 47 bytes
+				if len(acc) != 47 {
+					t.Errorf("fixture len=%d, want 47", len(acc))
+				}
+				pw.Write([]byte(fakeStreamServed(acc, "", "56fdd199312815e2", "4 Hydrogen")))
+				time.Sleep(25 * time.Millisecond)
+				// Heartbeat {"37":[0]} arrives while text stays frozen.
+				pw.Write([]byte("36\n[[\"wrb.fr\",null,\"[{\\\"37\\\":[0]}]\"]]\n"))
+				<-r.Context().Done()
+				return
+			}
+			acc := "```tool_call\n{\"name\":\"run_command\",\"arguments\":{\"command\":\"echo ok\"}}\n```\n"
+			pw.Write([]byte(fakeStreamServed(acc, "", "56fdd199312815e2", "4 Hydrogen")))
+		}()
+		return &http.Response{StatusCode: 200, Body: pr}, nil
+	}))
+
+	var logBuf bytes.Buffer
+	cfg := testConfig()
+	cfg.StreamToolsProgress = true
+	cfg.StreamThoughts = true
+	cfg.SSEKeepaliveSec = 1
+	s := newServer(cfg, client, slog.New(slog.NewTextHandler(&logBuf, nil)))
+	s.keepaliveOverride = 20 * time.Millisecond
+	s.heldStallOverride = 80 * time.Millisecond
+	s.heldDurationOverride = 250 * time.Millisecond
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	c := readSSE(t, context.Background(), ts.URL, k9RunCmdBody)
+	assertProgressStream(t, c)
+	vs := views(t, c)
+	last := vs[len(vs)-1].Choices[0]
+	if len(last.Delta.ToolCalls) != 1 || last.Delta.ToolCalls[0].Function.Name != "run_command" {
+		t.Fatalf("expected run_command delivered after stall retry, got %v", c.dataFrames)
+	}
+	if attempts.Load() != 2 {
+		t.Errorf("expected 2 attempts, got %d", attempts.Load())
+	}
+	stRec := uiDo(s.handler(), "GET", "/_status", "127.0.0.1:5000", "")
+	var st struct {
+		Counters map[string]int64 `json:"counters"`
+	}
+	json.Unmarshal(stRec.Body.Bytes(), &st)
+	if st.Counters["early_stop_stall"] != 1 || st.Counters["held_stall_retries"] != 1 || st.Counters["early_stop_duration"] != 0 {
+		t.Errorf("unexpected counters: %+v", st.Counters)
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, "reason=stall") || !strings.Contains(logs, "held_stall_retry") {
+		t.Errorf("expected stall & held_stall_retry in logs: %s", logs)
+	}
+}
+
+func TestK9_HeldStallExhaustedReportsBytes(t *testing.T) {
+	var attempts atomic.Int32
+	_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+		attempts.Add(1)
+		pr, pw := io.Pipe()
+		go func() {
+			defer pw.Close()
+			acc := "```tool_call\n{\"name\": \"run_command\", \"arguments" // 47 bytes
+			pw.Write([]byte(fakeStreamServed(acc, "", "56fdd199312815e2", "4 Hydrogen")))
+			time.Sleep(20 * time.Millisecond)
+			pw.Write([]byte("36\n[[\"wrb.fr\",null,\"[{\\\"37\\\":[0]}]\"]]\n"))
+			<-r.Context().Done()
+		}()
+		return &http.Response{StatusCode: 200, Body: pr}, nil
+	}))
+
+	cfg := testConfig()
+	cfg.StreamToolsProgress = true
+	cfg.StreamThoughts = true
+	cfg.SSEKeepaliveSec = 1
+	s := newServer(cfg, client, testLogger())
+	s.keepaliveOverride = 20 * time.Millisecond
+	s.heldStallOverride = 70 * time.Millisecond
+	s.heldDurationOverride = 200 * time.Millisecond
+	s.stallRetryBackoffOverride = 5 * time.Millisecond
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	c := readSSE(t, context.Background(), ts.URL, k9ChatToolsBody)
+	assertProgressStream(t, c)
+	vs := views(t, c)
+	last := vs[len(vs)-1].Choices[0]
+	if last.Delta.Content == nil {
+		t.Fatalf("expected error content on exhausted stall, got %v", c.dataFrames)
+	}
+	got := *last.Delta.Content
+	if !strings.Contains(got, "47 o reçus sans suite") {
+		t.Errorf("expected exact byte count '47 o reçus sans suite', got %q", got)
+	}
+	if strings.Contains(got, "s'emballe") || strings.Contains(got, "1 Ko sans fin") {
+		t.Errorf("must not report runaway 's'emballe (1 Ko sans fin)', got %q", got)
+	}
+	if attempts.Load() != 4 {
+		t.Errorf("expected 4 attempts (1 initial + 3 retries), got %d", attempts.Load())
+	}
+	stRec := uiDo(s.handler(), "GET", "/_status", "127.0.0.1:5000", "")
+	var st struct {
+		Counters map[string]int64 `json:"counters"`
+	}
+	json.Unmarshal(stRec.Body.Bytes(), &st)
+	if st.Counters["early_stop_stall"] != 4 || st.Counters["held_stall_retries"] != 3 || st.Counters["early_stop_duration"] != 0 {
+		t.Errorf("unexpected counters: %+v", st.Counters)
+	}
 }
 
 // Progress note every 30s (overridden in test) & in-flight received vs sent bytes (K7/K9).
@@ -573,22 +703,363 @@ func TestK9_EarlyStopOtherFormats(t *testing.T) {
 func TestK9_ConfigEnvCapsAndUIHTML(t *testing.T) {
 	t.Setenv("GEMINI_MAX_HELD_BYTES", "32768")
 	t.Setenv("GEMINI_MAX_HELD_SEC", "90")
+	t.Setenv("GEMINI_HELD_STALL_SEC", "45")
+	t.Setenv("GEMINI_HELD_STALL_FAST_SEC", "22")
+	t.Setenv("GEMINI_HELD_STALL_RETRIES", "9")
 	cfg := loadConfig("/nonexistent/.env")
-	if cfg.MaxHeldBytes != 32768 || cfg.MaxHeldSec != 90 {
-		t.Fatalf("got MaxHeldBytes=%d MaxHeldSec=%d", cfg.MaxHeldBytes, cfg.MaxHeldSec)
+	if cfg.MaxHeldBytes != 32768 || cfg.MaxHeldSec != 90 || cfg.HeldStallSec != 45 || cfg.HeldStallFastSec != 22 || cfg.HeldStallRetries != 5 {
+		t.Fatalf("got MaxHeldBytes=%d MaxHeldSec=%d HeldStallSec=%d HeldStallFastSec=%d HeldStallRetries=%d",
+			cfg.MaxHeldBytes, cfg.MaxHeldSec, cfg.HeldStallSec, cfg.HeldStallFastSec, cfg.HeldStallRetries)
+	}
+	cfg.UIEnabled = true
+	sOn := newTestServer(t, cfg)
+	stOn := uiDo(sOn.handler(), "GET", "/_status", "127.0.0.1:5000", "")
+	var stBody struct {
+		HeldStallSec        int `json:"held_stall_sec"`
+		HeldStallFastSec    int `json:"held_stall_fast_sec"`
+		HeldStallRetriesMax int `json:"held_stall_retries_max"`
+	}
+	if err := json.Unmarshal(stOn.Body.Bytes(), &stBody); err != nil {
+		t.Fatal(err)
+	}
+	if stBody.HeldStallSec != 45 || stBody.HeldStallFastSec != 22 || stBody.HeldStallRetriesMax != 5 {
+		t.Fatalf("/_status stall fields = %+v", stBody)
 	}
 
 	t.Setenv("GEMINI_MAX_HELD_BYTES", "0")
 	t.Setenv("GEMINI_MAX_HELD_SEC", "0")
+	t.Setenv("GEMINI_HELD_STALL_SEC", "0")
+	t.Setenv("GEMINI_HELD_STALL_FAST_SEC", "0")
+	t.Setenv("GEMINI_HELD_STALL_RETRIES", "0")
 	cfgOff := loadConfig("/nonexistent/.env")
 	s := newTestServer(t, cfgOff)
-	if s.maxHeldBytes() != 0 || s.maxHeldDuration() != 0 {
-		t.Fatalf("expected 0 when disabled, got bytes=%d dur=%v", s.maxHeldBytes(), s.maxHeldDuration())
+	if s.maxHeldBytes() != 0 || s.maxHeldDuration() != 0 || s.heldStallDuration() != 0 || s.heldStallFastDuration() != 0 || s.maxStallRetries() != 0 {
+		t.Fatalf("expected 0 when disabled, got bytes=%d dur=%v stall=%v fast=%v retries=%d",
+			s.maxHeldBytes(), s.maxHeldDuration(), s.heldStallDuration(), s.heldStallFastDuration(), s.maxStallRetries())
 	}
 
 	_, h := uiServer(t)
 	w := uiDo(h, "GET", "/_ui", "127.0.0.1:5000", "")
 	if !strings.Contains(w.Body.String(), "Arrêts anticipés") || !strings.Contains(w.Body.String(), "Transmis") {
 		t.Errorf("ui.html missing K9 labels")
+	}
+}
+
+// Reproduces 1dc3f58617569dd2: prompt > 300 KiB (initial wait note + keepalives)
+// followed by an open ```tool_call write_file of 1232 B (> earlyHold=400 B) that
+// stalls with sent_bytes=0; held_stall_retry must still fire and recover on attempt 2.
+func TestK9_HeldStallRetryLargeOpenWriteFile1232Bytes(t *testing.T) {
+	largeBody, _ := json.Marshal(map[string]any{
+		"model":  "gemini-everyday-help",
+		"stream": true,
+		"messages": []map[string]string{
+			{"role": "user", "content": "write file " + strings.Repeat("A", 320*1024)},
+		},
+		"tools": []map[string]any{
+			{
+				"type": "function",
+				"function": map[string]any{
+					"name": "write_file",
+					"parameters": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"path":    map[string]string{"type": "string"},
+							"content": map[string]string{"type": "string"},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	prefix := "```tool_call\n{\"name\":\"write_file\",\"arguments\":{\"path\":\"out.txt\",\"content\":\""
+	stalled1232 := prefix + strings.Repeat("x", 1232-len(prefix))
+	if len(stalled1232) != 1232 {
+		t.Fatalf("fixture len=%d, want 1232", len(stalled1232))
+	}
+
+	var attempts atomic.Int32
+	_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+		n := attempts.Add(1)
+		pr, pw := io.Pipe()
+		go func() {
+			defer pw.Close()
+			if n == 1 {
+				// Delay first frame so keepalives and the >300 KiB initial wait note are emitted first.
+				time.Sleep(35 * time.Millisecond)
+				pw.Write([]byte(fakeStreamServed(stalled1232, "", "56fdd199312815e2", "4 Hydrogen")))
+				time.Sleep(25 * time.Millisecond)
+				pw.Write([]byte("36\n[[\"wrb.fr\",null,\"[{\\\"37\\\":[0]}]\"]]\n"))
+				<-r.Context().Done()
+				return
+			}
+			okReply := "```tool_call\n{\"name\":\"write_file\",\"arguments\":{\"path\":\"out.txt\",\"content\":\"ok\"}}\n```\n"
+			pw.Write([]byte(fakeStreamServed(okReply, "", "56fdd199312815e2", "4 Hydrogen")))
+		}()
+		return &http.Response{StatusCode: 200, Body: pr}, nil
+	}))
+
+	var logBuf bytes.Buffer
+	cfg := testConfig()
+	cfg.StreamToolsProgress = true
+	cfg.StreamThoughts = true
+	cfg.SSEKeepaliveSec = 1
+	s := newServer(cfg, client, slog.New(slog.NewTextHandler(&logBuf, nil)))
+	s.keepaliveOverride = 10 * time.Millisecond
+	s.initialWaitNoteOverride = 15 * time.Millisecond
+	s.heldStallOverride = 80 * time.Millisecond
+	s.heldDurationOverride = 250 * time.Millisecond
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	c := readSSE(t, context.Background(), ts.URL, string(largeBody))
+	assertProgressStream(t, c)
+	if !strings.Contains(c.raw, "Demande envoyée à") {
+		t.Errorf("expected initial wait note for >300 KiB prompt in SSE stream")
+	}
+	vs := views(t, c)
+	last := vs[len(vs)-1].Choices[0]
+	if len(last.Delta.ToolCalls) != 1 || last.Delta.ToolCalls[0].Function.Name != "write_file" {
+		t.Fatalf("expected write_file delivered after held_stall_retry, got %v", c.dataFrames)
+	}
+	if attempts.Load() != 2 {
+		t.Errorf("expected 2 attempts, got %d", attempts.Load())
+	}
+	stRec := uiDo(s.handler(), "GET", "/_status", "127.0.0.1:5000", "")
+	var st struct {
+		Counters map[string]int64 `json:"counters"`
+	}
+	json.Unmarshal(stRec.Body.Bytes(), &st)
+	if st.Counters["early_stop_stall"] != 1 || st.Counters["held_stall_retries"] != 1 || st.Counters["early_stop_duration"] != 0 {
+		t.Errorf("unexpected counters: %+v", st.Counters)
+	}
+	logs := logBuf.String()
+	for _, want := range []string{"reason=stall", "held_bytes=1232", "sent_bytes=0", "held_stall_retry"} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("expected %q in logs: %s", want, logs)
+		}
+	}
+}
+
+func TestK9_FastStallOnlyWhenNoThoughtsAndOpenFence(t *testing.T) {
+	t.Run("no_thoughts_open_fence", func(t *testing.T) {
+		var attempts atomic.Int32
+		_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+			n := attempts.Add(1)
+			pr, pw := io.Pipe()
+			go func() {
+				defer pw.Close()
+				if n == 1 {
+					pw.Write([]byte(fakeStreamServed("```tool_call\n{\"name\":\"read_file\",", "", "56fdd199312815e2", "4 Hydrogen")))
+					<-r.Context().Done()
+					return
+				}
+				ok := "```tool_call\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.go\"}}\n```\n"
+				pw.Write([]byte(fakeStreamServed(ok, "", "56fdd199312815e2", "4 Hydrogen")))
+			}()
+			return &http.Response{StatusCode: 200, Body: pr}, nil
+		}))
+
+		var logBuf bytes.Buffer
+		cfg := testConfig()
+		cfg.StreamToolsProgress = true
+		cfg.StreamThoughts = true
+		cfg.SSEKeepaliveSec = 1
+		s := newServer(cfg, client, slog.New(slog.NewTextHandler(&logBuf, nil)))
+		s.keepaliveOverride = 15 * time.Millisecond
+		s.heldStallFastOverride = 55 * time.Millisecond
+		s.heldStallOverride = 500 * time.Millisecond
+		s.heldDurationOverride = 800 * time.Millisecond
+		s.stallRetryBackoffOverride = 5 * time.Millisecond
+		ts := httptest.NewServer(s.handler())
+		defer ts.Close()
+
+		start := time.Now()
+		c := readSSE(t, context.Background(), ts.URL, k9ChatToolsBody)
+		elapsed := time.Since(start)
+		assertProgressStream(t, c)
+		if elapsed >= 350*time.Millisecond {
+			t.Fatalf("fast stall did not trigger quickly: elapsed=%v", elapsed)
+		}
+		vs := views(t, c)
+		last := vs[len(vs)-1].Choices[0]
+		if len(last.Delta.ToolCalls) != 1 || last.Delta.ToolCalls[0].Function.Name != "read_file" {
+			t.Fatalf("expected read_file after fast stall retry, got %v", c.dataFrames)
+		}
+		if attempts.Load() != 2 || !strings.Contains(logBuf.String(), "fast_stall=true") {
+			t.Fatalf("attempts=%d logs=%s", attempts.Load(), logBuf.String())
+		}
+	})
+
+	t.Run("with_thoughts_4neon_waits_full_stall", func(t *testing.T) {
+		const neonBody = `{"model":"gemini-3.1-pro","stream":true,"messages":[{"role":"user","content":"go"}],` +
+			`"tools":[{"type":"function","function":{"name":"read_file","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}}]}`
+		var attempts atomic.Int32
+		_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+			attempts.Add(1)
+			pr, pw := io.Pipe()
+			go func() {
+				defer pw.Close()
+				part1 := "```tool_call\n{\"name\":\"read_file\","
+				pw.Write([]byte(fakeStreamServed(part1, "Je réfléchis avant d'agir.", "e6fa609c3fa255c0", "4 Neon")))
+				time.Sleep(130 * time.Millisecond) // > heldStallFastOverride (50ms), < heldStallOverride (350ms)
+				full := part1 + "\"arguments\":{\"path\":\"a.go\"}}\n```\n"
+				pw.Write([]byte(fakeStreamServed(full, "Je réfléchis avant d'agir.", "e6fa609c3fa255c0", "4 Neon")))
+			}()
+			return &http.Response{StatusCode: 200, Body: pr}, nil
+		}))
+
+		cfg := testConfig()
+		cfg.StreamToolsProgress = true
+		cfg.StreamThoughts = true
+		cfg.SSEKeepaliveSec = 1
+		s := newServer(cfg, client, testLogger())
+		s.keepaliveOverride = 15 * time.Millisecond
+		s.heldStallFastOverride = 50 * time.Millisecond
+		s.heldStallOverride = 350 * time.Millisecond
+		s.heldDurationOverride = 600 * time.Millisecond
+		ts := httptest.NewServer(s.handler())
+		defer ts.Close()
+
+		c := readSSE(t, context.Background(), ts.URL, neonBody)
+		assertProgressStream(t, c)
+		vs := views(t, c)
+		last := vs[len(vs)-1].Choices[0]
+		if len(last.Delta.ToolCalls) != 1 || last.Delta.ToolCalls[0].Function.Name != "read_file" {
+			t.Fatalf("expected read_file without premature cut, got %v", c.dataFrames)
+		}
+		if attempts.Load() != 1 || s.stats.heldStallRetries.Load() != 0 || s.stats.earlyStopStall.Load() != 0 {
+			t.Fatalf("expected single attempt without fast stall cut: attempts=%d retries=%d stalls=%d",
+				attempts.Load(), s.stats.heldStallRetries.Load(), s.stats.earlyStopStall.Load())
+		}
+	})
+}
+
+func TestK9_HeldStallTwoRetriesWithTempChatAndLevelStepdown(t *testing.T) {
+	largeBody, _ := json.Marshal(map[string]any{
+		"model":  "gemini-everyday-help",
+		"stream": true,
+		"messages": []map[string]string{
+			{"role": "user", "content": "write file " + strings.Repeat("Z", 310*1024)},
+		},
+		"tools": []map[string]any{
+			{
+				"type": "function",
+				"function": map[string]any{
+					"name": "write_file",
+					"parameters": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"path":    map[string]string{"type": "string"},
+							"content": map[string]string{"type": "string"},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	type wireSlots struct {
+		tempChat any
+		mode     any
+		level    any
+	}
+	seenSlots := make(chan wireSlots, 4)
+	var attempts atomic.Int32
+
+	_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
+		rawBody, _ := io.ReadAll(r.Body)
+		vals, _ := url.ParseQuery(string(rawBody))
+		var outer []any
+		var inner []any
+		if err := json.Unmarshal([]byte(vals.Get("f.req")), &outer); err == nil && len(outer) > 1 {
+			if s, ok := outer[1].(string); ok {
+				_ = json.Unmarshal([]byte(s), &inner)
+			}
+		}
+		var ws wireSlots
+		if len(inner) > 45 {
+			ws.tempChat = inner[45]
+		}
+		if len(inner) > 80 {
+			ws.mode, ws.level = inner[79], inner[80]
+		}
+		seenSlots <- ws
+
+		n := attempts.Add(1)
+		pr, pw := io.Pipe()
+		go func() {
+			defer pw.Close()
+			switch n {
+			case 1:
+				pw.Write([]byte(fakeStreamServed("```tool_call\n{\"name\":\"write_file\",", "", "56fdd199312815e2", "4 Hydrogen")))
+				<-r.Context().Done()
+			case 2:
+				pw.Write([]byte(fakeStreamServed("```tool_call\n{\"name\":\"write_file\",\"arguments\":{\"path\":\"a.go\",", "", "56fdd199312815e2", "4 Hydrogen")))
+				<-r.Context().Done()
+			default:
+				ok := "```tool_call\n{\"name\":\"write_file\",\"arguments\":{\"path\":\"a.go\",\"content\":\"ok\"}}\n```\n"
+				pw.Write([]byte(fakeStreamServed(ok, "", "56fdd199312815e2", "4 Hydrogen")))
+			}
+		}()
+		return &http.Response{StatusCode: 200, Body: pr}, nil
+	}))
+
+	var logBuf bytes.Buffer
+	cfg := testConfig()
+	cfg.StreamToolsProgress = true
+	cfg.StreamThoughts = true
+	cfg.SSEKeepaliveSec = 1
+	cfg.DefaultThinkingLevel = "medium"
+	cfg.ThinkingModes = parseModeCodes(defaultThinkingModeCodes)
+	s := newServer(cfg, client, slog.New(slog.NewTextHandler(&logBuf, nil)))
+	s.keepaliveOverride = 15 * time.Millisecond
+	s.heldStallFastOverride = 50 * time.Millisecond
+	s.heldStallOverride = 90 * time.Millisecond
+	s.heldDurationOverride = 400 * time.Millisecond
+	s.stallRetryBackoffOverride = 5 * time.Millisecond
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+
+	c := readSSE(t, context.Background(), ts.URL, string(largeBody))
+	assertProgressStream(t, c)
+	vs := views(t, c)
+	last := vs[len(vs)-1].Choices[0]
+	if len(last.Delta.ToolCalls) != 1 || last.Delta.ToolCalls[0].Function.Name != "write_file" {
+		t.Fatalf("expected write_file delivered on attempt 3, got %v", c.dataFrames)
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("expected 3 attempts, got %d", attempts.Load())
+	}
+	close(seenSlots)
+	var got []wireSlots
+	for ws := range seenSlots {
+		got = append(got, ws)
+	}
+	if len(got) != 3 {
+		t.Fatalf("captured %d upstream payloads, want 3", len(got))
+	}
+	if got[0].tempChat != nil || got[0].mode != float64(1) || got[0].level != float64(4) {
+		t.Errorf("attempt 1 slots = %+v, want tempChat=nil mode=1 level=4", got[0])
+	}
+	if got[1].tempChat != nil || got[1].mode != float64(1) || got[1].level != float64(2) {
+		t.Errorf("attempt 2 slots = %+v, want tempChat=nil mode=1 level=2 (stepdown 4->2 on 1st retry)", got[1])
+	}
+	if got[2].tempChat != nil || got[2].mode != float64(1) || got[2].level != float64(1) {
+		t.Errorf("attempt 3 slots = %+v, want tempChat=nil mode=1 level=1 (stepdown 2->1)", got[2])
+	}
+	stRec := uiDo(s.handler(), "GET", "/_status", "127.0.0.1:5000", "")
+	var st struct {
+		Counters map[string]int64 `json:"counters"`
+	}
+	json.Unmarshal(stRec.Body.Bytes(), &st)
+	if st.Counters["early_stop_stall"] != 2 || st.Counters["held_stall_retries"] != 2 {
+		t.Errorf("unexpected counters: %+v", st.Counters)
+	}
+	logs := logBuf.String()
+	for _, want := range []string{"attempt=1", "attempt=2", "max_retries=3", "fast_stall=true", "temp_chat=false", "level_stepdown=4->2", "level_stepdown=2->1"} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("missing %q in logs: %s", want, logs)
+		}
 	}
 }

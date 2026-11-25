@@ -1,10 +1,61 @@
 # Historique des versions — GMINI-Web-Proxy
 
-Ce fichier recense les versions publiées du proxy **GMINI-Web-Proxy** (dérivé de `n0madic/go-gemini-web2api`) et leurs jalons techniques (`P6`–`K20`).
+Ce fichier recense les versions publiées et consolidations du proxy **GMINI-Web-Proxy** (dérivé de `n0madic/go-gemini-web2api`) et leurs jalons techniques (`P6`–`K55`).
 
 ---
 
-## v1.2.0 — 2026-11-18 (Lot K20, suivi tokens & confidentialité temps réel)
+## v1.2.0 — Consolidation K25 → K55 (`UI 3.0.9`, build `go-gemini-web2api-p9-0581e87-k55`, 2026-11-25)
+
+### Web UI `v3.0.9` & Observabilité (K54–K55, K50, K48–K49, K37–K41)
+- **Web UI `v3.0.9`** (`ui.html`, `status.go`, `diagnostics.go`, `pkg/gemini/served.go`) :
+  - **2 vues distinctes à tableaux fusionnés temps réel** avec conservation des couleurs/badges :
+    - **`DIAGNOSTIC PROXY`** : panneau d'export anonymisé `.zip`/JSON/CSV/MD épinglé en haut (sticky), tableau unique chronologique `#diag-unified` (*Activités* + *Incidents*), filtre rapide (`all`/`activity`/`incident`/`errors`), colonne `Requête` (`req_id`), badges distincts `Activité`/`Incident`, et colonne `Récupéré` complète (`oui`/`non`/`direct`/`récupérée (N)`).
+    - **`Demandes & Appels`** : tableau unique `#demandes-unified` dédoublonné par `request_id` (1 ligne/requête, demandes en cours épinglées en tête), déroulé chronologique par tentative (`T1`, `T2`, …) avec badges **`récupérée` / `échec` / `OK` / `OK après retry`** et synthèse `Direct` / `Récupérée (N tent.)` / `Échec (N tent.)`.
+  - **`CallRecord.BinaryTag` & `DiagEvent.BinaryTag`** : tag binaire (`K55`, …) persisté sur les appels, historiques (`500` requêtes / `20` conversations) et diagnostics (ring buffer persisté `0600` jusqu'à `1000` entrées).
+  - **Base d'outils (`tools_db.go`, `~/Library/Logs/gmini/gemini_tools_db.jsonl` `0600`)** : suivi par version et par outil (locaux + internes Google), filtrage, export JSON/CSV et isolation stricte pendant `go test`.
+  - **Favicon SVG Antigravity dynamique** (pastille verte/ambre/rouge selon l'état session/proxy) + bouton *Lancer la connexion Google* quand non connecté + avertissement visuel si `GEMINI_TEMPORARY_CHAT=true`.
+  - **Exporteur de diagnostics anonymisés** (`tools/export_gmini_diagnostics.py` `v1.2.0`) : zéro secret, classification réelle (`tool_calls_ok`, `text_only_legit`, `text_only_suspect`, échecs durs).
+
+### Résilience `4 Hydrogen`, Outils Internes Google & Anti-Mensonge (K42–K54)
+- **Purge de l'effet « éléphant rose » (`DEC-157`, K53)** : suppression de tous les noms propres d'extensions/apps Google (`Drive`, `Gmail`, `Workspace`, `Docs`, `Google Search`, `Canva`, …) dans les notes de retry et rappels de prompt + verrou regex anti-régression (`k53_test.go`).
+- **Gestion unifiée des outils internes Google (K46, K48, K51–K54)** :
+  - Découplage `internal_tool_retry` / `initial_silence_retry` (`internalToolRetried` dédié) et helper `resolveInternalToolRetry` sur toutes les branches de retry (aucune coupure ne peut plus générer de faux `ErrEmptyResponse`).
+  - Préservation de `noContentTimeout` sur les statuts d'outils internes (`IsInternalToolStatus`), plafonnement `80 s` + reprise `2->1` sur `noContentTimedOut`, `canned_error`, réponse vide silencieuse (`empty_reply_retry`) et `tool_refusal` (`1->2`).
+- **Anti-mensonge & détection refus élargie (K51–K52)** :
+  - Sortie d'`internalToolRetry` unifiée avec `DetectUnverifiedActionClaim` (retry + avertissement mécanique `⚠ GMINI`) et `tool_unparsed_retry`.
+  - `fakeCommandClaimRe` étendu (EN+FR : *"launched/started the verification suite / tests / build"*), `IsUpstreamToolRefusal` étendu (FR+EN).
+- **Stabilité `4 Hydrogen` (K42–K45)** : suppression de `TemporaryChat=true` forcé sur retries, stepdown progressif `4 -> 2 -> 1`, `initialSilenceTimeout` à `25 s`, `maxStallRetries = 3`, protection de la dernière tentative sur gros prompts (`>= 250 KiB`).
+
+### Pause Quota Automatique & Session (K41, K50)
+- **Pause quota globale (`quotapause.go`)** : détection automatique de repli modèle (ex. `3.5 Flash-Lite` servi à la place de `4 Hydrogen`) ou bannière limite Google (`body[52]`), blocage pré-vol `HTTP 429` sur les modèles premium, et **levée automatique** après rafraîchissement cookie réussi lorsque la pause était due à un jeton périmé (`StaleToken`).
+- **Traçabilité `cookie_auto_refresh_skipped`** (`cookie_auto_refresh.go`) : journalisation `INFO` dédupliquée des raisons de skip (`disabled`, `paused_failures`, `min_spacing`, `not_configured`).
+
+---
+
+## v1.2.0 — Lots locaux K21 → K24 (sur base `0581e87`, build `go-gemini-web2api-p9-0581e87-k24`, 2026-11-18)
+
+### Lot K24 (`0581e87-k24`)
+- **Garde-fous `.env` pilotables en direct (`/_ui` & Console `V2.0.0`)** : `upsertNonSecretDotenvKeys` (`config.go:535-642`, écriture atomique `0o600`, liste blanche `GEMINI_CANNED_ERROR_RETRY` et `GEMINI_NO_CONTENT_SEC`), mutex `cfgMu` (`server.go`), champs `no_content_sec` / `canned_error_retry` dans `/_ui/api/status` (`status.go`), endpoint `POST /_ui/api/guardrails/set` (`ui.go`) et contrôles directs `#nc-toggle` / `#cer-toggle` (`ui.html`).
+- **Timeout inféré des outils shell (`pkg/apiconv/toolinfer.go:390-393`)** : défaut `waitmsbeforeasync`/`timeout_ms`/`timeout` relevé de `5000` à `10000 ms`.
+- **Rappel d'outils `T2+` sur historique (`pkg/apiconv/openai.go:283-330`)** : détection `hasPriorHistory` (`[Assistant]:` / `[Tool result for `) sans `<USER_REQUEST>` pour placer le rappel en fin de prompt sur `T2+`.
+
+### Lot K23 (`0581e87-k23`)
+- **Corrélation `client_cancelled` (`pkg/gemini/client.go:862-877`)** : ajout de `request_id` et `upstream_heartbeats`.
+- **Suppression du bruit de polling (`reqctx.go:648-653`)** : skip `request_start`/`request_end` pour les `200 OK` sur `GET /`, `/v1/models`, `/models` portant `X-GMINI-Quiet: 1`.
+- **Repli `canned_error` sans `streamEvents` (`k23_test.go`)** : prise en charge lorsque `s.streamEvents == nil`.
+
+### Lot K22
+- **Visibilité en attente (`server.go`)** : maintien des `emitWaitNote` périodiques lorsque `GEMINI_NO_CONTENT_SEC > 0`.
+- **Chronologie sur annulation client (`server.go`, `pkg/gemini/client.go`)** : drainage `<-done` et report de `c.clientCancelled` après `met.upstream`/`c.recordCall` (`served_model` < `client_cancelled` < `request_end`, `upstream_ms > 0`).
+- **Veille sans spam (`pkg/gemini/block.go`, `cookie_auto_refresh.go`)** : suppression de la répétition `60 s` de `gate=quiet` via `userActivityGen` / `IsIdleForBackground`.
+- **`finishNoContentTimeout` (`server.go`)** : drainage de `heartbeats` avant `errNoContentTimeout` et gestion `noContentTimedOut` dans les relances.
+
+### Lot K21
+- **Rappel d'outils `T2+` + contre-exemple `bash?code_reference`** (`pkg/apiconv/openai.go`, `google.go`) et drainage `<-done` jusqu'à `200 ms` dans `runStreamTools` (`server.go`) ; `GEMINI_NO_CONTENT_SEC=240` documenté dans `.env.example`.
+
+---
+
+## v1.2.0 — 2026-11-18 (`0581e87` / Lot K20, suivi tokens & confidentialité temps réel)
 
 ### Nouveautés & garde-fous mécaniques (K20)
 - **Audit mécanique des outils & lutte anti-mensonge** (`pkg/apiconv/toolaudit.go`, `GEMINI_TOOL_AUDIT_NOTE=true`) :

@@ -144,7 +144,7 @@ func TestK17_S3_CodeRefFastpath(t *testing.T) {
 		if !strings.Contains(joined, `"name":"run_command"`) || !strings.Contains(joined, `git status`) {
 			t.Fatalf("expected converted run_command tool_call, got: %s", joined)
 		}
-		if !strings.Contains(joined, `\"Cwd\":\".\"`) || !strings.Contains(joined, `\"WaitMsBeforeAsync\":5000`) {
+		if !strings.Contains(joined, `\"Cwd\":\".\"`) || !strings.Contains(joined, `\"WaitMsBeforeAsync\":10000`) {
 			t.Fatalf("expected required schema defaults in tool_call arguments, got: %s", joined)
 		}
 		logStr := logBuf.String()

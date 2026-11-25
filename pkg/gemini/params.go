@@ -96,7 +96,8 @@ func (c *Client) UpstreamParams() UpstreamParams {
 // logUpstreamParams emits one "upstream_params" line for a generation call when
 // Config.LogParams is set: model id, capacity, inner[17] and the constants sent,
 // plus the names (not values) of the selection headers. No prompt content.
-func (c *Client) logUpstreamParams(p GenParams) {
+// requestID is the proxy request id so the line correlates 100% with the rest.
+func (c *Client) logUpstreamParams(p GenParams, requestID string) {
 	if !c.cfg.LogParams {
 		return
 	}
@@ -106,7 +107,8 @@ func (c *Client) logUpstreamParams(p GenParams) {
 		consts[strconv.Itoa(bc.Index)] = string(b)
 	}
 	attrs := []any{"inner_17", consts["17"], "body_constants", consts, "header_names", headerNames, "images", len(p.Images),
-		"thinking_level", p.Level, "mode", p.Mode, "temporary_chat", c.TemporaryChat()}
+		"thinking_level", p.Level, "mode", p.Mode, "temporary_chat", c.TemporaryChat() || p.TemporaryChat,
+		"request_id", requestID}
 	if p.Model != nil {
 		attrs = append(attrs, "model", p.Model.Name, "model_id", p.Model.ModelID,
 			"capacity", p.Model.Capacity, "capacity_field", p.Model.CapacityField,

@@ -2,6 +2,7 @@ package apiconv
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -99,5 +100,83 @@ func TestK20_SplitPrematureReadWriteBatch(t *testing.T) {
 	kept2, deferred2 := SplitPrematureReadWriteBatch(batch2353)
 	if deferred2 != 0 || len(kept2) != 3 {
 		t.Fatalf("23:53:36 edit batch should not split: kept:%d deferred:%d", len(kept2), deferred2)
+	}
+}
+
+// K36: a reply that merely QUOTES code ("file created" in a fence or in inline
+// backticks) must not be mistaken for an unverified action claim; a real prose
+// claim outside code must still be caught.
+func TestK36_DetectUnverifiedActionClaimIgnoresCode(t *testing.T) {
+	declared := []DeclaredTool{
+		{Name: "read_file", Props: map[string]bool{"Path": true}},
+		{Name: "write_file", Props: map[string]bool{"Path": true, "Content": true}},
+		{Name: "run_command", Props: map[string]bool{"CommandLine": true}},
+	}
+	none := ToolTurnSummary{}
+
+	// (1) true positive: the claim is plain prose, no code span involved.
+	for _, prose := range []string{
+		"Le fichier a été créé sur le disque.",
+		"J'ai créé le fichier `a.go` sur le disque.",
+	} {
+		if kind, ok := DetectUnverifiedActionClaim(prose, declared, none); !ok || kind != "write_without_tool" {
+			t.Errorf("%q got (%q, %v), want (write_without_tool, true)", prose, kind, ok)
+		}
+	}
+
+	// (2) false positive: the claim only appears inside a fenced code block and
+	// the surrounding prose carries no other claim.
+	for _, fenced := range []string{
+		"Voici le message d'erreur exact du build :\n```\nfile created\n```\nRien d'autre à signaler.",
+		"Le journal affichait :\n```text\nle fichier a été créé sur le disque\nJ'ai créé le fichier a.go\n```\nFin du journal.",
+		"Le journal montrait :\n```go\n// I have created the file\n```\nRien d'autre.",
+	} {
+		if kind, ok := DetectUnverifiedActionClaim(fenced, declared, none); ok {
+			t.Errorf("fenced claim wrongly flagged as (%q, true): %q", kind, fenced)
+		}
+	}
+
+	// (3) false positive: inline backtick span only.
+	for _, inline := range []string{
+		"Le texte `the file created` vient du journal.",
+		"Le libellé `j'ai créé le fichier` est celui de l'outil.",
+		"Il affichait `I have created the file` à l'écran.",
+	} {
+		if kind, ok := DetectUnverifiedActionClaim(inline, declared, none); ok {
+			t.Errorf("inline-code claim wrongly flagged as (%q, true): %q", kind, inline)
+		}
+	}
+
+	// (4) command claims: outside code -> flagged; same sentence inside a code
+	// block -> not flagged.
+	cmdProse := "I ran the tests."
+	if kind, ok := DetectUnverifiedActionClaim(cmdProse, declared, none); !ok || kind != "command_without_tool" {
+		t.Errorf("cmdProse got (%q, %v), want (command_without_tool, true)", kind, ok)
+	}
+	cmdFenced := "Extrait du journal :\n```\nI ran the tests.\n```\nVoilà."
+	if kind, ok := DetectUnverifiedActionClaim(cmdFenced, declared, none); ok {
+		t.Errorf("fenced command claim wrongly flagged as (%q, true): %q", kind, cmdFenced)
+	}
+}
+
+// K36: stripCodeSpans drops fences and inline spans (delimiters included) and
+// keeps the prose; an unterminated fence drops the rest.
+func TestK36_StripCodeSpans(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"no_code", "Le fichier a été créé.", "Le fichier a été créé."},
+		{"fenced", "avant\n```go\nfile created\n```\naprès", "avant\n\naprès"},
+		{"fenced_no_lang", "a```b\nc```d", "ad"},
+		{"inline", "avant `the file created` après", "avant  après"},
+		{"unterminated_fence", "avant\n```\nfile created", "avant\n"},
+		{"unterminated_inline", "avant `the file created", "avant "},
+		{"empty", "", ""},
+	}
+	for _, tc := range cases {
+		if got := stripCodeSpans(tc.in); got != tc.want {
+			t.Errorf("%s: stripCodeSpans(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+	if got := stripCodeSpans("```\nfile created\n```"); strings.TrimSpace(got) != "" {
+		t.Errorf("fence-only input must strip to whitespace, got %q", got)
 	}
 }

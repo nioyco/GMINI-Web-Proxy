@@ -80,6 +80,11 @@ type cookieAutoRefresher struct {
 	pausedAtGen         uint64
 	running             bool
 	runDone             chan struct{}
+	quietSuppressed     bool
+	quietActivityGen    uint64
+	lastSkipReason      string
+	lastSkipAt          time.Time
+	onSuccess           func()
 }
 
 func newCookieAutoRefresher(cfg *Config, client *gemini.Client, log *slog.Logger) *cookieAutoRefresher {
@@ -251,7 +256,7 @@ func (r *cookieAutoRefresher) startRunLocked(now time.Time, trigger string) chan
 // token has reached the configured age.
 func (r *cookieAutoRefresher) Tick() {
 	r.mu.Lock()
-	if !r.enabled {
+	if !r.enabled || r.client == nil {
 		r.mu.Unlock()
 		return
 	}
@@ -265,10 +270,24 @@ func (r *cookieAutoRefresher) Tick() {
 		r.mu.Unlock()
 		return
 	}
-	if !r.client.AcquireBackground(gemini.FamilyApp, "cookie_auto_refresh_background") {
+	actGen := r.client.UserActivityGen()
+	if r.quietSuppressed && actGen == r.quietActivityGen {
 		r.mu.Unlock()
 		return
 	}
+	if actGen != r.quietActivityGen {
+		r.quietSuppressed = false
+	}
+	if !r.client.AcquireBackground(gemini.FamilyApp, "cookie_auto_refresh_background") {
+		if r.client.IsIdleForBackground(time.Time{}) && r.client.UserActivityGen() == actGen {
+			r.quietSuppressed = true
+			r.quietActivityGen = actGen
+		}
+		r.mu.Unlock()
+		return
+	}
+	r.quietSuppressed = false
+	r.quietActivityGen = actGen
 	r.startRunLocked(now, "background")
 	r.mu.Unlock()
 }
@@ -277,13 +296,39 @@ func (r *cookieAutoRefresher) Tick() {
 // enabled via the UI toggle and the token is older than the configured interval,
 // runs a synchronous refresh (capped at 45 s) even when inactivity was shorter
 // than activityWindow (10–90 min blind spot when Tick() is quiet-gated; K18 T3).
+func (r *cookieAutoRefresher) logSkipLocked(now time.Time, reason string) {
+	if reason == "" {
+		return
+	}
+	dedupWin := r.interval
+	if dedupWin <= 0 {
+		dedupWin = 30 * time.Minute
+	}
+	if reason == r.lastSkipReason && !r.lastSkipAt.IsZero() && now.Sub(r.lastSkipAt) < dedupWin {
+		return
+	}
+	r.lastSkipReason = reason
+	r.lastSkipAt = now
+	age, src := r.tokenAge()
+	ageMin := -1
+	if src != "unknown" {
+		ageMin = int(age.Minutes())
+	}
+	r.log.Info("cookie_auto_refresh_skipped", "reason", reason, "token_age_min", ageMin)
+}
+
 func (r *cookieAutoRefresher) PrepareRequest(ctx context.Context, onWait func()) {
 	r.client.RecordUserActivity()
 	r.mu.Lock()
 	now := r.nowFn().Round(0)
 	_ = r.lastActivityAt.IsZero() || now.Sub(r.lastActivityAt.Round(0)) > r.activityWindow
 	r.lastActivityAt = now
-	if !r.enabled || !r.tokenDueLocked(now) {
+	r.quietSuppressed = false
+	due := r.tokenDueLocked(now)
+	if !r.enabled || !due {
+		if due && !r.enabled {
+			r.logSkipLocked(now, "disabled")
+		}
 		r.mu.Unlock()
 		return
 	}
@@ -291,8 +336,10 @@ func (r *cookieAutoRefresher) PrepareRequest(ctx context.Context, onWait func())
 	if r.running {
 		waitCh = r.runDone
 	} else {
-		if ok, _ := r.canLaunchLocked(now); ok && r.client.AcquireBackground(gemini.FamilyApp, "cookie_auto_refresh_on_demand") {
+		if ok, reason := r.canLaunchLocked(now); ok && r.client.AcquireBackground(gemini.FamilyApp, "cookie_auto_refresh_on_demand") {
 			waitCh = r.startRunLocked(now, "on_demand")
+		} else if !ok {
+			r.logSkipLocked(now, reason)
 		}
 	}
 	waitCap := r.waitTimeout
@@ -319,11 +366,21 @@ func (r *cookieAutoRefresher) TriggerEarly() {
 	r.client.RecordUserActivity()
 	r.mu.Lock()
 	now := r.nowFn()
-	if !r.enabled || r.running {
+	if r.running {
 		r.mu.Unlock()
 		return
 	}
-	if ok, _ := r.canLaunchLocked(now); !ok {
+	if !r.enabled {
+		if r.tokenDueLocked(now) {
+			r.logSkipLocked(now, "disabled")
+		}
+		r.mu.Unlock()
+		return
+	}
+	if ok, reason := r.canLaunchLocked(now); !ok {
+		if r.tokenDueLocked(now) {
+			r.logSkipLocked(now, reason)
+		}
 		r.mu.Unlock()
 		return
 	}
@@ -393,6 +450,7 @@ func (r *cookieAutoRefresher) run(trigger string, done chan struct{}) {
 	}
 	failures := r.consecutiveFailures
 	paused := r.paused
+	onSuccess := r.onSuccess
 	r.mu.Unlock()
 
 	if ok {
@@ -401,6 +459,9 @@ func (r *cookieAutoRefresher) run(trigger string, done chan struct{}) {
 			"ok", true,
 			"exit_code", exitCode,
 			"duration_ms", dur.Milliseconds())
+		if onSuccess != nil {
+			onSuccess()
+		}
 	} else {
 		r.log.Warn("cookie_auto_refresh",
 			"trigger", trigger,
@@ -478,6 +539,7 @@ func (r *cookieAutoRefresher) ToggleFrom(on *bool, source string) cookieAutoRefr
 			}
 			r.paused = false
 			r.consecutiveFailures = 0
+			r.quietSuppressed = false
 		}
 		changed = r.enabled != prev
 		enabled = r.enabled

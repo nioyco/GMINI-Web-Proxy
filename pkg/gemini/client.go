@@ -130,11 +130,12 @@ type Client struct {
 
 	// Build label, optionally auto-resolved from the Gemini page. It is only
 	// refreshed when the page is loaded (startup without a recent state, session
-	// reload): there is no TTL any more (AUDIT-13 A6).
+	// reload) or opportunistically when >6h old during active calls.
 	blMu        sync.Mutex
 	bl          string
 	blAuto      bool
 	blAt        time.Time
+	blTryAt     time.Time
 	blResolving bool
 
 	// XSRF "at" token (SNlM0e), scraped from the signed-in page. Required on
@@ -156,13 +157,15 @@ type Client struct {
 	catalogAfterCookieAt time.Time            // last listModels attempt after a cookie refresh (K14 P3)
 	catalogWarnAt        time.Time            // last "model list refresh failed" WARN (guarded by modelMu)
 	absentWarnAt         map[string]time.Time // last "model absent from the last catalogue" WARN per model
+	aliasWarnAt          map[string]time.Time // last "model_alias_resolved" INFO per asked->resolved pair
 	// withdrawn holds models that a later catalogue no longer lists (observed when
 	// the web usage limit is reached). In memory only (guarded by modelMu).
 	withdrawn map[string]WithdrawnModel
-	// confirmedNames maps ModelID -> latest confirmed ServedName from Google's
-	// real StreamGenerate responses (inner[39]/inner[42]), used to keep catalog
-	// names accurate when otAQ7b lags behind (e.g. 95a4c0abcba24364 -> "4 Argon").
-	confirmedNames map[string]string
+	// confirmedNames maps ModelID -> latest confirmed ServedName (plus otAQ7b
+	// display/family signature) from Google's real StreamGenerate responses,
+	// used to keep catalog names accurate when otAQ7b lags behind while
+	// yielding when Google switches a hex id to a new model family/display name.
+	confirmedNames map[string]ConfirmedNameEntry
 	// suspectCheckAt is the last catalogue check triggered by a suspect reply.
 	suspectCheckAt time.Time
 	// sessionDegraded is set when listModels shrinks to <=1 model while >=2 were known.
@@ -178,8 +181,25 @@ type Client struct {
 	tempChatPref    atomic.Int32 // -1 unset (uses cfg.TemporaryChat), 0 false, 1 true
 
 	// Content-free journal of generations (served.go) & token ledger (tokens.go).
-	calls  callJournal
-	tokens tokenLedger
+	calls       callJournal
+	tokens      tokenLedger
+	binaryTagMu sync.RWMutex
+	binaryTag   string
+}
+
+// SetBinaryTag sets the proxy binary tag (e.g. "K55") stamped on new CallRecords.
+func (c *Client) SetBinaryTag(tag string) {
+	c.binaryTagMu.Lock()
+	c.binaryTag = strings.TrimSpace(tag)
+	c.binaryTagMu.Unlock()
+}
+
+// BinaryTag returns the proxy binary tag stamped on new CallRecords.
+func (c *Client) BinaryTag() string {
+	c.binaryTagMu.RLock()
+	tag := c.binaryTag
+	c.binaryTagMu.RUnlock()
+	return tag
 }
 
 // New builds a Client with an HTTP client honouring the configured timeout and
@@ -232,8 +252,9 @@ type GenParams struct {
 	// Level and Mode are the web "thinking level" (inner[80]: 1 low, 4 medium,
 	// 2 high) and "mode" (inner[79], e.g. 3 = Pro) codes. 0 = not sent (default:
 	// the body is byte-identical to the historical one). EXPERIMENTAL.
-	Level int
-	Mode  int
+	Level         int
+	Mode          int
+	TemporaryChat bool // per-request override setting inner[45] = 1 (e.g. stall retries)
 }
 
 // InputImage is an image to attach to a generation request. Exactly one of Data
@@ -261,7 +282,7 @@ func (c *Client) buildBody(p GenParams, images []uploadedImage) (body, reqUUID s
 		inner[bc.Index] = bc.Value
 	}
 	inner[59] = reqUUID
-	if c.TemporaryChat() {
+	if c.TemporaryChat() || p.TemporaryChat {
 		inner[45] = 1
 	}
 	if p.Level > 0 || p.Mode > 0 {
@@ -343,7 +364,7 @@ func (c *Client) ResolveBuildLabel(ctx context.Context) {
 	bl := c.fetchBuildLabel(ctx)
 	c.blMu.Lock()
 	if bl != "" {
-		c.bl, c.blAt = bl, time.Now()
+		c.bl, c.blAt = bl, nowFn().Round(0)
 	}
 	c.blResolving = false
 	c.blMu.Unlock()
@@ -351,6 +372,55 @@ func (c *Client) ResolveBuildLabel(ctx context.Context) {
 		c.log.Info("resolved gemini build label", "bl", bl)
 	} else {
 		c.log.Warn("could not resolve gemini build label; using fallback", "fallback", c.CurrentBL())
+	}
+}
+
+const (
+	buildLabelMaxAge          = 6 * time.Hour
+	buildLabelRefreshCooldown = 30 * time.Minute
+)
+
+// maybeRefreshBuildLabel opportunistically refreshes the build label when it
+// is missing or older than buildLabelMaxAge (6 h) during an active call
+// (RefreshModels / RotateCookie). It skips when idle_on_demand is quiet, obeys
+// FamilyApp anti-bot backoff and a 30 min cooldown, and never fails its caller.
+func (c *Client) maybeRefreshBuildLabel(ctx context.Context, reason string) {
+	now := nowFn().Round(0)
+	c.blMu.Lock()
+	need := c.blAuto && !c.blResolving &&
+		(c.blAt.IsZero() || now.Sub(c.blAt.Round(0)) > buildLabelMaxAge) &&
+		(c.blTryAt.IsZero() || now.Sub(c.blTryAt.Round(0)) >= buildLabelRefreshCooldown)
+	prevBLAt := c.blAt
+	c.blMu.Unlock()
+	if !need {
+		return
+	}
+	if c.IsIdleForBackground(now) {
+		return
+	}
+	if !c.AcquireBackground(FamilyApp, reason) {
+		return
+	}
+	c.blMu.Lock()
+	if !c.blAuto || c.blResolving ||
+		(!c.blAt.IsZero() && now.Sub(c.blAt.Round(0)) <= buildLabelMaxAge) ||
+		(!c.blTryAt.IsZero() && now.Sub(c.blTryAt.Round(0)) < buildLabelRefreshCooldown) {
+		c.blMu.Unlock()
+		return
+	}
+	c.blTryAt = now
+	c.blMu.Unlock()
+
+	rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	c.invalidateAppPage()
+	c.ResolveBuildLabel(rctx)
+
+	c.blMu.Lock()
+	updated := c.blAt.After(prevBLAt)
+	c.blMu.Unlock()
+	if updated {
+		c.saveState()
 	}
 }
 
@@ -415,7 +485,7 @@ func (c *Client) applyBuildLabel(html []byte) {
 	}
 	if m := buildLabelRe.FindSubmatch(html); m != nil {
 		c.blMu.Lock()
-		c.bl, c.blAt = string(m[1]), time.Now()
+		c.bl, c.blAt = string(m[1]), nowFn().Round(0)
 		c.blMu.Unlock()
 	}
 }
@@ -747,9 +817,13 @@ func (c *Client) generateAttempts(ctx context.Context, p GenParams, images []upl
 		return "", err
 	}
 	hadAt := c.currentAt() != ""
+	rid := ""
+	if met != nil {
+		rid = met.ID
+	}
 	if first {
 		met.request(len(p.Prompt), len(body))
-		c.logUpstreamParams(p)
+		c.logUpstreamParams(p, rid)
 	}
 	if ctx.Err() != nil { // cancelled while uploading images: do not call Gemini
 		return "", c.clientCancelled(ctx, met, start)
@@ -860,12 +934,17 @@ func (c *Client) generateAttempts(ctx context.Context, p GenParams, images []upl
 // generation abandoned because ctx ended (client disconnect, deadline or shutdown
 // abort) and returns the context error.
 func (c *Client) clientCancelled(ctx context.Context, met *CallMetrics, start time.Time) error {
-	attrs := []any{"elapsed_ms", time.Since(start).Milliseconds(), "cause", context.Cause(ctx)}
+	var attrs []any
+	if met != nil && met.ID != "" {
+		attrs = append(attrs, "request_id", met.ID)
+	}
+	attrs = append(attrs, "elapsed_ms", time.Since(start).Milliseconds(), "cause", context.Cause(ctx))
 	if met != nil {
 		attrs = append(attrs,
 			"upstream_attempts", met.Attempts.Load(), "upstream_retries", met.Retries.Load(),
 			"first_byte_ms", met.FirstByteMS.Load(), "upstream_ms", met.UpstreamMS.Load(),
-			"upstream_req_bytes", met.ReqBytes.Load(), "upstream_resp_bytes", met.RespBytes.Load())
+			"upstream_req_bytes", met.ReqBytes.Load(), "upstream_resp_bytes", met.RespBytes.Load(),
+			"upstream_heartbeats", met.Heartbeats.Load())
 	}
 	c.log.Warn("client_cancelled", attrs...)
 	return ctx.Err()
@@ -923,9 +1002,13 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 		return err
 	}
 	met := metricsFrom(ctx)
+	rid := ""
+	if met != nil {
+		rid = met.ID
+	}
 	if n == 0 {
 		met.request(len(p.Prompt), len(body))
-		c.logUpstreamParams(p)
+		c.logUpstreamParams(p, rid)
 	}
 	met.attempt(n)
 	t0 := time.Now()
@@ -938,33 +1021,36 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 	var rawTimesMS []int64
 	rawBytes := 0
 	sent := false
+	logClientCancelled := false
 	defer func() {
 		met.upstream(t0, respBytes)
-		c.logFrameShape(shape)
+		c.logFrameShape(shape, rid, c.TemporaryChat() || p.TemporaryChat)
 		c.writeTrace(met, p, traceResult{Stream: true, Text: prevText, Thought: prevThought, Err: runErr,
 			Start: t0, Frames: shape.frames, FirstTextMS: shape.firstTextMS, LastFrameMS: shape.lastFrameMS, Raw: rawLines, RawTimesMS: rawTimesMS})
-		if !sent {
-			return // nothing was asked of Gemini (cancelled before the call)
-		}
-		rec := newCallRecord(met, p, t0)
-		rec.Stream, rec.Frames = true, shape.frames
-		rec.FirstTextMS, rec.FirstThoughtMS = shape.firstTextMS, shape.firstThoughtMS
-		rec.TextBytes, rec.ThoughtBytes = len(prevText), len(prevThought)
-		rec.TextTokens, rec.ThoughtTokens = EstimateTokensForText(prevText), EstimateTokensForText(prevThought)
-		if runErr != nil {
-			if errors.Is(runErr, ErrEarlyStopAborted) {
-				rec.Error = "early_stop"
-			} else if errors.Is(runErr, ErrInternalToolRetry) {
-				rec.Error = "internal_tool_retry"
+		if sent {
+			rec := newCallRecord(met, p, t0)
+			rec.Stream, rec.Frames = true, shape.frames
+			rec.FirstTextMS, rec.FirstThoughtMS = shape.firstTextMS, shape.firstThoughtMS
+			rec.TextBytes, rec.ThoughtBytes = len(prevText), len(prevThought)
+			rec.TextTokens, rec.ThoughtTokens = EstimateTokensForText(prevText), EstimateTokensForText(prevThought)
+			if runErr != nil {
+				if errors.Is(runErr, ErrEarlyStopAborted) {
+					rec.Error = "early_stop"
+				} else if errors.Is(runErr, ErrInternalToolRetry) {
+					rec.Error = "internal_tool_retry"
+				} else {
+					rec.Error = "stream_interrupted"
+				}
+			} else if prevText == "" {
+				rec.Error = "empty"
 			} else {
-				rec.Error = "stream_interrupted"
+				scan.cannedError = IsCannedErrorReply(prevText, scan.errorMarker)
 			}
-		} else if prevText == "" {
-			rec.Error = "empty"
-		} else {
-			scan.cannedError = IsCannedErrorReply(prevText, scan.errorMarker)
+			c.recordCall(rec, scan)
 		}
-		c.recordCall(rec, scan)
+		if logClientCancelled {
+			_ = c.clientCancelled(ctx, met, t0)
+		}
 	}()
 	earlyCause := func() (error, bool) {
 		cause := context.Cause(ctx)
@@ -984,7 +1070,8 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 			runErr = err
 			return err
 		}
-		return c.clientCancelled(ctx, met, t0)
+		logClientCancelled = true
+		return ctx.Err()
 	}
 	sent = true
 	resp, err := c.http.Do(req)
@@ -994,7 +1081,8 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 				runErr = cerr
 				return cerr
 			}
-			runErr = c.clientCancelled(ctx, met, t0)
+			logClientCancelled = true
+			runErr = ctx.Err()
 			return runErr
 		}
 		runErr = fmt.Errorf("gemini request failed: %w", cleanErr(err))
@@ -1020,7 +1108,8 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 				runErr = cerr
 				return cerr
 			}
-			runErr = c.clientCancelled(ctx, met, t0)
+			logClientCancelled = true
+			runErr = ctx.Err()
 			return runErr
 		}
 		line, readErr := reader.ReadString('\n')
@@ -1102,16 +1191,17 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 			}
 		}
 		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				return nil
-			}
 			if ctx.Err() != nil {
 				if cerr, ok := earlyCause(); ok {
 					runErr = cerr
 					return cerr
 				}
-				runErr = c.clientCancelled(ctx, met, t0)
+				logClientCancelled = true
+				runErr = ctx.Err()
 				return runErr
+			}
+			if errors.Is(readErr, io.EOF) {
+				return nil
 			}
 			runErr = readErr
 			return readErr
@@ -1239,24 +1329,26 @@ func wrbCandidates(line string) []any {
 	return parts
 }
 
-// parseWrbLine extracts the text strings of a "wrb.fr" response line: the model
-// text is nested at inner2[4][*][1][*].
+// parseWrbLine extracts the text strings of the first valid candidate of a
+// "wrb.fr" response line: the model text is nested at inner2[4][0][1][*].
+// Stopping at the first candidate avoids picking Choice B on Google A/B screens.
 func parseWrbLine(line string) []string {
 	var out []string
 	for _, part := range wrbCandidates(line) {
 		ps, ok := part.([]any)
-		if !ok || len(ps) <= 1 {
-			continue
-		}
-		texts, ok := ps[1].([]any)
 		if !ok {
 			continue
 		}
-		for _, t := range texts {
-			if s, ok := t.(string); ok && s != "" {
-				out = append(out, s)
+		if len(ps) > 1 {
+			if texts, ok := ps[1].([]any); ok {
+				for _, t := range texts {
+					if s, ok := t.(string); ok && s != "" {
+						out = append(out, s)
+					}
+				}
 			}
 		}
+		break
 	}
 	return out
 }
@@ -1498,20 +1590,21 @@ func parseFrame(line string) (frame, bool) {
 				}
 			}
 		}
-		if fr.sizes == nil {
-			fr.sizes = map[int]int{}
-			for i, v := range ps {
-				if n := stringBytes(v, 0); n > 0 {
-					fr.sizes[i] = n
-				}
-			}
-			if l1, ok := indexAny(ps, thoughtIndex).([]any); ok {
-				if l2, ok := indexAny(l1, 0).([]any); ok {
-					fr.thought, _ = indexAny(l2, 0).(string)
-				}
-				fr.thoughts = leafSizes(l1, 0, nil)
+		fr.sizes = map[int]int{}
+		for i, v := range ps {
+			if n := stringBytes(v, 0); n > 0 {
+				fr.sizes[i] = n
 			}
 		}
+		if l1, ok := indexAny(ps, thoughtIndex).([]any); ok {
+			if l2, ok := indexAny(l1, 0).([]any); ok {
+				fr.thought, _ = indexAny(l2, 0).(string)
+			}
+			fr.thoughts = leafSizes(l1, 0, nil)
+		}
+		// Lock onto the first valid candidate (Choice A) so streaming never
+		// mixes thoughts from Choice A with text from Choice B on A/B screens.
+		break
 	}
 	return fr, true
 }
@@ -1598,8 +1691,9 @@ func (s *frameShape) add(fr frame, at time.Duration) {
 }
 
 // logFrameShape emits one "upstream_frame_shape" line (sizes only, never content)
-// when parameter logging is on.
-func (c *Client) logFrameShape(s *frameShape) {
+// when parameter logging is on. requestID correlates the line with the request log
+// and temporaryChat records the mode actually used upstream.
+func (c *Client) logFrameShape(s *frameShape, requestID string, temporaryChat bool) {
 	if !c.cfg.LogParams || s.frames == 0 {
 		return
 	}
@@ -1616,7 +1710,8 @@ func (c *Client) logFrameShape(s *frameShape) {
 		"thought_bytes", s.thought, "thought_index", thoughtIndex,
 		"candidate_string_bytes", strings.Join(parts, ","),
 		"first_thought_ms", s.firstThoughtMS, "first_text_ms", s.firstTextMS, "last_frame_ms", s.lastFrameMS,
-		"frame_times_ms", fmt.Sprint(s.times), "thought_leaf_bytes", fmt.Sprint(s.thoughts))
+		"frame_times_ms", fmt.Sprint(s.times), "thought_leaf_bytes", fmt.Sprint(s.thoughts),
+		"request_id", requestID, "temporary_chat", temporaryChat)
 }
 
 // indexSlice returns arr[i] as a []any if possible.

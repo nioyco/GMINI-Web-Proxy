@@ -156,3 +156,101 @@ func TestStreamAuthErrorReloadsOnce(t *testing.T) {
 		t.Errorf("err=%v out=%q generations=%d /app=%d", err, out.String(), g.gen, g.app)
 	}
 }
+
+func TestBLOpportunisticRefresh(t *testing.T) {
+	origNow := nowFn
+	curNow := time.Date(2026, 11, 19, 6, 0, 0, 0, time.UTC)
+	nowFn = func() time.Time { return curNow }
+	defer func() { nowFn = origNow }()
+
+	origCatInterval := catalogManualMinInterval
+	catalogManualMinInterval = 0
+	defer func() { catalogManualMinInterval = origCatInterval }()
+
+	var appCalls, appStatus int
+	curBL := "boq_gemini-web-uiserver_20261118.02_p0"
+	catPayload := `)]}'` + "\n" + `[["wrb.fr","otAQ7b","[null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,[[\"8c46e95b1a07cecc\",\"Auto\",\"Auto\",null,null,null,null,null,\"\",null,null,\"Auto\",null,null,null,null,null,6],[\"56fdd199312815e2\",\"4 Hydrogen\",\"4 Hydrogen\",null,null,null,null,null,\"\",null,null,\"Everyday help\",null,null,null,null,null,1]],[0,1],[1,1]]"]]`
+
+	c, _ := newAutoBLClient(t, Config{
+		Cookie:    "SAPISID=sapi; __Secure-1PSIDTS=ts",
+		IdleQuiet: 10 * time.Minute,
+	}, rtFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/app"):
+			appCalls++
+			if appStatus >= 400 {
+				return &http.Response{StatusCode: appStatus, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+			}
+			html := `<html>"SNlM0e":"AT_TOK","cfb2h":"` + curBL + `"</html>`
+			return resp200(r, html), nil
+		case strings.Contains(r.URL.Path, "batchexecute"):
+			return resp200(r, catPayload), nil
+		case strings.Contains(r.URL.Host, "accounts.google.com"):
+			return resp200(r, ""), nil
+		default:
+			return resp200(r, ""), nil
+		}
+	}))
+	appStatus = 200
+	c.RecordUserActivity()
+	if got := c.CheckAuth(context.Background()); got != "authenticated" {
+		t.Fatalf("CheckAuth = %q", got)
+	}
+	if appCalls != 1 || c.CurrentBL() != "boq_gemini-web-uiserver_20261118.02_p0" {
+		t.Fatalf("initial appCalls=%d bl=%q", appCalls, c.CurrentBL())
+	}
+
+	// 1) blAt <= 6 h: active RefreshModels must NOT re-fetch /app.
+	curNow = curNow.Add(5 * time.Hour)
+	c.RecordUserActivity()
+	curBL = "boq_gemini-web-uiserver_20261118.09_p0"
+	if err := c.RefreshModels(context.Background()); err != nil {
+		t.Fatalf("RefreshModels(<6h): %v", err)
+	}
+	if appCalls != 1 || c.CurrentBL() != "boq_gemini-web-uiserver_20261118.02_p0" {
+		t.Fatalf("expected no /app refresh before 6h, appCalls=%d bl=%q", appCalls, c.CurrentBL())
+	}
+
+	// 2) blAt > 6 h, idle_on_demand (no user activity for >10m): RotateCookie must NOT call /app.
+	curNow = curNow.Add(2 * time.Hour) // +7h total, lastUserActivity was 2h ago (> 10m IdleQuiet)
+	c.RotateCookie(context.Background())
+	if appCalls != 1 {
+		t.Fatalf("idle RotateCookie called /app (%d), want 1", appCalls)
+	}
+
+	// 3) blAt > 6 h and active: RefreshModels triggers opportunistic /app refresh and updates bl.
+	c.RecordUserActivity()
+	if err := c.RefreshModels(context.Background()); err != nil {
+		t.Fatalf("RefreshModels(>6h): %v", err)
+	}
+	if appCalls != 2 || c.CurrentBL() != "boq_gemini-web-uiserver_20261118.09_p0" {
+		t.Fatalf("expected /app refresh after 6h, appCalls=%d bl=%q", appCalls, c.CurrentBL())
+	}
+
+	// 4) Non-fatal /app error + 30 min anti-spam cooldown via RotateCookie.
+	curNow = curNow.Add(7 * time.Hour)
+	c.RecordUserActivity()
+	appStatus = 500
+	curBL = "boq_gemini-web-uiserver_20261119.01_p0"
+	if err := c.RefreshModels(context.Background()); err != nil {
+		t.Fatalf("RefreshModels must not fail on /app 500: %v", err)
+	}
+	if appCalls != 3 || c.CurrentBL() != "boq_gemini-web-uiserver_20261118.09_p0" {
+		t.Fatalf("after 500: appCalls=%d bl=%q", appCalls, c.CurrentBL())
+	}
+	// Inside 30m cooldown: RotateCookie must NOT hit /app again.
+	curNow = curNow.Add(15 * time.Minute)
+	c.RecordUserActivity()
+	appStatus = 200
+	c.RotateCookie(context.Background())
+	if appCalls != 3 {
+		t.Fatalf("cooldown violated on RotateCookie: appCalls=%d, want 3", appCalls)
+	}
+	// After 30m cooldown elapses: RotateCookie refreshes bl cleanly.
+	curNow = curNow.Add(20 * time.Minute)
+	c.RecordUserActivity()
+	c.RotateCookie(context.Background())
+	if appCalls != 4 || c.CurrentBL() != "boq_gemini-web-uiserver_20261119.01_p0" {
+		t.Fatalf("after cooldown RotateCookie: appCalls=%d bl=%q", appCalls, c.CurrentBL())
+	}
+}

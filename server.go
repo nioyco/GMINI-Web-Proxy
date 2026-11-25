@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -41,16 +43,22 @@ type Server struct {
 	// keepaliveOverride, when > 0, replaces the cfg-derived keepalive interval
 	// (sub-second values for tests). Never set in production.
 	keepaliveOverride time.Duration
-	// heldDurationOverride and heldNoteOverride override the K9 120 s held cap
-	// and 30 s progress note period in tests. Never set in production.
-	heldDurationOverride       time.Duration
-	heldNoteOverride           time.Duration
-	statusNoteOverride         time.Duration
-	cannedRetryTimeoutOverride time.Duration
-	noContentTimeoutOverride   time.Duration
-	noContentNoteOverride      time.Duration
-	initialWaitNoteOverride    time.Duration
-	codeRefWaitOverride        time.Duration
+	// heldDurationOverride, heldStallOverride, and heldNoteOverride override the
+	// K9 120 s held cap, 60 s stall cap, and 30 s progress note period in tests.
+	// Never set in production.
+	heldDurationOverride           time.Duration
+	heldStallOverride              time.Duration
+	heldStallFastOverride          time.Duration
+	stallRetryBackoffOverride      time.Duration
+	heldNoteOverride               time.Duration
+	statusNoteOverride             time.Duration
+	cannedRetryTimeoutOverride     time.Duration
+	noContentTimeoutOverride       time.Duration
+	nonFinalStallNoContentOverride time.Duration
+	noContentNoteOverride          time.Duration
+	initialWaitNoteOverride        time.Duration
+	initialSilenceTimeoutOverride  time.Duration
+	codeRefWaitOverride            time.Duration
 	// uiToken protects the API of the local management page (ui.go); empty: page off.
 	uiToken string
 
@@ -73,7 +81,43 @@ type Server struct {
 	codeRefMu    sync.Mutex
 	codeRefStats []codeRefStat
 
+	cfgMu sync.RWMutex
+
 	autoRefresh *cookieAutoRefresher
+	agPatch     agPatchManager
+
+	// diag is the anonymized diagnostics ring buffer (K37/K38). It stores only
+	// metadata (never secrets, cookies, keys, or prompt/response content) and is
+	// persisted to cfg.DiagFile so past events survive a restart.
+	diag *diagRing
+	// diagExportBusy serializes /_ui/api/diagnostics/export runs.
+	diagExportBusy atomic.Bool
+
+	// quotaPause is the K41 global premium-model pause (see quotapause.go).
+	quotaPause quotaPauseTracker
+
+	// toolsDB is the K46 anonymized tool-call & incident database (see tools_db.go).
+	toolsDB *toolsDB
+}
+
+func (s *Server) cfgSnapshot() Config {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return *s.cfg
+}
+
+func (s *Server) cannedErrorRetryMode() string {
+	s.cfgMu.RLock()
+	v := s.cfg.CannedErrorRetry
+	s.cfgMu.RUnlock()
+	return normalizeCannedErrorRetry(v)
+}
+
+func (s *Server) noContentSecSetting() int {
+	s.cfgMu.RLock()
+	v := s.cfg.NoContentSec
+	s.cfgMu.RUnlock()
+	return nonNegative(v, 0)
 }
 
 type codeRefStat struct {
@@ -158,6 +202,9 @@ func (s *Server) keepaliveInterval() time.Duration {
 }
 
 func newServer(cfg *Config, client *gemini.Client, logger *slog.Logger) *Server {
+	if client != nil {
+		client.SetBinaryTag(currentBinaryTag())
+	}
 	apiconv.SetToolPromptRules(!cfg.DisableToolPromptRules)
 	apiconv.SetToolPromptReminder(cfg.ToolPromptReminder)
 	apiconv.SetNoInternalCodeExecRule(cfg.NoInternalCodeExecRule)
@@ -170,9 +217,18 @@ func newServer(cfg *Config, client *gemini.Client, logger *slog.Logger) *Server 
 		generate:   client.Generate,
 		started:    time.Now(),
 		flightHist: inFlightHistory{path: cfg.FlightsFile},
+		diag:       newDiagRing(diagRingCapacity, cfg.DiagFile),
+		toolsDB:    newToolsDB(defaultToolsDBPath(), toolsDBMaxEntries),
 	}
 	srv.flightHist.load()
+	srv.diag.load()
+	srv.diag.seed(client.RecentCalls())
 	srv.autoRefresh = newCookieAutoRefresher(cfg, client, logger)
+	if srv.autoRefresh != nil {
+		srv.autoRefresh.onSuccess = func() {
+			srv.resumeStaleTokenQuotaPause(context.Background(), "cookie_refresh_stale_token")
+		}
+	}
 	if cfg.UIEnabled {
 		srv.uiToken = newUIToken()
 	}
@@ -187,8 +243,10 @@ func newServer(cfg *Config, client *gemini.Client, logger *slog.Logger) *Server 
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleHealth)
+	mux.HandleFunc("GET /favicon.ico", s.handleFavicon)
 	mux.Handle("GET /_status", s.withAuth(s.handleStatus))
 	mux.Handle("POST /_models/refresh", s.withAuth(s.handleModelsRefresh))
+	mux.Handle("POST /_models/resume", s.withAuth(s.handleModelsResume))
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /v1beta/models", s.handleModelsGoogle)
 	mux.Handle("POST /v1/chat/completions", s.withAuth(s.handleChat))
@@ -198,12 +256,22 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("POST /v1beta/models/{model}", s.withAuth(s.handleGoogleGenerate))
 	mux.HandleFunc("GET /_ui", s.handleUI)
 	mux.HandleFunc("GET /_ui/api/state", s.handleUIState)
+	mux.HandleFunc("GET /_ui/api/diagnostics", s.handleUIDiagnostics)
+	mux.HandleFunc("POST /_ui/api/diagnostics/export", s.handleUIDiagnosticsExport)
+	mux.HandleFunc("GET /_ui/api/tools-db", s.handleUIToolsDB)
+	mux.HandleFunc("GET /_ui/api/tools-db/export", s.handleUIToolsDBExport)
 	mux.HandleFunc("POST /_ui/api/models/refresh", s.handleUIRefresh)
+	mux.HandleFunc("POST /_ui/api/quota/resume", s.handleUIQuotaResume)
 	mux.HandleFunc("POST /_ui/api/cookie-refresh/toggle", s.handleUICookieRefreshToggle)
 	mux.HandleFunc("POST /_ui/api/cookie-refresh/run", s.handleUICookieRefreshRun)
+	mux.HandleFunc("POST /_ui/api/cookies/refresh", s.handleUICookieRefreshRun)
 	mux.HandleFunc("POST /_ui/api/temporary-chat/toggle", s.handleUITemporaryChatToggle)
+	mux.HandleFunc("POST /_ui/api/guardrails/set", s.handleUIGuardrailsSet)
 	mux.HandleFunc("POST /_ui/api/config/reload", s.handleUIConfigReload)
 	mux.HandleFunc("POST /_ui/api/antigravity/launch", s.handleUILaunch)
+	mux.HandleFunc("POST /_ui/api/antigravity/sync-models", s.handleUIAntigravitySync)
+	mux.HandleFunc("POST /_ui/api/antigravity/patch", s.handleUIAntigravityPatch)
+	mux.HandleFunc("GET /_ui/api/antigravity/patch/status", s.handleUIAntigravityPatchStatus)
 	mux.HandleFunc("/", s.handleNotFound)
 	return s.withTracking(s.withHostCheck(s.withCORS(mux)))
 }
@@ -329,6 +397,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		sendError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if s.quotaPreflight(w, r, m, flavorOpenAI) {
+		return
+	}
 
 	prompt, images, toolsActive := req.Prompt()
 	s.noteRequestParams(r.Context(), "chat", body, len(images))
@@ -403,6 +474,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		sendError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
 	}
+	if s.quotaAfterGenerate(r.Context(), p) {
+		s.sendQuotaPause429(w, flavorOpenAI)
+		return
+	}
 	text, toolCalls := s.finishText(r.Context(), text, toolsActive, req.DeclaredTools())
 	if text != "" || len(toolCalls) > 0 {
 		s.recordModelSuccess(m.Name)
@@ -454,12 +529,17 @@ func (s *Server) streamChat(ctx context.Context, w http.ResponseWriter, cid, mod
 	emit, finish := s.echoEmitter(ctx, emitRaw, &acc)
 
 	var hasCandidate, hasThought bool
-	err := s.client.GenerateStreamEvents(gctx, p, gemini.StreamHandlers{
+	guard := s.newQuotaGuard(ctx, p, func() bool { return sse != nil }, cancel)
+	err := s.client.GenerateStreamEvents(gctx, p, guard.wrap(gemini.StreamHandlers{
 		Text:      emit,
 		Thought:   func(string) { hasThought = true },
 		Candidate: func() { hasCandidate = true },
-	})
+	}))
 	finish()
+	if sse == nil && guard.isTripped() {
+		s.sendQuotaPause429(w, flavorOpenAI)
+		return
+	}
 	if sse == nil {
 		// Nothing was streamed yet, so a normal HTTP error status is still possible.
 		// If Google closed the stream with no candidate, text, or thought, return
@@ -541,6 +621,15 @@ func (s *Server) streamChatTools(ctx context.Context, w http.ResponseWriter, cid
 // on p. The effort comes from the "model@effort" suffix, else the request's
 // reasoning_effort, else GEMINI_THINKING_LEVEL. Nothing is sent when none is set.
 func (s *Server) applyEffort(p *gemini.GenParams, m *gemini.AvailableModel, suffix, requested string) {
+	if m == nil || m.ModelID == "" {
+		return
+	}
+	// Auto (8c46e95b1a07cecc) exposes 0 thinking levels in Google's otAQ7b menu
+	// (observed in 20261119T010707: f.81 omitted). Never emit inner[80] for Auto
+	// even when GEMINI_THINKING_LEVEL, reasoning_effort, or @level is supplied.
+	if gemini.IsAutoModel(m.ModelID, m.Name, m.DisplayName) {
+		return
+	}
 	effort := suffix
 	if effort == "" {
 		effort = requested
@@ -549,7 +638,7 @@ func (s *Server) applyEffort(p *gemini.GenParams, m *gemini.AvailableModel, suff
 		effort = s.cfg.DefaultThinkingLevel
 	}
 	level := apiconv.EffortLevel(effort)
-	if level == 0 || m == nil || m.ModelID == "" {
+	if level == 0 {
 		return
 	}
 	p.Level = level
@@ -567,70 +656,530 @@ func (s *Server) applyEffort(p *gemini.GenParams, m *gemini.AvailableModel, suff
 // keepalive comments fill the silences, and the tool calls plus any held-back text
 // follow in the final chunk. If the stream fails or stays empty before anything was
 // forwarded, the buffered path (with its retries) takes over on the same response.
+type attemptGuards struct {
+	isCannedErr        bool
+	isGlitch           bool
+	isToolRefusal      bool
+	isFakeClaim        bool
+	fakeClaimKind      string
+	isPostStallHandoff bool
+	isDowngrade        bool
+	isSilentSkip       bool
+}
+
+func zeroExtractedCalls(raw string, declared []apiconv.DeclaredTool) bool {
+	if len(declared) == 0 {
+		return false
+	}
+	_, calls, _ := apiconv.ParseToolCallsWith(strings.TrimSpace(raw), declared)
+	return len(calls) == 0
+}
+
+func isWeakerServedModel(servedID, servedName string) bool {
+	if servedID == gemini.AutoModelHexID {
+		return true
+	}
+	low := strings.ToLower(strings.TrimSpace(servedName))
+	if low == "" {
+		return false
+	}
+	return strings.Contains(low, "flash") || strings.Contains(low, "lite") || strings.Contains(low, "fast") || strings.Contains(low, "quick")
+}
+
+func isRequestedHigherModel(m *gemini.AvailableModel) bool {
+	if m == nil || m.ModelID == "" {
+		return false
+	}
+	if m.ModelID == gemini.AutoModelHexID || gemini.IsAutoModel(m.ModelID, m.Name, m.DisplayName) {
+		return false
+	}
+	desc := strings.ToLower(m.Name + " " + m.DisplayName + " " + m.Description)
+	return !strings.Contains(desc, "flash") && !strings.Contains(desc, "lite") && !strings.Contains(desc, "fast") && !strings.Contains(desc, "quick")
+}
+
+func (s *Server) isSilentModelDowngrade(ctx context.Context, p gemini.GenParams, out streamToolsResult) bool {
+	if !isRequestedHigherModel(p.Model) {
+		return false
+	}
+	servedID, servedName, verdict := out.servedID, out.servedName, out.servedVerdict
+	if verdict == "" || servedID == "" {
+		if ri := reqFrom(ctx); ri != nil {
+			if rec, found := s.client.CallByRequest(ri.id); found {
+				if servedID == "" {
+					servedID = rec.ServedID
+				}
+				if servedName == "" {
+					servedName = rec.ServedName
+				}
+				if verdict == "" {
+					verdict = rec.Identity
+				}
+			}
+		}
+	}
+	if verdict != "other_model" && verdict != "name_only" {
+		return false
+	}
+	if isWeakerServedModel(servedID, servedName) {
+		return true
+	}
+	if servedID != "" && s.client != nil {
+		for _, m := range s.client.ListModels() {
+			if m.ModelID == servedID && isWeakerServedModel(m.ModelID, m.Name+" "+m.DisplayName+" "+m.Description) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *Server) evaluateAttemptGuards(ctx context.Context, p gemini.GenParams, out streamToolsResult, declared []apiconv.DeclaredTool, stallRetriesUsed int, postStallHandoffRetried, modelDowngradeRetried bool) attemptGuards {
+	var g attemptGuards
+	if out.released || out.earlyStopReason != "" {
+		return g
+	}
+	g.isCannedErr = apiconv.IsUpstreamCannedErrorWithMarker(out.rawText, out.errorMarker)
+	if g.isCannedErr {
+		return g
+	}
+	g.isGlitch = apiconv.IsUpstreamGlitch(out.rawText)
+	if len(declared) == 0 {
+		return g
+	}
+	g.isToolRefusal = apiconv.IsUpstreamToolRefusal(out.rawText) || apiconv.IsThoughtToolRefusalOrSimulation(out.thoughtText, out.rawText)
+	toolFacts := reqToolFacts(ctx)
+	if !g.isToolRefusal {
+		g.fakeClaimKind, g.isFakeClaim = apiconv.DetectUnverifiedActionClaim(out.rawText, declared, toolFacts.SinceLastUser)
+	}
+	if g.isGlitch || g.isToolRefusal || g.isFakeClaim {
+		return g
+	}
+	wantHandoff := stallRetriesUsed > 0 && !postStallHandoffRetried && apiconv.IsPostStallHandoffSummary(out.rawText)
+	wantDowngrade := !modelDowngradeRetried && s.isSilentModelDowngrade(ctx, p, out)
+	if (wantHandoff || wantDowngrade) && zeroExtractedCalls(out.rawText, declared) {
+		if wantHandoff {
+			g.isPostStallHandoff = true
+		} else {
+			g.isDowngrade = true
+		}
+	}
+	if !g.isGlitch && !g.isToolRefusal && !g.isFakeClaim && !g.isPostStallHandoff && !g.isDowngrade &&
+		s.cfg.EnforceToolCalls && zeroExtractedCalls(out.rawText, declared) && !apiconv.IsCompaction(out.rawText) {
+		g.isSilentSkip = true
+	}
+	return g
+}
+
 func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWriter, cid, model string, p gemini.GenParams, interval time.Duration, declared []apiconv.DeclaredTool) {
 	sse, ok := openSSE(w)
 	if !ok {
 		sendError(w, http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
-	var gate apiconv.ProgressGate
-	var echo apiconv.EchoFilter
-	res := s.runStreamTools(ctx, sse, p, interval, declared, &streamToolsHooks{
-		progressive: true,
-		cid:         cid,
-		created:     time.Now().Unix(),
-		model:       model,
-		gate:        &gate,
-		echo:        &echo,
-	})
-	if res.aborted {
-		return
-	}
-	if res.earlyStopMsg != "" {
-		s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, res.earlyStopMsg, nil)), sse.done())
-		return
-	}
-	if res.noContentTimedOut {
-		s.recordModelFailure(model)
-		sec := int(res.noContentElapsed.Round(time.Second).Seconds())
-		if sec < 1 && s.cfg.NoContentSec > 0 {
-			sec = s.cfg.NoContentSec
+	maxRetries := s.maxStallRetries()
+	curParams := p
+	created := time.Now().Unix()
+	stallRetriesUsed := 0
+	postStallHandoffRetried := false
+	modelDowngradeRetried := false
+	internalToolRetried := false
+	toolUnparsedRetried := false
+
+	runAttempt := func(rp gemini.GenParams, isRetry, allowFast bool, cannedTimeout, maxNoContent time.Duration) (streamToolsResult, apiconv.ProgressGate, apiconv.EchoFilter, bool) {
+		var g apiconv.ProgressGate
+		var e apiconv.EchoFilter
+		var initSilence time.Duration
+		if !isRetry && rp.Mode == 1 {
+			initSilence = s.initialSilenceTimeout()
 		}
-		s.rlog(ctx).Warn("upstream_no_content_timeout", "elapsed_sec", sec, "heartbeats", res.heartbeats)
-		msg := noContentTimeoutMessage(model, p, sec)
-		s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
+		out := s.runStreamTools(ctx, sse, rp, interval, declared, &streamToolsHooks{
+			progressive:           true,
+			noInternalRetry:       internalToolRetried,
+			isRetry:               isRetry,
+			cannedRetryTimeout:    cannedTimeout,
+			maxNoContentTimeout:   maxNoContent,
+			initialSilenceTimeout: initSilence,
+			cid:                   cid,
+			created:               created,
+			model:                 model,
+			gate:                  &g,
+			echo:                  &e,
+		}, allowFast)
+		return out, g, e, !out.aborted
+	}
+
+	res, gate, echo, ok := runAttempt(curParams, false, maxRetries > 0, 0, 0)
+	if !ok {
 		return
 	}
-	if res.internalToolRetry {
+	initSilenceRetried := false
+	if res.earlyStopReason == "initial_silence" && res.transmittedBytes == 0 {
+		if !s.waitRetryBackoff(ctx) {
+			return
+		}
+		initSilenceRetried = true
+		retryParams := curParams
+		stepdown := ""
+		if retryParams.Mode == 1 && retryParams.Level == 4 {
+			retryParams.Level = 2
+			stepdown = "4->2"
+		}
+		retryParams.Prompt += initialSilenceAntiInternalNote
+		timeoutSec := int(s.initialSilenceTimeout().Round(time.Second).Seconds())
+		attrs := []any{
+			"timeout_sec", timeoutSec,
+			"heartbeats", res.heartbeats,
+			"temp_chat", retryParams.TemporaryChat,
+			"mode", retryParams.Mode,
+		}
+		if stepdown != "" {
+			attrs = append(attrs, "level_stepdown", stepdown)
+		}
+		s.rlog(ctx).Warn("initial_silence_retry", attrs...)
+		s.recordDiagIncident(ctx, "initial_silence_retry", "retry", "aucune réponse Google après délai", true)
 		if s.cfg.StreamThoughts {
-			if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, proxyWaitNote(s.currentNow(), "Gemini a tenté d'utiliser un outil interne : nouvelle tentative avec rappel renforcé…"))); err != nil {
+			note := fmt.Sprintf("Google n'a envoyé aucune réponse après %d s : nouvelle tentative automatique…", timeoutSec)
+			if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, proxyWaitNote(s.currentNow(), note))); err != nil {
 				s.rlog(ctx).Warn("sse write failed", "err", err)
 				return
 			}
 		}
-		bres := s.awaitGenerate(ctx, sse, internalToolRetryParams(p), interval)
-		switch {
-		case bres.out == kaGone:
-		case bres.out == kaShutdown:
-			s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
-		case bres.err != nil:
-			s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+bres.err.Error())), sse.done())
-		default:
-			if !res.warnEmitted {
-				if note := s.maybeSuspectWarning(ctx, model); note != "" {
-					if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, note)); err != nil {
+		curParams = retryParams
+		maxNoContent := time.Duration(0)
+		if maxRetries > 0 {
+			maxNoContent = s.stallRetryNoContentCap(1, maxRetries)
+		}
+		res, gate, echo, ok = runAttempt(curParams, true, maxRetries > 0, 0, maxNoContent)
+		if !ok {
+			return
+		}
+	}
+	for attempt := 1; (res.earlyStopReason == "stall" || ((initSilenceRetried || attempt > 1) && res.noContentTimedOut)) && res.transmittedBytes == 0 && attempt <= maxRetries; attempt++ {
+		nextParams, ok := s.prepareStallRetry(ctx, sse, cid, created, model, true, curParams, res, attempt, maxRetries)
+		if !ok {
+			return
+		}
+		stallRetriesUsed++
+		if res.noContentTimedOut {
+			s.recordDiagIncident(ctx, "no_content_timeout", "retry", "aucun contenu (tentative non-finale)", true)
+		} else {
+			s.recordDiagIncident(ctx, "stall", "retry", "aucun premier texte (stall)", true)
+		}
+		curParams = nextParams
+		res, gate, echo, ok = runAttempt(curParams, true, attempt < maxRetries, 0, s.stallRetryNoContentCap(attempt, maxRetries))
+		if !ok {
+			return
+		}
+	}
+	if res.earlyStopMsg != "" {
+		s.markEarlyStopTerminalError(ctx, res)
+		s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, appendResumeHint(ctx, res.earlyStopMsg), nil)), sse.done())
+		return
+	}
+	if res.noContentTimedOut {
+		s.finishNoContentTimeout(ctx, sse, cid, model, p, res)
+		return
+	}
+	finishCommonNonStream := func(out streamToolsResult, rp gemini.GenParams) bool {
+		if out.earlyStopMsg != "" {
+			s.markEarlyStopTerminalError(ctx, out)
+			s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, appendResumeHint(ctx, out.earlyStopMsg), nil)), sse.done())
+			return true
+		}
+		if out.noContentTimedOut {
+			s.finishNoContentTimeout(ctx, sse, cid, model, rp, out)
+			return true
+		}
+		if out.earlyStopReason == "" && !out.internalToolRetry && (out.genErr != nil || out.rawText == "") {
+			genErr := out.genErr
+			if genErr == nil {
+				genErr = gemini.ErrEmptyResponse
+			}
+			s.recordDiagIncident(ctx, "error", "upstream_error", "erreur amont", false)
+			s.markTerminalError(ctx, "Erreur amont", "upstream_error")
+			s.setErrorContext(ctx, "upstream/google", "finishCommonNonStream", "upstream_error", genErr.Error())
+			s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+genErr.Error())), sse.done())
+			return true
+		}
+		return false
+	}
+
+	finishTerminalNonAnswer := func(out streamToolsResult, rp gemini.GenParams, afterLabel string) bool {
+		if out.earlyStopReason != "" || out.released {
+			return false
+		}
+		if apiconv.IsUpstreamCannedErrorWithMarker(out.rawText, out.errorMarker) {
+			s.recordModelFailure(model)
+			s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(out.rawText), "after", afterLabel, "action", "reported")
+			s.recordDiagIncident(ctx, "canned_error", "reported", "erreur interne Gemini (réponse type)", false)
+			s.markTerminalError(ctx, "Erreur interne", "canned_error")
+			s.setErrorContext(ctx, "guard/upstream", "finishTerminalNonAnswer", "upstream_canned_error", "Erreur interne Google répétée après tentative de récupération")
+			s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, appendResumeHint(ctx, cannedErrorMessage(model, rp)), nil)), sse.done())
+			return true
+		}
+		if len(declared) > 0 && (apiconv.IsUpstreamToolRefusal(out.rawText) || apiconv.IsThoughtToolRefusalOrSimulation(out.thoughtText, out.rawText)) {
+			s.rlog(ctx).Warn("upstream_tool_refusal", "bytes", len(out.rawText), "action", "reported")
+			s.recordDiagIncident(ctx, "tool_refusal", "reported", "refus/simulation d'outils sans appel local", false)
+			s.markTerminalError(ctx, "Refus outils", "tool_refusal")
+			s.setErrorContext(ctx, "guard/tools", "finishTerminalNonAnswer", "tool_refusal", "Refus ou simulation d'outils locaux sans appel tool_call")
+			msg := "GMINI : Gemini a refusé ou simulé deux fois sans appeler les outils locaux. Relancez la demande ou ouvrez une nouvelle conversation."
+			s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, appendResumeHint(ctx, msg), nil)), sse.done())
+			return true
+		}
+		if apiconv.IsUpstreamGlitch(out.rawText) {
+			s.rlog(ctx).Warn("upstream_glitch", "bytes", len(out.rawText), "action", "reported")
+			s.recordDiagIncident(ctx, "glitch", "reported", "message de service / extension Google", false)
+			s.markTerminalError(ctx, "Glitch Google", "glitch")
+			s.setErrorContext(ctx, "guard/glitch", "finishTerminalNonAnswer", "upstream_glitch", "Message de service / extension Google au lieu de la réponse")
+			s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, appendResumeHint(ctx, glitchReportMessage(out.rawText)), nil)), sse.done())
+			return true
+		}
+		return false
+	}
+
+	// K53: handle internalToolRetry inside any recovery branch so an intentional
+	// internal-tool cut (rawText == "") never turns into ErrEmptyResponse.
+	resolveInternalToolRetry := func(out streamToolsResult, g apiconv.ProgressGate, e apiconv.EchoFilter, rp gemini.GenParams) (streamToolsResult, apiconv.ProgressGate, apiconv.EchoFilter, gemini.GenParams, bool) {
+		if !out.internalToolRetry || internalToolRetried {
+			return out, g, e, rp, true
+		}
+		internalToolRetried = true
+		if s.cfg.StreamThoughts {
+			if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, proxyWaitNote(s.currentNow(), "Gemini a tenté d'utiliser un outil interne : nouvelle tentative avec rappel renforcé…"))); err != nil {
+				s.rlog(ctx).Warn("sse write failed", "err", err)
+				return out, g, e, rp, false
+			}
+		}
+		itParams := internalToolRetryParams(rp)
+		if itParams.Mode == 1 && itParams.Level == 4 {
+			itParams.Level = 2
+			s.rlog(ctx).Warn("internal_tool_retry_stepdown", "level_stepdown", "4->2", "temp_chat", itParams.TemporaryChat)
+		}
+		maxNoContent := time.Duration(0)
+		if maxRetries > 0 {
+			maxNoContent = s.stallRetryNoContentCap(1, maxRetries)
+		}
+		itRes, itGate, itEcho, ok := runAttempt(itParams, true, false, 0, maxNoContent)
+		if !ok {
+			return itRes, itGate, itEcho, itParams, false
+		}
+		if (itRes.earlyStopReason == "stall" || itRes.noContentTimedOut) && itRes.transmittedBytes == 0 && maxRetries > 0 {
+			if !s.waitRetryBackoff(ctx) {
+				return itRes, itGate, itEcho, itParams, false
+			}
+			stallParams := itParams
+			stepdown := ""
+			if stallParams.Mode == 1 && stallParams.Level >= 2 {
+				stepdown = fmt.Sprintf("%d->1", stallParams.Level)
+				stallParams.Level = 1
+			}
+			if itRes.noContentTimedOut {
+				attrs := []any{"after", "internal_tool", "attempt", 1, "max_retries", 1, "elapsed_sec", int(itRes.noContentElapsed.Round(time.Second).Seconds()), "temp_chat", stallParams.TemporaryChat}
+				if stepdown != "" {
+					attrs = append(attrs, "level_stepdown", stepdown)
+				}
+				s.rlog(ctx).Warn("no_content_timeout", attrs...)
+				s.recordDiagIncident(ctx, "no_content_timeout", "retry", "aucun contenu après outil interne ; nouvelle tentative", true)
+			} else {
+				s.stats.heldStallRetries.Add(1)
+				attrs := []any{"after", "internal_tool", "attempt", 1, "max_retries", 1, "held_bytes", itRes.heldBytes, "temp_chat", stallParams.TemporaryChat}
+				if stepdown != "" {
+					attrs = append(attrs, "level_stepdown", stepdown)
+				}
+				s.rlog(ctx).Warn("held_stall_retry", attrs...)
+				s.recordDiagIncident(ctx, "stall", "retry", "blocage après outil interne ; nouvelle tentative", true)
+			}
+			if s.cfg.StreamThoughts {
+				waitNote := "Gemini s'est figé après l'outil interne : nouvelle tentative…"
+				if itRes.noContentTimedOut {
+					waitNote = "Aucun contenu reçu après l'outil interne : nouvelle tentative…"
+				}
+				if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, proxyWaitNote(s.currentNow(), waitNote))); err != nil {
+					s.rlog(ctx).Warn("sse write failed", "err", err)
+					return itRes, itGate, itEcho, stallParams, false
+				}
+			}
+			itParams = stallParams
+			itRes, itGate, itEcho, ok = runAttempt(itParams, true, false, 0, 0)
+			if !ok {
+				return itRes, itGate, itEcho, itParams, false
+			}
+		}
+		return itRes, itGate, itEcho, itParams, true
+	}
+
+	if res.internalToolRetry {
+		internalToolRetried = true
+		if s.cfg.StreamThoughts {
+			if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, proxyWaitNote(s.currentNow(), "Gemini a tenté d'utiliser un outil interne : nouvelle tentative avec rappel renforcé…"))); err != nil {
+				s.rlog(ctx).Warn("sse write failed", "err", err)
+				return
+			}
+		}
+		retryParams := internalToolRetryParams(curParams)
+		if retryParams.Mode == 1 && retryParams.Level == 4 {
+			retryParams.Level = 2
+			s.rlog(ctx).Warn("internal_tool_retry_stepdown", "level_stepdown", "4->2", "temp_chat", retryParams.TemporaryChat)
+		}
+		if s.streamEvents != nil {
+			maxNoContent := time.Duration(0)
+			if maxRetries > 0 {
+				maxNoContent = s.stallRetryNoContentCap(1, maxRetries)
+			}
+			rres, gate2, echo2, ok := runAttempt(retryParams, true, false, 0, maxNoContent)
+			if !ok {
+				return
+			}
+			// G2/K52: 1 retry allowed if the corrective attempt stalls or hits capped no_content_timeout with 0 transmitted bytes.
+			if (rres.earlyStopReason == "stall" || rres.noContentTimedOut) && rres.transmittedBytes == 0 && maxRetries > 0 {
+				if !s.waitRetryBackoff(ctx) {
+					return
+				}
+				stallParams := retryParams
+				stepdown := ""
+				if stallParams.Mode == 1 && stallParams.Level >= 2 {
+					stepdown = fmt.Sprintf("%d->1", stallParams.Level)
+					stallParams.Level = 1
+				}
+				if rres.noContentTimedOut {
+					attrs := []any{"after", "internal_tool", "attempt", 1, "max_retries", 1, "elapsed_sec", int(rres.noContentElapsed.Round(time.Second).Seconds()), "temp_chat", stallParams.TemporaryChat}
+					if stepdown != "" {
+						attrs = append(attrs, "level_stepdown", stepdown)
+					}
+					s.rlog(ctx).Warn("no_content_timeout", attrs...)
+					s.recordDiagIncident(ctx, "no_content_timeout", "retry", "aucun contenu après outil interne ; nouvelle tentative", true)
+				} else {
+					s.stats.heldStallRetries.Add(1)
+					attrs := []any{"after", "internal_tool", "attempt", 1, "max_retries", 1, "held_bytes", rres.heldBytes, "temp_chat", stallParams.TemporaryChat}
+					if stepdown != "" {
+						attrs = append(attrs, "level_stepdown", stepdown)
+					}
+					s.rlog(ctx).Warn("held_stall_retry", attrs...)
+					s.recordDiagIncident(ctx, "stall", "retry", "blocage après outil interne ; nouvelle tentative", true)
+				}
+				if s.cfg.StreamThoughts {
+					waitNote := "Gemini s'est figé après l'outil interne : nouvelle tentative…"
+					if rres.noContentTimedOut {
+						waitNote = "Aucun contenu reçu après l'outil interne : nouvelle tentative…"
+					}
+					if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, proxyWaitNote(s.currentNow(), waitNote))); err != nil {
 						s.rlog(ctx).Warn("sse write failed", "err", err)
 						return
 					}
 				}
+				retryParams = stallParams
+				rres, gate2, echo2, ok = runAttempt(retryParams, true, false, 0, 0)
+				if !ok {
+					return
+				}
 			}
-			text, toolCalls := s.finishText(ctx, bres.text, true, declared)
-			s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
+			// G2: Ultimate retry with level->1 stepdown if internal_tool_retry returns a short upstream glitch.
+			if rres.earlyStopReason == "" && !rres.released && apiconv.IsUpstreamGlitch(rres.rawText) && retryParams.Mode == 1 && retryParams.Level >= 2 {
+				if !s.waitRetryBackoff(ctx) {
+					return
+				}
+				glitchParams := glitchRetryParams(retryParams)
+				stepdown := fmt.Sprintf("%d->1", glitchParams.Level)
+				glitchParams.Level = 1
+				s.rlog(ctx).Warn("upstream_glitch", "bytes", len(rres.rawText), "after", "internal_tool", "action", "retry_once", "level_stepdown", stepdown, "temp_chat", glitchParams.TemporaryChat)
+				s.recordDiagIncident(ctx, "glitch", "retry", "message de service après outil interne ; nouvelle tentative", true)
+				if s.cfg.StreamThoughts {
+					if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, proxyWaitNote(s.currentNow(), "Gemini a renvoyé un message de service après outil interne : nouvelle tentative…"))); err != nil {
+						s.rlog(ctx).Warn("sse write failed", "err", err)
+						return
+					}
+				}
+				retryParams = glitchParams
+				rres, gate2, echo2, ok = runAttempt(retryParams, true, false, 0, 0)
+				if !ok {
+					return
+				}
+			}
+			// K54: 1 retry with 2->1 stepdown if internal_tool_retry returns a canned error.
+			if rres.earlyStopReason == "" && !rres.released && apiconv.IsUpstreamCannedErrorWithMarker(rres.rawText, rres.errorMarker) && retryParams.Mode == 1 && retryParams.Level >= 2 {
+				if !s.waitRetryBackoff(ctx) {
+					return
+				}
+				cannedParams, _ := prepareRecoveryParams(retryParams)
+				cannedParams.Level = 1
+				retryTimeout := s.cannedErrorRetryTimeoutFor(len(cannedParams.Prompt))
+				s.stats.cannedErrorRetries.Add(1)
+				s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(rres.rawText), "after", "internal_tool", "action", "retry_once", "level_stepdown", "2->1", "timeout_sec", int(retryTimeout.Seconds()), "temp_chat", cannedParams.TemporaryChat)
+				s.recordDiagIncident(ctx, "canned_error", "retry", "erreur interne après outil interne ; nouvelle tentative", true)
+				if s.cfg.StreamThoughts {
+					if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, proxyWaitNote(s.currentNow(), "Gemini a renvoyé une erreur interne après l'outil interne : nouvelle tentative…"))); err != nil {
+						s.rlog(ctx).Warn("sse write failed", "err", err)
+						return
+					}
+				}
+				retryParams = cannedParams
+				rres, gate2, echo2, ok = runAttempt(retryParams, true, false, retryTimeout, 0)
+				if !ok {
+					return
+				}
+			}
+			// K54: 1 retry with 2->1 stepdown if internal_tool_retry returns a silent empty reply.
+			if rres.earlyStopReason == "" && !rres.noContentTimedOut && !rres.internalToolRetry && rres.genErr == nil && rres.rawText == "" && retryParams.Mode == 1 && retryParams.Level >= 2 {
+				if !s.waitRetryBackoff(ctx) {
+					return
+				}
+				emptyParams := retryParams
+				stepdown := fmt.Sprintf("%d->1", emptyParams.Level)
+				emptyParams.Level = 1
+				s.rlog(ctx).Warn("empty_reply_retry", "after", "internal_tool", "level_stepdown", stepdown, "temp_chat", emptyParams.TemporaryChat)
+				s.recordDiagIncident(ctx, "empty_reply", "retry", "réponse vide silencieuse après outil interne ; nouvelle tentative", true)
+				if s.cfg.StreamThoughts {
+					if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, proxyWaitNote(s.currentNow(), "Réponse vide silencieuse après l'outil interne : nouvelle tentative (niveau réduit)…"))); err != nil {
+						s.rlog(ctx).Warn("sse write failed", "err", err)
+						return
+					}
+				}
+				retryParams = emptyParams
+				rres, gate2, echo2, ok = runAttempt(retryParams, true, false, 0, 0)
+				if !ok {
+					return
+				}
+			}
+			if finishCommonNonStream(rres, retryParams) {
+				return
+			}
+			// K54: Do not terminate on tool_refusal right after internal_tool_retry;
+			// hand off to the unified guards so toolRefusalRetryParams (1->2) can recover.
+			isRefusalAfterInternal := rres.earlyStopReason == "" && !rres.released && len(declared) > 0 &&
+				(apiconv.IsUpstreamToolRefusal(rres.rawText) || apiconv.IsThoughtToolRefusalOrSimulation(rres.thoughtText, rres.rawText))
+			if !isRefusalAfterInternal && finishTerminalNonAnswer(rres, retryParams, "internal_tool") {
+				return
+			}
+			// K52: hand off to the unified post-attempt guards (unverified claim,
+			// tool_unparsed, silent_skip, tool_refusal) and final finishStreamProgress.
+			res, gate, echo, curParams = rres, gate2, echo2, retryParams
+		} else {
+			bres := s.awaitGenerate(ctx, sse, retryParams, interval)
+			switch {
+			case bres.out == kaGone:
+			case bres.out == kaShutdown:
+				s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
+			case bres.err != nil:
+				s.markTerminalError(ctx, "Erreur amont", "upstream_error")
+				s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+bres.err.Error())), sse.done())
+			default:
+				if !res.warnEmitted {
+					if note := s.maybeSuspectWarning(ctx, model); note != "" {
+						if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, note)); err != nil {
+							s.rlog(ctx).Warn("sse write failed", "err", err)
+							return
+						}
+					}
+				}
+				text, toolCalls := s.finishText(ctx, bres.text, true, declared)
+				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
+			}
+			return
 		}
-		return
 	}
 	if res.emptyReply {
 		msg := s.recordEmptyReply(ctx, model, p)
+		s.markTerminalError(ctx, "Réponse vide", "empty_reply")
 		s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
 		return
 	}
@@ -647,7 +1196,7 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 				s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+bres.err.Error())), sse.done())
 			default:
 				if note := s.maybeSuspectWarning(ctx, model); note != "" {
-					if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, note)); err != nil {
+					if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, note)); err != nil {
 						s.rlog(ctx).Warn("sse write failed", "err", err)
 						return
 					}
@@ -662,99 +1211,224 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 			genErr = gemini.ErrEmptyResponse
 		}
 		s.rlog(ctx).Warn("stream+tools upstream error after SSE open", "err", genErr, "forwarded", res.forwarded)
+		s.recordDiagIncident(ctx, "error", "upstream_error", "erreur amont", false)
+		s.markTerminalError(ctx, "Erreur amont", "upstream_error")
 		s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+genErr.Error())), sse.done())
 		return
 	}
 
-	if res.earlyStopReason == "" {
-		toolFacts := reqToolFacts(ctx)
-		isCannedErr := !res.released && apiconv.IsUpstreamCannedErrorWithMarker(res.rawText, res.errorMarker)
-		isGlitch := !res.released && !isCannedErr && apiconv.IsUpstreamGlitch(res.rawText)
-		isToolRefusal := !res.released && !isCannedErr && len(declared) > 0 &&
-			(apiconv.IsUpstreamToolRefusal(res.rawText) || apiconv.IsThoughtToolRefusalOrSimulation(res.thoughtText, res.rawText))
-		fakeClaimKind, isFakeClaim := "", false
-		if !res.released && !isCannedErr && !isToolRefusal && len(declared) > 0 {
-			fakeClaimKind, isFakeClaim = apiconv.DetectUnverifiedActionClaim(res.rawText, declared, toolFacts.SinceLastUser)
+	prepareGuardRetry := func(base gemini.GenParams, g attemptGuards, bytes int, afterLabel string) (gemini.GenParams, bool) {
+		if !s.waitRetryBackoff(ctx) {
+			return base, false
 		}
-		if isCannedErr {
-			if normalizeCannedErrorRetry(s.cfg.CannedErrorRetry) != "once" {
+		var retryParams gemini.GenParams
+		var steppedDown bool
+		var waitMsg string
+		switch {
+		case g.isPostStallHandoff:
+			postStallHandoffRetried = true
+			retryParams = postStallHandoffRetryParams(base)
+			steppedDown = base.Mode == 1 && base.Level == 4 && retryParams.Level == 2
+			attrs := []any{"bytes", bytes, "action", "retry_once", "temp_chat", retryParams.TemporaryChat, "mode", retryParams.Mode}
+			if afterLabel != "" {
+				attrs = append(attrs, "after", afterLabel)
+			}
+			if steppedDown {
+				attrs = append(attrs, "level_stepdown", "4->2")
+			}
+			s.rlog(ctx).Warn("post_stall_handoff_retry", attrs...)
+			s.recordDiagIncident(ctx, "retry", "post_stall_handoff", "bilan d'étapes au lieu d'un appel d'outil", true)
+			waitMsg = "Gemini a renvoyé un bilan d'étapes au lieu d'un appel d'outil : nouvelle tentative directe…"
+		case g.isDowngrade:
+			modelDowngradeRetried = true
+			retryParams = base
+			retryParams.TemporaryChat = true
+			attrs := []any{"model", model, "action", "retry_once", "temp_chat", true}
+			if afterLabel != "" {
+				attrs = append(attrs, "after", afterLabel)
+			}
+			s.rlog(ctx).Warn("served_model_doubt_retry", attrs...)
+			s.recordDiagIncident(ctx, "served_model_doubt", "retry", "modèle réduit servi sans appel d'outil", true)
+			waitMsg = "Google a servi un modèle réduit sans appel d'outil : nouvelle tentative avec le modèle demandé…"
+		case g.isSilentSkip:
+			retryParams, steppedDown = prepareRecoveryParams(base)
+			retryParams = silentSkipRetryParams(retryParams)
+			waitMsg = "Gemini a répondu en texte sans appeler d'outil : nouvelle tentative avec consigne corrective…"
+			attrs := []any{"bytes", bytes, "silent_skip", true, "action", "retry_once", "temp_chat", retryParams.TemporaryChat}
+			if afterLabel != "" {
+				attrs = append(attrs, "after", afterLabel)
+			}
+			if steppedDown {
+				attrs = append(attrs, "level_stepdown", "4->2")
+			}
+			s.rlog(ctx).Warn("silent_skip", attrs...)
+			s.recordDiagIncident(ctx, "silent_skip", "retry", "texte seul malgré outils déclarés (aucun appel)", true)
+		default:
+			retryParams, steppedDown = prepareRecoveryParams(base)
+			stepdownLabel := ""
+			if steppedDown {
+				stepdownLabel = "4->2"
+			}
+			switch {
+			case g.isFakeClaim:
+				retryParams = unverifiedActionRetryParams(retryParams)
+				waitMsg = "Gemini affirme avoir agi sur le disque sans appeler d'outil : nouvelle tentative avec consigne corrective…"
+			case g.isToolRefusal:
+				prevLevel := retryParams.Level
+				retryParams = toolRefusalRetryParams(retryParams)
+				if retryParams.Mode == 1 && prevLevel == 1 && retryParams.Level == 2 {
+					stepdownLabel = "1->2"
+				}
+				waitMsg = "Gemini affirme ne pas avoir d'outils locaux : nouvelle tentative avec consigne corrective…"
+			default:
+				retryParams = glitchRetryParams(retryParams)
+				waitMsg = "Gemini a renvoyé un message de service au lieu de traiter la demande : nouvelle tentative…"
+			}
+			attrs := []any{"bytes", bytes, "tool_refusal", g.isToolRefusal, "unverified_claim", g.fakeClaimKind, "action", "retry_once", "temp_chat", retryParams.TemporaryChat}
+			if afterLabel != "" {
+				attrs = append(attrs, "after", afterLabel)
+			}
+			if stepdownLabel != "" {
+				attrs = append(attrs, "level_stepdown", stepdownLabel)
+			}
+			s.rlog(ctx).Warn("upstream_glitch", attrs...)
+			switch {
+			case g.isToolRefusal:
+				s.recordDiagIncident(ctx, "tool_refusal", "retry", "refus d'outils ; nouvelle tentative corrective", true)
+			case g.isFakeClaim:
+				s.recordDiagIncident(ctx, "tool_refusal", "unverified_claim_retry", "affirmation d'action sans appel d'outil", true)
+			default:
+				s.recordDiagIncident(ctx, "glitch", "retry", "message de service ; nouvelle tentative", true)
+			}
+		}
+		if s.cfg.StreamThoughts {
+			if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, proxyWaitNote(s.currentNow(), waitMsg))); err != nil {
+				s.rlog(ctx).Warn("sse write failed", "err", err)
+				return base, false
+			}
+		}
+		return retryParams, true
+	}
+
+	if res.earlyStopReason == "" {
+		g := s.evaluateAttemptGuards(ctx, curParams, res, declared, stallRetriesUsed, postStallHandoffRetried, modelDowngradeRetried)
+		if g.isCannedErr {
+			if s.cannedErrorRetryMode() != "once" {
 				s.recordModelFailure(model)
 				s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(res.rawText), "action", "off")
-				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
+				s.recordDiagIncident(ctx, "canned_error", "reported", "erreur interne Gemini (retry désactivé)", false)
+				s.markTerminalError(ctx, "Erreur interne", "canned_error")
+				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, curParams), nil)), sse.done())
 				return
 			}
 			if s.shouldSkipCannedRetry(model) {
 				s.recordModelFailure(model)
 				s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(res.rawText), "action", "skipped_recent_failures")
-				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
+				s.recordDiagIncident(ctx, "canned_error", "reported", "erreur interne Gemini (retry ignoré)", false)
+				s.markTerminalError(ctx, "Erreur interne", "canned_error")
+				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, curParams), nil)), sse.done())
 				return
 			}
+			if !s.waitRetryBackoff(ctx) {
+				return
+			}
+			cannedParams, steppedDown := prepareRecoveryParams(curParams)
 			s.stats.cannedErrorRetries.Add(1)
-			retryTimeout := s.cannedErrorRetryTimeout()
-			s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(res.rawText), "action", "retry_once", "timeout_sec", int(retryTimeout.Seconds()))
+			retryTimeout := s.cannedErrorRetryTimeoutFor(len(cannedParams.Prompt))
+			attrs := []any{"bytes", len(res.rawText), "action", "retry_once", "timeout_sec", int(retryTimeout.Seconds()), "temp_chat", cannedParams.TemporaryChat}
+			if steppedDown {
+				attrs = append(attrs, "level_stepdown", "4->2")
+			}
+			s.rlog(ctx).Warn("upstream_canned_error", attrs...)
+			s.recordDiagIncident(ctx, "canned_error", "retry_once", "erreur interne ; nouvelle tentative à l'identique", true)
 			if s.cfg.StreamThoughts {
-				if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, proxyWaitNote(s.currentNow(), "Gemini a renvoyé une erreur interne : nouvelle tentative à l'identique…"))); err != nil {
+				if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, proxyWaitNote(s.currentNow(), "Gemini a renvoyé une erreur interne : nouvelle tentative à l'identique…"))); err != nil {
 					s.rlog(ctx).Warn("sse write failed", "err", err)
 					return
 				}
 			}
 			if s.streamEvents != nil {
-				var gate2 apiconv.ProgressGate
-				var echo2 apiconv.EchoFilter
-				rres := s.runStreamTools(ctx, sse, p, interval, declared, &streamToolsHooks{
-					progressive:        true,
-					noInternalRetry:    true,
-					cannedRetryTimeout: retryTimeout,
-					cid:                cid,
-					created:            res.created,
-					model:              model,
-					gate:               &gate2,
-					echo:               &echo2,
-				})
-				if rres.aborted {
+				rres, gate2, echo2, ok := runAttempt(cannedParams, true, false, retryTimeout, 0)
+				if !ok {
+					return
+				}
+				rres, gate2, echo2, cannedParams, ok = resolveInternalToolRetry(rres, gate2, echo2, cannedParams)
+				if !ok {
 					return
 				}
 				if rres.earlyStopMsg != "" {
+					s.markEarlyStopTerminalError(ctx, rres)
 					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, rres.earlyStopMsg, nil)), sse.done())
 					return
 				}
-				if rres.cannedRetryTimedOut || (rres.earlyStopReason == "" && (rres.genErr != nil || rres.rawText == "" || (!rres.released && apiconv.IsUpstreamCannedErrorWithMarker(rres.rawText, rres.errorMarker)))) {
+				if rres.cannedRetryTimedOut || rres.noContentTimedOut || (rres.earlyStopReason == "" && (rres.genErr != nil || rres.rawText == "" || (!rres.released && apiconv.IsUpstreamCannedErrorWithMarker(rres.rawText, rres.errorMarker)))) {
 					s.recordModelFailure(model)
-					s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(rres.rawText), "timed_out", rres.cannedRetryTimedOut, "action", "reported")
-					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
+					s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(rres.rawText), "timed_out", rres.cannedRetryTimedOut || rres.noContentTimedOut, "action", "reported")
+					s.recordDiagIncident(ctx, "canned_error", "reported", "erreur interne Gemini après nouvelle tentative", false)
+					if rres.cannedRetryTimedOut || rres.noContentTimedOut {
+						s.markTerminalError(ctx, "Timeout", "canned_retry_timeout")
+					} else {
+						s.markTerminalError(ctx, "Erreur interne", "canned_error")
+					}
+					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, cannedParams), nil)), sse.done())
 					return
+				}
+				if rres.earlyStopReason == "" && !rres.released {
+					g2 := s.evaluateAttemptGuards(ctx, cannedParams, rres, declared, stallRetriesUsed, postStallHandoffRetried, modelDowngradeRetried)
+					if g2.isGlitch || g2.isToolRefusal || g2.isFakeClaim || g2.isPostStallHandoff || g2.isDowngrade || g2.isSilentSkip {
+						rp2, ok := prepareGuardRetry(cannedParams, g2, len(rres.rawText), "canned_error")
+						if !ok {
+							return
+						}
+						rres, gate2, echo2, ok = runAttempt(rp2, true, false, 0, 0)
+						if !ok {
+							return
+						}
+						rres, gate2, echo2, rp2, ok = resolveInternalToolRetry(rres, gate2, echo2, rp2)
+						if !ok {
+							return
+						}
+						if finishCommonNonStream(rres, rp2) || finishTerminalNonAnswer(rres, rp2, "canned_error") {
+							return
+						}
+					}
 				}
 				s.finishStreamProgress(ctx, sse, cid, model, declared, rres, &gate2, &echo2)
 				return
 			}
 			retryCtx, retryCancel := context.WithTimeout(ctx, retryTimeout)
-			bres := s.awaitGenerate(retryCtx, sse, p, interval)
+			bres := s.awaitGenerate(retryCtx, sse, cannedParams, interval)
 			retryCancel()
 			switch {
 			case bres.out == kaGone:
 				if ctx.Err() == nil && errors.Is(retryCtx.Err(), context.DeadlineExceeded) {
 					s.recordModelFailure(model)
 					s.rlog(ctx).Warn("upstream_canned_error", "timed_out", true, "action", "reported")
-					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
+					s.markTerminalError(ctx, "Timeout", "canned_retry_timeout")
+					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, cannedParams), nil)), sse.done())
 				}
 			case bres.out == kaShutdown:
 				s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
 			case bres.err != nil:
 				if ctx.Err() == nil && errors.Is(bres.err, context.DeadlineExceeded) {
+					s.recordDiagIncident(ctx, "timeout", "canned_retry", "nouvelle tentative erreur interne expirée", false)
 					s.recordModelFailure(model)
 					s.rlog(ctx).Warn("upstream_canned_error", "timed_out", true, "action", "reported")
-					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
+					s.markTerminalError(ctx, "Timeout", "canned_retry_timeout")
+					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, cannedParams), nil)), sse.done())
 					return
 				}
+				s.markTerminalError(ctx, "Erreur amont", "upstream_error")
 				s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+bres.err.Error())), sse.done())
 			case s.isCannedRetryText(ctx, bres.text):
 				s.recordModelFailure(model)
 				s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(bres.text), "action", "reported")
-				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, p), nil)), sse.done())
+				s.markTerminalError(ctx, "Erreur interne", "canned_error")
+				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, cannedParams), nil)), sse.done())
 			default:
 				if !res.warnEmitted {
 					if note := s.maybeSuspectWarning(ctx, model); note != "" {
-						if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, note)); err != nil {
+						if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, note)); err != nil {
 							s.rlog(ctx).Warn("sse write failed", "err", err)
 							return
 						}
@@ -768,68 +1442,180 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 			}
 			return
 		}
-		if isGlitch || isToolRefusal || isFakeClaim {
-			// Gemini sent a canned non-answer ("can't use Workspace", a bare widget
-			// placeholder, claimed local tools are not declared/accessible, or
-			// dumped/claimed a file write without calling any tool).
-			// Nothing of it reached the client: try once more with corrective note.
-			s.rlog(ctx).Warn("upstream_glitch", "bytes", len(res.rawText), "tool_refusal", isToolRefusal, "unverified_claim", fakeClaimKind, "action", "retry_once")
-			if s.cfg.StreamThoughts {
-				retryMsg := "Gemini a renvoyé un message de service au lieu de traiter la demande : nouvelle tentative…"
-				if isToolRefusal {
-					retryMsg = "Gemini affirme ne pas avoir d'outils locaux : nouvelle tentative avec consigne corrective…"
-				} else if isFakeClaim {
-					retryMsg = "Gemini affirme avoir agi sur le disque sans appeler d'outil : nouvelle tentative avec consigne corrective…"
-				}
-				if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, proxyWaitNote(s.currentNow(), retryMsg))); err != nil {
-					s.rlog(ctx).Warn("sse write failed", "err", err)
-					return
-				}
+		if g.isGlitch || g.isToolRefusal || g.isFakeClaim || g.isPostStallHandoff || g.isDowngrade || g.isSilentSkip {
+			retryParams, ok := prepareGuardRetry(curParams, g, len(res.rawText), "")
+			if !ok {
+				return
 			}
-			retryParams := p
-			if isFakeClaim {
-				retryParams = unverifiedActionRetryParams(p)
-			} else if isToolRefusal {
-				retryParams = toolRefusalRetryParams(p)
-			} else if isGlitch {
-				retryParams = glitchRetryParams(p)
-			}
-			// Run the K19/K20 retry via runStreamTools when available so thought
-			// simulations are also caught on the 2nd attempt (not only text).
-			if (isToolRefusal || isFakeClaim) && s.streamEvents != nil {
-				var gate2 apiconv.ProgressGate
-				var echo2 apiconv.EchoFilter
-				rres := s.runStreamTools(ctx, sse, retryParams, interval, declared, &streamToolsHooks{
-					progressive:     true,
-					noInternalRetry: true,
-					cid:             cid,
-					created:         res.created,
-					model:           model,
-					gate:            &gate2,
-					echo:            &echo2,
-				})
-				if rres.aborted {
+			// Run the K19/K20/K33/K34 retry via runStreamTools when available so thought
+			// simulations, stalls, chained canned errors, post-glitch refusals, handoffs,
+			// and silent downgrades are caught.
+			if s.streamEvents != nil {
+				rres, gate2, echo2, ok := runAttempt(retryParams, true, maxRetries > 0, 0, 0)
+				if !ok {
 					return
 				}
-				if rres.earlyStopMsg != "" {
-					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, rres.earlyStopMsg, nil)), sse.done())
+				rres, gate2, echo2, retryParams, ok = resolveInternalToolRetry(rres, gate2, echo2, retryParams)
+				if !ok {
 					return
 				}
-				if rres.earlyStopReason == "" && (rres.genErr != nil || rres.rawText == "") {
-					genErr := rres.genErr
-					if genErr == nil {
-						genErr = gemini.ErrEmptyResponse
-					}
-					s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+genErr.Error())), sse.done())
-					return
-				}
-				if rres.earlyStopReason == "" && !rres.released {
-					if apiconv.IsUpstreamToolRefusal(rres.rawText) || apiconv.IsThoughtToolRefusalOrSimulation(rres.thoughtText, rres.rawText) {
-						s.rlog(ctx).Warn("upstream_tool_refusal", "bytes", len(rres.rawText), "action", "reported")
-						msg := "GMINI : Gemini a refusé ou simulé deux fois sans appeler les outils locaux. Relancez la demande ou ouvrez une nouvelle conversation."
-						s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
+				if rres.earlyStopReason == "stall" && rres.transmittedBytes == 0 && maxRetries > 0 {
+					nextParams, ok := s.prepareStallRetry(ctx, sse, cid, created, model, true, retryParams, rres, 1, 1)
+					if !ok {
 						return
 					}
+					stallRetriesUsed++
+					retryParams = nextParams
+					rres, gate2, echo2, ok = runAttempt(retryParams, true, false, 0, 0)
+					if !ok {
+						return
+					}
+					rres, gate2, echo2, retryParams, ok = resolveInternalToolRetry(rres, gate2, echo2, retryParams)
+					if !ok {
+						return
+					}
+				}
+				// K53: Silent empty reply (rawText == "" && genErr == nil) on level >= 2 after tool_refusal/glitch -> 1 retry with 2->1 stepdown.
+				if rres.earlyStopReason == "" && !rres.noContentTimedOut && !rres.internalToolRetry && rres.genErr == nil && rres.rawText == "" && retryParams.Mode == 1 && retryParams.Level >= 2 {
+					if !s.waitRetryBackoff(ctx) {
+						return
+					}
+					afterLabel := "glitch"
+					if g.isToolRefusal {
+						afterLabel = "tool_refusal"
+					}
+					emptyParams := retryParams
+					stepdown := fmt.Sprintf("%d->1", emptyParams.Level)
+					emptyParams.Level = 1
+					s.rlog(ctx).Warn("empty_reply_retry", "after", afterLabel, "level_stepdown", stepdown, "temp_chat", emptyParams.TemporaryChat)
+					s.recordDiagIncident(ctx, "empty_reply", "retry", "réponse vide silencieuse après "+afterLabel+" ; nouvelle tentative", true)
+					if s.cfg.StreamThoughts {
+						if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, proxyWaitNote(s.currentNow(), "Réponse vide silencieuse de Google : nouvelle tentative (niveau réduit)…"))); err != nil {
+							s.rlog(ctx).Warn("sse write failed", "err", err)
+							return
+						}
+					}
+					retryParams = emptyParams
+					rres, gate2, echo2, ok = runAttempt(retryParams, true, false, 0, 0)
+					if !ok {
+						return
+					}
+					rres, gate2, echo2, retryParams, ok = resolveInternalToolRetry(rres, gate2, echo2, retryParams)
+					if !ok {
+						return
+					}
+				}
+				if finishCommonNonStream(rres, retryParams) {
+					return
+				}
+				if rres.earlyStopReason == "" && !rres.released && apiconv.IsUpstreamCannedErrorWithMarker(rres.rawText, rres.errorMarker) {
+					afterLabel := "tool_refusal"
+					if g.isGlitch && !g.isToolRefusal {
+						afterLabel = "glitch"
+					}
+					if s.cannedErrorRetryMode() != "once" || s.shouldSkipCannedRetry(model) {
+						s.recordModelFailure(model)
+						s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(rres.rawText), "after", afterLabel, "action", "reported")
+						s.recordDiagIncident(ctx, "canned_error", "reported", "erreur interne Gemini après "+afterLabel, false)
+						s.markTerminalError(ctx, "Erreur interne", "canned_error")
+						s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, retryParams), nil)), sse.done())
+						return
+					}
+					if !s.waitRetryBackoff(ctx) {
+						return
+					}
+					cannedParams, _ := prepareRecoveryParams(retryParams)
+					s.stats.cannedErrorRetries.Add(1)
+					retryTimeout := s.cannedErrorRetryTimeoutFor(len(cannedParams.Prompt))
+					s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(rres.rawText), "after", afterLabel, "action", "retry_once", "timeout_sec", int(retryTimeout.Seconds()), "temp_chat", cannedParams.TemporaryChat)
+					s.recordDiagIncident(ctx, "canned_error", "retry_once", "erreur interne après "+afterLabel+" ; nouvelle tentative", true)
+					if s.cfg.StreamThoughts {
+						if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, proxyWaitNote(s.currentNow(), "Gemini a renvoyé une erreur interne : nouvelle tentative…"))); err != nil {
+							s.rlog(ctx).Warn("sse write failed", "err", err)
+							return
+						}
+					}
+					rres, gate2, echo2, ok = runAttempt(cannedParams, true, false, retryTimeout, 0)
+					if !ok {
+						return
+					}
+					rres, gate2, echo2, cannedParams, ok = resolveInternalToolRetry(rres, gate2, echo2, cannedParams)
+					if !ok {
+						return
+					}
+					if rres.earlyStopMsg != "" {
+						s.markEarlyStopTerminalError(ctx, rres)
+						s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, rres.earlyStopMsg, nil)), sse.done())
+						return
+					}
+					if rres.cannedRetryTimedOut || rres.noContentTimedOut || (rres.earlyStopReason == "" && (rres.genErr != nil || rres.rawText == "" || (!rres.released && apiconv.IsUpstreamCannedErrorWithMarker(rres.rawText, rres.errorMarker)))) {
+						s.recordModelFailure(model)
+						s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(rres.rawText), "timed_out", rres.cannedRetryTimedOut || rres.noContentTimedOut, "after", afterLabel, "action", "reported")
+						s.recordDiagIncident(ctx, "canned_error", "reported", "erreur interne Gemini après "+afterLabel, false)
+						if rres.cannedRetryTimedOut || rres.noContentTimedOut {
+							s.markTerminalError(ctx, "Timeout", "canned_retry_timeout")
+						} else {
+							s.markTerminalError(ctx, "Erreur interne", "canned_error")
+						}
+						s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, cannedParams), nil)), sse.done())
+						return
+					}
+				}
+				if g.isGlitch && !g.isToolRefusal && rres.earlyStopReason == "" && !rres.released && len(declared) > 0 &&
+					(apiconv.IsUpstreamToolRefusal(rres.rawText) || apiconv.IsThoughtToolRefusalOrSimulation(rres.thoughtText, rres.rawText)) {
+					if !s.waitRetryBackoff(ctx) {
+						return
+					}
+					refusalParams, steppedDown2 := prepareRecoveryParams(retryParams)
+					prevLevel2 := refusalParams.Level
+					refusalParams = toolRefusalRetryParams(refusalParams)
+					rattrs := []any{"bytes", len(rres.rawText), "after", "glitch", "action", "retry_once", "temp_chat", refusalParams.TemporaryChat}
+					if steppedDown2 {
+						rattrs = append(rattrs, "level_stepdown", "4->2")
+					} else if refusalParams.Mode == 1 && prevLevel2 == 1 && refusalParams.Level == 2 {
+						rattrs = append(rattrs, "level_stepdown", "1->2")
+					}
+					s.rlog(ctx).Warn("upstream_tool_refusal", rattrs...)
+					s.recordDiagIncident(ctx, "tool_refusal", "retry", "refus d'outils après glitch ; nouvelle tentative corrective", true)
+					if s.cfg.StreamThoughts {
+						if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, proxyWaitNote(s.currentNow(), "Gemini affirme ne pas avoir d'outils locaux : nouvelle tentative avec consigne corrective…"))); err != nil {
+							s.rlog(ctx).Warn("sse write failed", "err", err)
+							return
+						}
+					}
+					retryParams = refusalParams
+					rres, gate2, echo2, ok = runAttempt(retryParams, true, false, 0, 0)
+					if !ok {
+						return
+					}
+					rres, gate2, echo2, retryParams, ok = resolveInternalToolRetry(rres, gate2, echo2, retryParams)
+					if !ok {
+						return
+					}
+					if finishCommonNonStream(rres, retryParams) || finishTerminalNonAnswer(rres, retryParams, "glitch_tool_refusal") {
+						return
+					}
+				}
+				// K34: Catch a post-stall handoff or silent Flash-Lite downgrade on retry output too (max 1 each).
+				if rres.earlyStopReason == "" && !rres.released {
+					gNext := s.evaluateAttemptGuards(ctx, retryParams, rres, declared, stallRetriesUsed, postStallHandoffRetried, modelDowngradeRetried)
+					if gNext.isPostStallHandoff || gNext.isDowngrade {
+						rpNext, ok := prepareGuardRetry(retryParams, gNext, len(rres.rawText), "retry")
+						if !ok {
+							return
+						}
+						retryParams = rpNext
+						rres, gate2, echo2, ok = runAttempt(retryParams, true, false, 0, 0)
+						if !ok {
+							return
+						}
+						if finishCommonNonStream(rres, retryParams) {
+							return
+						}
+					}
+				}
+				if finishTerminalNonAnswer(rres, retryParams, "retry") {
+					return
 				}
 				s.finishStreamProgress(ctx, sse, cid, model, declared, rres, &gate2, &echo2)
 				return
@@ -840,24 +1626,29 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 			case bres.out == kaShutdown:
 				s.sseTail(ctx, sse, sse.data(errorObj("server shutting down")), sse.done())
 			case bres.err != nil:
+				s.markTerminalError(ctx, "Erreur amont", "upstream_error")
 				s.sseTail(ctx, sse, sse.data(errorObj("upstream error: "+bres.err.Error())), sse.done())
-			case isToolRefusal && apiconv.IsUpstreamToolRefusal(bres.text):
+			case s.isCannedRetryText(ctx, bres.text):
+				s.recordModelFailure(model)
+				s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(bres.text), "after", "tool_refusal", "action", "reported")
+				s.recordDiagIncident(ctx, "canned_error", "reported", "erreur interne Gemini après tool_refusal", false)
+				s.markTerminalError(ctx, "Erreur interne", "canned_error")
+				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, retryParams), nil)), sse.done())
+			case len(declared) > 0 && apiconv.IsUpstreamToolRefusal(bres.text):
 				s.rlog(ctx).Warn("upstream_tool_refusal", "bytes", len(bres.text), "action", "reported")
-				msg := "GMINI : Gemini a affirmé deux fois qu'aucun outil local n'est déclaré ou disponible (« " +
-					strings.TrimSpace(bres.text) + " »). Relancez la demande ou ouvrez une nouvelle conversation."
+				s.recordDiagIncident(ctx, "tool_refusal", "reported", "refus/simulation d'outils sans appel local", false)
+				s.markTerminalError(ctx, "Refus outils", "tool_refusal")
+				msg := "GMINI : Gemini a refusé ou simulé sans appeler les outils locaux. Relancez la demande ou ouvrez une nouvelle conversation."
 				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
 			case apiconv.IsUpstreamGlitch(bres.text):
 				s.rlog(ctx).Warn("upstream_glitch", "bytes", len(bres.text), "action", "reported")
-				msg := "GMINI : Gemini a répondu deux fois par un message de service au lieu de traiter la demande (« " +
-					strings.TrimSpace(bres.text) + " »). Reformulez la demande en donnant le chemin complet du dossier ou du fichier, puis relancez."
-				if strings.Contains(bres.text, "<GenerateWidget") {
-					msg = "GMINI : Gemini a tenté deux fois d'ouvrir un de ses propres outils d'affichage au lieu de répondre. Relancez la demande, ou ouvrez une nouvelle conversation."
-				}
-				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
+				s.recordDiagIncident(ctx, "glitch", "reported", "message de service / extension Google", false)
+				s.markTerminalError(ctx, "Glitch Google", "glitch")
+				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, glitchReportMessage(bres.text), nil)), sse.done())
 			default:
 				if !res.warnEmitted {
 					if note := s.maybeSuspectWarning(ctx, model); note != "" {
-						if err := sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, note)); err != nil {
+						if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, note)); err != nil {
 							s.rlog(ctx).Warn("sse write failed", "err", err)
 							return
 						}
@@ -867,6 +1658,32 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 				s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, text, toolCalls)), sse.done())
 			}
 			return
+		}
+	}
+
+	if res.earlyStopReason == "" && !res.released && res.transmittedBytes == 0 && len(declared) > 0 && !toolUnparsedRetried {
+		_, parsedCalls, parseRep := apiconv.ParseToolCallsWith(strings.TrimSpace(res.rawText), declared)
+		if len(parsedCalls) == 0 && len(parseRep.Unparsed) > 0 {
+			toolUnparsedRetried = true
+			reason := parseRep.Unparsed[0].Reason
+			s.rlog(ctx).Warn("tool_unparsed_retry", "unparsed_count", len(parseRep.Unparsed), "reason", reason, "bytes", len(res.rawText))
+			s.recordDiagIncident(ctx, "tool_unparsed", "retry", "bloc tool_call JSON invalide ("+reason+") ; nouvelle tentative", true)
+			if s.cfg.StreamThoughts {
+				_ = sse.data(apiconv.ChatChunkReasoning(cid, created, model, proxyWaitNote(s.currentNow(), "Bloc tool_call JSON invalide : nouvelle tentative avec format strict…")))
+			}
+			retryParams := toolUnparsedRetryParams(curParams)
+			var ok bool
+			res, gate, echo, ok = runAttempt(retryParams, true, false, 0, 0)
+			if !ok {
+				return
+			}
+			res, gate, echo, retryParams, ok = resolveInternalToolRetry(res, gate, echo, retryParams)
+			if !ok {
+				return
+			}
+			if finishCommonNonStream(res, retryParams) || finishTerminalNonAnswer(res, retryParams, "tool_unparsed") {
+				return
+			}
 		}
 	}
 
@@ -905,7 +1722,10 @@ func (s *Server) finishStreamProgress(ctx context.Context, sse *sseStream, cid, 
 			}
 		}
 	}
-	text, toolCalls := s.finishText(ctx, strings.TrimSpace(res.rawText), true, declared)
+	text, toolCalls, parseRep := s.finishTextWithReport(ctx, strings.TrimSpace(res.rawText), true, declared)
+	if len(toolCalls) > 0 && len(parseRep.Unparsed) > 0 && s.cfg.StreamThoughts {
+		_ = sse.data(apiconv.ChatChunkReasoning(cid, res.created, model, proxyWaitNoteWithTitle(s.currentNow(), "Lot tool_call partiel", fmt.Sprintf("%d bloc(s) tool_call malformé(s) ignoré(s) ; %d appel(s) valide(s) transmis.", len(parseRep.Unparsed), len(toolCalls)))))
+	}
 	if len(toolCalls) > 0 && s.cfg.SplitReadWriteBatch {
 		if kept, deferred := apiconv.SplitPrematureReadWriteBatch(toolCalls); deferred > 0 {
 			toolCalls = kept
@@ -927,13 +1747,18 @@ func (s *Server) finishStreamProgress(ctx context.Context, sse *sseStream, cid, 
 		s.rlog(ctx).Warn("progress_text_mismatch", "sent_bytes", len(gate.Sent()), "final_bytes", len(text))
 	}
 	if len(toolCalls) == 0 && len(declared) > 0 {
+		if res.released && (apiconv.IsUpstreamToolRefusal(res.rawText) || apiconv.IsThoughtToolRefusalOrSimulation(res.thoughtText, res.rawText)) {
+			s.rlog(ctx).Warn("upstream_tool_refusal_released", "bytes", len(res.rawText), "sent_bytes", res.transmittedBytes)
+			s.recordDiagIncident(ctx, "tool_refusal_released", "released", "refus relayé à l'aval", true)
+			s.markTerminalError(ctx, "Refus outils", "tool_refusal_released")
+		}
 		toolFacts := reqToolFacts(ctx)
 		if kind, suspect := apiconv.DetectUnverifiedActionClaim(text, declared, toolFacts.SinceLastUser); suspect {
 			s.stats.unverifiedClaim.Add(1)
 			if ri != nil {
 				ri.setUnverifiedClaim(kind)
 			}
-			s.rlog(ctx).Warn("unverified_action_claim", "kind", kind, "bytes", len(text))
+			s.rlog(ctx).Warn("unverified_action_claim", "kind", kind, "bytes", len(text), "released", res.released)
 			rest += unverifiedActionWarning(kind)
 		}
 		if s.cfg.ToolAuditNote && s.cfg.StreamThoughts {
@@ -945,22 +1770,42 @@ func (s *Server) finishStreamProgress(ctx context.Context, sse *sseStream, cid, 
 	s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, rest, toolCalls)), sse.done())
 }
 
+// finishNoContentTimeout records a model failure, logs the no-content timeout
+// with heartbeat count, and terminates the progressive SSE stream cleanly.
+func (s *Server) finishNoContentTimeout(ctx context.Context, sse *sseStream, cid, model string, p gemini.GenParams, res streamToolsResult) {
+	s.recordModelFailure(model)
+	sec := int(res.noContentElapsed.Round(time.Second).Seconds())
+	if nc := s.noContentSecSetting(); sec < 1 && nc > 0 {
+		sec = nc
+	}
+	s.rlog(ctx).Warn("upstream_no_content_timeout", "elapsed_sec", sec, "heartbeats", res.heartbeats)
+	s.recordDiagIncident(ctx, "no_content_timeout", fmt.Sprintf("elapsed_sec=%d", sec), fmt.Sprintf("aucun contenu après %d s", sec), false)
+	s.markTerminalError(ctx, "Timeout", "no_content_timeout")
+	s.setErrorContext(ctx, "stream/watchdog", "finishNoContentTimeout", "no_content_timeout", fmt.Sprintf("Aucun contenu reçu de Google après %d s (%d battements)", sec, res.heartbeats))
+	msg := appendResumeHint(ctx, noContentTimeoutMessage(model, p, sec))
+	s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, msg, nil)), sse.done())
+}
+
 type streamToolsHooks struct {
-	progressive        bool
-	noInternalRetry    bool
-	cannedRetryTimeout time.Duration
-	cid                string
-	created            int64
-	model              string
-	gate               *apiconv.ProgressGate
-	echo               *apiconv.EchoFilter
+	progressive           bool
+	noInternalRetry       bool
+	isRetry               bool
+	cannedRetryTimeout    time.Duration
+	maxNoContentTimeout   time.Duration
+	initialSilenceTimeout time.Duration
+	cid                   string
+	created               int64
+	model                 string
+	gate                  *apiconv.ProgressGate
+	echo                  *apiconv.EchoFilter
 }
 
 type streamToolsResult struct {
 	rawText             string
 	thoughtText         string
-	earlyStopReason     string // "" | "marker" | "size" | "duration"
+	earlyStopReason     string // "" | "marker" | "size" | "duration" | "stall" | "initial_silence"
 	earlyStopMsg        string
+	fastStall           bool
 	internalToolRetry   bool
 	internalToolName    string
 	cannedRetryTimedOut bool
@@ -978,11 +1823,15 @@ type streamToolsResult struct {
 	aborted             bool // SSE write failed or client cancelled
 	created             int64
 	transmittedBytes    int
+	heldBytes           int
+	servedID            string
+	servedName          string
+	servedVerdict       string
 }
 
 // runStreamTools drives s.streamEvents for all stream+tools routes with keepalives,
 // in-flight tracking, K8 silence detection, and K9 early-stop / runaway caps.
-func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.GenParams, interval time.Duration, declared []apiconv.DeclaredTool, hooks *streamToolsHooks) streamToolsResult {
+func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.GenParams, interval time.Duration, declared []apiconv.DeclaredTool, hooks *streamToolsHooks, allowFastStall bool) streamToolsResult {
 	var res streamToolsResult
 	if hooks != nil {
 		res.created = hooks.created
@@ -1013,6 +1862,9 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		}
 	}
 	ri := reqFrom(ctx)
+	if ri != nil && p.Level > 0 {
+		ri.setThinkingLevel(p.Level)
+	}
 	h := gemini.StreamHandlers{
 		Opened:       func() { push(event{opened: true}) },
 		Heartbeat:    func() { push(event{heartbeat: true}) },
@@ -1046,7 +1898,13 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		return hooks.echo.Push(d)
 	}
 	start, lastWrite := time.Now(), time.Now()
-	const earlyHold = 400
+	earlyHold := 400
+	if len(declared) > 0 {
+		earlyHold = 4500
+		if hooks != nil && hooks.isRetry {
+			earlyHold = 6500
+		}
+	}
 	var early strings.Builder
 	thoughtBytes := 0
 	lastFrameTime := start
@@ -1054,11 +1912,13 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	silenceThreshold := time.Duration(s.silenceWarningSec()) * time.Second
 	maxHeldBytes := s.maxHeldBytes()
 	maxHeldDur := s.maxHeldDuration()
+	heldStallDur, heldStallFastDur := s.effectiveHeldStallDurations(len(p.Prompt))
 	heldNoteEvery := s.heldNoteInterval()
 	statusNoteEvery := s.statusNoteInterval()
 
 	rawAtLastUsefulTx := 0
-	var heldSince, lastHeldNoteAt, lastStatusAt time.Time
+	heldGrowthBytes := 0
+	var heldSince, lastHeldGrowthAt, lastHeldNoteAt, lastStatusAt time.Time
 	var lastStatusText string
 	completeToolCalls, lastCompleteEnd := 0, 0
 	lastHeldNoteBytes := 0
@@ -1086,6 +1946,9 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	initialWaitNoteSent := false
 	heartbeats := 0
 	noContentTimeout := s.noContentTimeout()
+	if hooks != nil && hooks.maxNoContentTimeout > 0 && noContentTimeout > 0 && hooks.maxNoContentTimeout < noContentTimeout {
+		noContentTimeout = hooks.maxNoContentTimeout
+	}
 	if hooks != nil && hooks.cannedRetryTimeout > 0 {
 		noContentTimeout = 0
 	}
@@ -1165,13 +2028,29 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			}
 		}
 		res.earlyStopReason = reason
+		res.heldBytes = heldBytes
+		if reason == "stall" && res.released && res.transmittedBytes > 0 && completeToolCalls == 0 {
+			// Part of the answer is already on the client's side, so no silent
+			// retry is possible (it would duplicate the text). Emit an explicit
+			// diagnostic: the GMINI notice below is the client-facing marker.
+			s.recordDiagIncident(ctx, "stall_after_release", "released", "stall après libération du refus", false)
+			s.rlog(ctx).Warn("stall_after_release",
+				"sent_bytes", res.transmittedBytes,
+				"held_bytes", heldBytes,
+				"complete_tool_calls", completeToolCalls)
+		}
 		s.noteEarlyStop(ctx, reason, completeToolCalls, raw.Len(), heldBytes, res.transmittedBytes, time.Since(start))
 		if completeToolCalls > 0 && lastCompleteEnd > 0 {
 			cancel(gemini.ErrEarlyStop)
 			res.rawText = raw.String()[:lastCompleteEnd]
 		} else {
+			res.rawText = raw.String()
 			cancel(gemini.ErrEarlyStopAborted)
-			res.earlyStopMsg = fmt.Sprintf("GMINI : la réponse de Gemini s'emballe (%d Ko sans fin) ; demande interrompue.", koCount(heldBytes))
+			if reason == "stall" {
+				res.earlyStopMsg = fmt.Sprintf("GMINI : Gemini s'est figé en cours d'appel d'outil (%s reçus sans suite) ; demande interrompue.", formatByteCount(heldBytes))
+			} else {
+				res.earlyStopMsg = fmt.Sprintf("GMINI : la réponse de Gemini s'emballe (%d Ko sans fin) ; demande interrompue.", koCount(heldBytes))
+			}
 		}
 	}
 
@@ -1201,14 +2080,14 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		case "off":
 			return true
 		case "retry":
-			if !res.released && res.transmittedBytes == 0 && completeToolCalls == 0 && (hooks == nil || !hooks.noInternalRetry) {
+			if len(declared) > 0 && !res.released && res.transmittedBytes == 0 && completeToolCalls == 0 && (hooks == nil || !hooks.noInternalRetry) {
 				res.internalToolRetry = true
 				res.internalToolName = name
 				s.rlog(ctx).Warn("internal_tool_retry", "tool", name)
-				cancel(gemini.ErrInternalToolRetry)
+				cancel(gemini.ErrEarlyStop)
 				return false
 			}
-			// Already transmitted text/tool_call: cannot retry, fall back to notify.
+			// Already transmitted text/tool_call (or no local tools): cannot retry, fall back to notify.
 		}
 		if !internalToolNotified {
 			internalToolNotified = true
@@ -1223,6 +2102,24 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			}
 		}
 		return true
+	}
+
+	// quotaTrip activates the global quota pause (K41). It returns false when the
+	// stream must stop: nothing useful reached the client yet, so the upstream is
+	// cancelled (no served_model_doubt retry) and the client gets the pause notice.
+	quotaTrip := func(servedID, servedName, reason, banner string) bool {
+		if !s.triggerQuotaPause(ctx, p.Model, servedID, servedName, reason, banner) {
+			return true
+		}
+		if res.modelForwarded || res.transmittedBytes > 0 || res.earlyStopMsg != "" {
+			return true
+		}
+		res.earlyStopReason = "quota_pause"
+		res.earlyStopMsg = quotaPauseMessage(s.quotaPauseSnapshot())
+		s.markTerminalError(ctx, "Pause quota", "quota_pause")
+		s.setErrorContext(ctx, "upstream/google", "quotaTrip", "quota_fallback_pause", "Repli modèle ou bannière limite détecté en cours de flux")
+		cancel(gemini.ErrEarlyStopAborted)
+		return false
 	}
 
 	handle := func(e event) bool {
@@ -1265,11 +2162,18 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 				ri.setLimitBanner(e.limitBanner)
 				if !ri.limitBannerHit.Swap(true) {
 					s.stats.limitBannerDetected.Add(1)
+					modelName := ""
+					if p.Model != nil {
+						modelName = p.Model.Name
+					}
+					banner := cleanLimitBanner(e.limitBanner)
+					s.rlog(ctx).Warn("limit_banner_detected", "model", modelName, "banner", banner)
+					s.recordDiagIncident(ctx, "limit_banner", "banner", "bannière de limite Google : "+banner, false)
 				}
 			} else {
 				s.stats.limitBannerDetected.Add(1)
 			}
-			return true
+			return quotaTrip("", "", "limit_banner", e.limitBanner)
 		}
 		if apiconv.IsInternalToolSignal(e.thought) || apiconv.IsInternalToolSignal(e.text) {
 			if !onInternalTool("artifact/skills") {
@@ -1283,16 +2187,26 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		if e.servedID != "" {
 			verdict := "confirmed"
 			if p.Model != nil && p.Model.ModelID != "" && e.servedID != p.Model.ModelID {
-				verdict = "other_model"
-				if p.Model.Description != "" && e.servedName == p.Model.Description {
-					verdict = "name_only"
+				if gemini.IsAutoModel(p.Model.ModelID, p.Model.Name, p.Model.DisplayName) {
+					verdict = "routed_auto"
+				} else {
+					verdict = "other_model"
+					if p.Model.Description != "" && e.servedName == p.Model.Description {
+						verdict = "name_only"
+					}
 				}
 			}
+			res.servedID = e.servedID
+			res.servedName = e.servedName
+			res.servedVerdict = verdict
 			if ri != nil {
 				ri.setServed(e.servedID, e.servedName, verdict)
 			}
 			if verdict == "other_model" && s.autoRefresh != nil {
 				s.autoRefresh.TriggerEarly()
+			}
+			if verdict == "other_model" && !quotaTrip(e.servedID, e.servedName, "other_model", "") {
+				return false
 			}
 			if hooks != nil && hooks.progressive && !res.warnEmitted && (verdict == "other_model" || verdict == "name_only") {
 				if note := s.maybeSuspectWarningFor(ctx, hooks.model, verdict, e.servedID); note != "" {
@@ -1305,13 +2219,16 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 			return true
 		}
 		if e.status != "" {
-			hasContent = true
+			isIntTool := apiconv.IsInternalToolStatus(e.status)
+			if !isIntTool {
+				hasContent = true
+			}
 			lastFrameTime = time.Now()
 			silenceWarned = false
 			if ri != nil {
 				ri.setStatusNote("Google : " + e.status)
 			}
-			if apiconv.IsInternalToolStatus(e.status) {
+			if isIntTool {
 				if !onInternalTool(e.status) {
 					return false
 				}
@@ -1342,7 +2259,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		}
 		hasContent = true
 		lastFrameTime = time.Now()
-		if silenceWarned && ri != nil {
+		if ri != nil {
 			ri.setStatusNote("")
 		}
 		prevRawLen := raw.Len()
@@ -1430,9 +2347,13 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 				toolFacts := reqToolFacts(ctx)
 				holdForRefusal := len(declared) > 0 &&
 					(apiconv.IsThoughtToolRefusalOrSimulation(thoughtBuilder.String(), raw.String()) ||
-						(raw.Len() <= 2000 && apiconv.IsUpstreamToolRefusal(raw.String())) ||
+						apiconv.IsUpstreamToolRefusal(raw.String()) ||
 						(raw.Len() <= 16384 && apiconv.IsEarlyFakeWriteOpener(raw.String(), declared, toolFacts.SinceLastUser)))
-				if raw.Len() >= earlyHold && !holdForRefusal {
+				// Only mark released when early actually contains text to emit and no
+				// fence/tool_call block is currently held open (e.g. response opened with
+				// ```tool_call or intro + open tool_call); keeping released=false preserves
+				// stall/refusal/code-ref retries.
+				if raw.Len() >= earlyHold && early.Len() > 0 && hooks.gate.Held() == 0 && !holdForRefusal {
 					res.released, out = true, early.String()
 				} else {
 					out = ""
@@ -1443,6 +2364,8 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 				res.modelForwarded = true
 				rawAtLastUsefulTx = raw.Len()
 				heldSince = time.Time{}
+				lastHeldGrowthAt = time.Time{}
+				heldGrowthBytes = 0
 				res.transmittedBytes += len(out)
 				ri.setSent(res.transmittedBytes)
 				if !write(sse.data(apiconv.ChatChunk(hooks.cid, hooks.created, hooks.model, out))) {
@@ -1452,8 +2375,14 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		}
 
 		heldBytes := raw.Len() - rawAtLastUsefulTx
-		if heldBytes > 0 && heldSince.IsZero() {
-			heldSince = time.Now()
+		if heldBytes > 0 {
+			if heldSince.IsZero() {
+				heldSince = time.Now()
+				lastHeldGrowthAt = heldSince
+			} else if raw.Len() > prevRawLen {
+				heldGrowthBytes += raw.Len() - prevRawLen
+				lastHeldGrowthAt = time.Now()
+			}
 		}
 		if maxHeldBytes > 0 && heldBytes > maxHeldBytes {
 			triggerCap("size", heldBytes)
@@ -1462,19 +2391,13 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		return true
 	}
 
-	if !keepalive() { // bytes right after the headers
-		return res
-	}
-	if ri != nil {
+	preLoopOK := keepalive() // bytes right after the headers
+	if preLoopOK && ri != nil {
 		if note := ri.takeStaleStreamNote(); note != "" {
 			if hooks != nil && hooks.progressive && s.cfg.StreamThoughts {
-				if !write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, "\n"+note+"\n"))) {
-					return res
-				}
+				preLoopOK = write(sse.data(apiconv.ChatChunkReasoning(hooks.cid, hooks.created, hooks.model, "\n"+note+"\n")))
 			} else {
-				if !write(sse.comment(note)) {
-					return res
-				}
+				preLoopOK = write(sse.comment(note))
 			}
 		}
 	}
@@ -1485,16 +2408,25 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	if maxHeldDur > 0 && maxHeldDur/4 > 0 && maxHeldDur/4 < tick {
 		tick = maxHeldDur / 4
 	}
+	if heldStallDur > 0 && heldStallDur/4 > 0 && heldStallDur/4 < tick {
+		tick = heldStallDur / 4
+	}
+	if allowFastStall && heldStallFastDur > 0 && heldStallFastDur/4 > 0 && heldStallFastDur/4 < tick {
+		tick = heldStallFastDur / 4
+	}
 	if heldNoteEvery > 0 && heldNoteEvery/4 > 0 && heldNoteEvery/4 < tick {
 		tick = heldNoteEvery / 4
 	}
 	if hooks != nil && hooks.cannedRetryTimeout > 0 && hooks.cannedRetryTimeout/4 > 0 && hooks.cannedRetryTimeout/4 < tick {
 		tick = hooks.cannedRetryTimeout / 4
 	}
+	if hooks != nil && hooks.initialSilenceTimeout > 0 && hooks.initialSilenceTimeout/4 > 0 && hooks.initialSilenceTimeout/4 < tick {
+		tick = hooks.initialSilenceTimeout / 4
+	}
 	if noContentTimeout > 0 && noContentTimeout/4 > 0 && noContentTimeout/4 < tick {
 		tick = noContentTimeout / 4
 	}
-	if noContentTimeout == 0 && noContentNoteWait > 0 && noContentNoteWait/4 > 0 && noContentNoteWait/4 < tick {
+	if noContentNoteWait > 0 && noContentNoteWait/4 > 0 && noContentNoteWait/4 < tick {
 		tick = noContentNoteWait / 4
 	}
 	if initialWaitNoteWait > 0 && initialWaitNoteWait/4 > 0 && initialWaitNoteWait/4 < tick {
@@ -1586,85 +2518,136 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
-loop:
-	for {
-		select {
-		case <-ctx.Done():
-			cancelled()
-			return res
-		case <-ticker.C:
-			if hooks != nil && hooks.cannedRetryTimeout > 0 && thoughtBytes == 0 && raw.Len() == 0 && time.Since(start) >= hooks.cannedRetryTimeout {
-				res.cannedRetryTimedOut = true
-				cancel(errCannedRetryTimeout)
+	gotDone := false
+	if preLoopOK {
+	loop:
+		for {
+			select {
+			case <-ctx.Done():
+				cancel(context.Cause(ctx))
 				break loop
-			}
-			if !hasContent && !streamOpenedAt.IsZero() {
-				elapsed := time.Since(streamOpenedAt)
-				if noContentTimeout > 0 && elapsed >= noContentTimeout {
-					res.noContentTimedOut = true
-					res.noContentElapsed = elapsed
-					cancel(errNoContentTimeout)
+			case <-ticker.C:
+				if hooks != nil && hooks.cannedRetryTimeout > 0 && thoughtBytes == 0 && raw.Len() == 0 && s.cannedErrorRetryExceeded(time.Since(start), len(p.Prompt), heartbeats) {
+					res.cannedRetryTimedOut = true
+					cancel(errCannedRetryTimeout)
 					break loop
 				}
-				if !initialWaitNoteSent && initialWaitNoteWait > 0 && elapsed >= initialWaitNoteWait {
-					initialWaitNoteSent = true
-					lastNoContentNoteAt = time.Now()
-					if !emitInitialWaitNote() {
-						return res
-					}
-				} else if noContentTimeout == 0 && noContentNoteWait > 0 && elapsed >= noContentNoteWait &&
-					(lastNoContentNoteAt.IsZero() || time.Since(lastNoContentNoteAt) >= noContentNoteWait) {
-					initialWaitNoteSent = true
-					lastNoContentNoteAt = time.Now()
-					if !emitWaitNote(elapsed) {
-						return res
-					}
+				if hooks != nil && hooks.initialSilenceTimeout > 0 && raw.Len() == 0 && thoughtBytes == 0 && thoughtBuilder.Len() == 0 && !res.released && time.Since(start) >= hooks.initialSilenceTimeout {
+					res.earlyStopReason = "initial_silence"
+					cancel(errInitialSilence)
+					break loop
 				}
-			}
-			heldBytes := raw.Len() - rawAtLastUsefulTx
-			if maxHeldDur > 0 && heldBytes > 0 && !heldSince.IsZero() && time.Since(heldSince) >= maxHeldDur {
-				triggerCap("duration", heldBytes)
-				break loop
-			}
-			if !hint() {
-				return res
-			}
-			if !checkSilence() {
-				return res
-			}
-			if !checkCodeRefWait() {
-				return res
-			}
-			if time.Since(lastWrite) >= interval && !keepalive() {
-				return res
-			}
-		case e := <-events:
-			if !handle(e) {
-				if res.aborted {
-					return res
-				}
-				break loop
-			}
-		case res.genErr = <-done:
-			for { // the generation is over: drain what it queued
-				select {
-				case e := <-events:
-					if !handle(e) {
-						if res.aborted {
-							return res
+				if !hasContent && !streamOpenedAt.IsZero() {
+					elapsed := time.Since(streamOpenedAt)
+					if noContentTimeout > 0 && elapsed >= noContentTimeout {
+						for draining := true; draining; {
+							select {
+							case ev := <-events:
+								if ev.heartbeat {
+									heartbeats++
+								}
+							default:
+								draining = false
+							}
 						}
+						res.noContentTimedOut = true
+						res.noContentElapsed = elapsed
+						res.heartbeats = heartbeats
+						cancel(errNoContentTimeout)
 						break loop
 					}
-					continue
-				default:
+					if !initialWaitNoteSent && initialWaitNoteWait > 0 && elapsed >= initialWaitNoteWait {
+						initialWaitNoteSent = true
+						lastNoContentNoteAt = time.Now()
+						if !emitInitialWaitNote() {
+							break loop
+						}
+					} else if noContentNoteWait > 0 && elapsed >= noContentNoteWait &&
+						(lastNoContentNoteAt.IsZero() || time.Since(lastNoContentNoteAt) >= noContentNoteWait) {
+						initialWaitNoteSent = true
+						lastNoContentNoteAt = time.Now()
+						if !emitWaitNote(elapsed) {
+							break loop
+						}
+					}
 				}
-				break
+				heldBytes := raw.Len() - rawAtLastUsefulTx
+				if completeToolCalls == 0 && heldStallDur > 0 && heldBytes > 0 && !lastHeldGrowthAt.IsZero() {
+					stallLimit := heldStallDur
+					fastStallUsed := false
+					if allowFastStall && heldStallFastDur > 0 && heldStallFastDur < heldStallDur &&
+						res.transmittedBytes == 0 && thoughtBytes == 0 && strings.Count(raw.String(), "```")%2 == 1 {
+						stallLimit = heldStallFastDur
+						fastStallUsed = true
+					}
+					if time.Since(lastHeldGrowthAt) >= stallLimit {
+						res.fastStall = fastStallUsed
+						triggerCap("stall", heldBytes)
+						break loop
+					}
+				}
+				if maxHeldDur > 0 && heldBytes > 0 && !heldSince.IsZero() && time.Since(heldSince) >= maxHeldDur {
+					// A genuine duration runaway requires either a captured tool call
+					// holding trailing text, or active held growth (not a small frozen opener).
+					activeGrowth := completeToolCalls > 0 ||
+						(heldGrowthBytes > 0 && (heldStallDur <= 0 || time.Since(lastHeldGrowthAt) < heldStallDur) && time.Since(lastHeldGrowthAt) < maxHeldDur/2) ||
+						heldBytes >= 1024
+					if activeGrowth {
+						triggerCap("duration", heldBytes)
+						break loop
+					}
+				}
+				if !hint() {
+					break loop
+				}
+				if !checkSilence() {
+					break loop
+				}
+				if !checkCodeRefWait() {
+					break loop
+				}
+				if time.Since(lastWrite) >= interval && !keepalive() {
+					break loop
+				}
+			case e := <-events:
+				if !handle(e) {
+					break loop
+				}
+			case res.genErr = <-done:
+				gotDone = true
+				for { // the generation is over: drain what it queued
+					select {
+					case e := <-events:
+						if !handle(e) {
+							break loop
+						}
+						continue
+					default:
+					}
+					break
+				}
+				break loop
 			}
-			break loop
 		}
+	}
+	if !gotDone && genCtx.Err() != nil {
+		// Bounded drain so streamEvents/streamOnce finishes its defer
+		// (met.upstream, recordCall, served_model, client_cancelled) before
+		// cancelled() and request_end run. Never wait on <-ctx.Done() here:
+		// on client cancel ctx is already done and would exit in 0 ms.
+		timer := time.NewTimer(200 * time.Millisecond)
+		select {
+		case <-done:
+			gotDone = true
+		case <-timer.C:
+		}
+		timer.Stop()
 	}
 	if ctx.Err() != nil {
 		cancelled()
+		return res
+	}
+	if res.aborted {
 		return res
 	}
 	res.thoughtText = thoughtBuilder.String()
@@ -1686,14 +2669,43 @@ func (s *Server) awaitStreamOrGenerate(ctx context.Context, sse *sseStream, p ge
 	if s.streamEvents == nil {
 		return s.awaitGenerate(ctx, sse, p, interval)
 	}
-	res := s.runStreamTools(ctx, sse, p, interval, declared, nil)
+	maxRetries := s.maxStallRetries()
+	curParams := p
+	res := s.runStreamTools(ctx, sse, curParams, interval, declared, nil, maxRetries > 0)
 	if res.aborted {
 		if errors.Is(context.Cause(ctx), errAbortedOnShutdown) {
 			return kaResult{out: kaShutdown}
 		}
 		return kaResult{out: kaGone}
 	}
+	for attempt := 1; (res.earlyStopReason == "stall" || (attempt > 1 && res.noContentTimedOut)) && res.transmittedBytes == 0 && attempt <= maxRetries; attempt++ {
+		nextParams, ok := s.prepareStallRetry(ctx, sse, "", 0, "", false, curParams, res, attempt, maxRetries)
+		if !ok {
+			if errors.Is(context.Cause(ctx), errAbortedOnShutdown) {
+				return kaResult{out: kaShutdown}
+			}
+			return kaResult{out: kaGone}
+		}
+		if res.noContentTimedOut {
+			s.recordDiagIncident(ctx, "no_content_timeout", "retry", "aucun contenu (tentative non-finale)", true)
+		} else {
+			s.recordDiagIncident(ctx, "stall", "retry", "aucun premier texte (stall)", true)
+		}
+		curParams = nextParams
+		var hooks *streamToolsHooks
+		if maxCap := s.stallRetryNoContentCap(attempt, maxRetries); maxCap > 0 {
+			hooks = &streamToolsHooks{maxNoContentTimeout: maxCap}
+		}
+		res = s.runStreamTools(ctx, sse, curParams, interval, declared, hooks, attempt < maxRetries)
+		if res.aborted {
+			if errors.Is(context.Cause(ctx), errAbortedOnShutdown) {
+				return kaResult{out: kaShutdown}
+			}
+			return kaResult{out: kaGone}
+		}
+	}
 	if res.earlyStopMsg != "" {
+		s.markEarlyStopTerminalError(ctx, res)
 		return kaResult{text: res.earlyStopMsg}
 	}
 	if res.earlyStopReason != "" {
@@ -1704,10 +2716,13 @@ func (s *Server) awaitStreamOrGenerate(ctx context.Context, sse *sseStream, p ge
 			s.recordModelFailure(p.Model.Name)
 		}
 		sec := int(res.noContentElapsed.Round(time.Second).Seconds())
-		if sec < 1 && s.cfg.NoContentSec > 0 {
-			sec = s.cfg.NoContentSec
+		if nc := s.noContentSecSetting(); sec < 1 && nc > 0 {
+			sec = nc
 		}
 		s.rlog(ctx).Warn("upstream_no_content_timeout", "elapsed_sec", sec, "heartbeats", res.heartbeats)
+		s.recordDiagIncident(ctx, "no_content_timeout", fmt.Sprintf("elapsed_sec=%d", sec), fmt.Sprintf("aucun contenu après %d s", sec), false)
+		s.markTerminalError(ctx, "Timeout", "no_content_timeout")
+		s.setErrorContext(ctx, "stream/watchdog", "finishNoContentTimeout", "no_content_timeout", fmt.Sprintf("Aucun contenu reçu de Google après %d s (%d battements)", sec, res.heartbeats))
 		return kaResult{text: noContentTimeoutMessage("", p, sec)}
 	}
 	if res.internalToolRetry {
@@ -1748,7 +2763,7 @@ type kaResult struct {
 
 // glitchRetryNote is appended to the prompt on the single retry after a canned
 // upstream non-answer so Google does not receive an identical second request.
-const glitchRetryNote = "\n\n[Retry instruction: Do not use Google Drive, Gmail, Workspace, or any built-in Google extension or widget. All workspace files are local on the user's machine and can only be accessed using the listed tools. Reply now either with a ```tool_call block or plain text.]"
+const glitchRetryNote = "\n\n[Retry instruction: Use ONLY the declared local tools via a ```tool_call JSON block, or reply directly in plain text. Never invoke any built-in assistant feature, web lookup, internal tool, widget, external connector, or any third-party/partner app, and never prefix tool names with any namespace.]"
 
 func glitchRetryParams(p gemini.GenParams) gemini.GenParams {
 	p.Prompt += glitchRetryNote
@@ -1758,7 +2773,17 @@ func glitchRetryParams(p gemini.GenParams) gemini.GenParams {
 const toolRefusalRetryNote = "\n\n[Retry instruction: The listed tools are NOT built-in model features. You invoke them by outputting a ```tool_call block in your reply; the user's system executes it locally and returns the result. There is NO tool call limit or quota per turn or per cycle. NEVER reply that tools are not declared, unavailable, or at a tool/action limit or quota, and NEVER simulate or invent a report without calling the tools first: output a ```tool_call block now or reply in plain text.]"
 
 func toolRefusalRetryParams(p gemini.GenParams) gemini.GenParams {
+	if p.Mode == 1 && p.Level == 1 {
+		p.Level = 2
+	}
 	p.Prompt += toolRefusalRetryNote
+	return p
+}
+
+const silentSkipRetryNote = "\n\n[Retry instruction: You replied with plain text but did NOT emit any ```tool_call block, while the task still requires an action. Do NOT summarize progress or list remaining steps. Emit the next concrete ```tool_call block(s) now, or clearly state that the task is fully complete.]"
+
+func silentSkipRetryParams(p gemini.GenParams) gemini.GenParams {
+	p.Prompt += silentSkipRetryNote
 	return p
 }
 
@@ -1778,7 +2803,43 @@ func unverifiedActionWarning(kind string) string {
 	}
 }
 
-const internalToolRetryNote = "\n\n[CRITICAL REMINDER: Do NOT invoke any internal Google tool, Canvas, artifact generator, widget, Google Search, Drive, or Docs. Use ONLY the provided local tools, or reply directly in plain text.]"
+func glitchReportMessage(text string) string {
+	if strings.Contains(text, "<GenerateWidget") {
+		return "GMINI : Gemini a tenté deux fois d'ouvrir un de ses propres outils d'affichage au lieu de répondre. Relancez la demande, ou ouvrez une nouvelle conversation."
+	}
+	if low := strings.ToLower(text); strings.Contains(low, "permission to turn on") || strings.Contains(low, "autorisation d'activer") || strings.Contains(low, "autorisation d’activer") {
+		return "GMINI : Gemini a tenté deux fois d'activer une application ou extension tierce au lieu de répondre. Relancez la demande, ou ouvrez une nouvelle conversation."
+	}
+	return "GMINI : Gemini a répondu deux fois par un message de service au lieu de traiter la demande (« " +
+		strings.TrimSpace(text) + " »). Reformulez la demande en donnant le chemin complet du dossier ou du fichier, puis relancez."
+}
+
+const postStallHandoffRetryNote = "\n\n[Retry instruction: Do NOT write a status summary, progress checklist, or list of remaining steps/files. A previous tool call was interrupted before completing; emit ONLY the next concrete ```tool_call block(s) immediately.]"
+
+const initialSilenceAntiInternalNote = "\n\n[Retry instruction: Use ONLY the declared local tools via a ```tool_call JSON block. Never invoke any built-in assistant feature, web lookup, internal tool, widget, or external connector, and never prefix tool names with any namespace.]"
+
+const toolUnparsedRetryNote = "\n\n[Retry instruction: Your previous ```tool_call block was not valid JSON and could not be parsed. Output a strictly valid JSON ```tool_call block: escape all newlines as \\n and quotes as \\\" inside string values, or split large edits into smaller calls.]"
+
+func toolUnparsedRetryParams(p gemini.GenParams) gemini.GenParams {
+	p.Prompt += toolUnparsedRetryNote
+	return p
+}
+
+func postStallHandoffRetryParams(p gemini.GenParams) gemini.GenParams {
+	p, _ = prepareRecoveryParams(p)
+	if p.Model == nil || !gemini.IsAutoModel(p.Model.ModelID, p.Model.Name, p.Model.DisplayName) {
+		p.Mode = 1
+		if p.Level == 4 {
+			p.Level = 2
+		}
+	}
+	p.Prompt += postStallHandoffRetryNote
+	return p
+}
+
+const stallWriteFileRetryHint = "\n\n[Retry hint: Your previous response froze mid-tool_call. Emit ONE concise write_file call at a time instead of one large block (or for large Vue/HTML/TS files, use run_command with cat <<'EOF' > <path> if a command tool is declared).]"
+
+const internalToolRetryNote = "\n\n[CRITICAL REMINDER: Use ONLY the declared local tools by emitting a ```tool_call JSON block immediately, or reply directly in plain text. Never invoke any built-in assistant feature, web lookup, internal tool, widget, external connector, or any third-party/partner app, and never prefix tool names with any namespace.]"
 
 func internalToolRetryParams(p gemini.GenParams) gemini.GenParams {
 	p.Prompt += internalToolRetryNote
@@ -1788,29 +2849,44 @@ func internalToolRetryParams(p gemini.GenParams) gemini.GenParams {
 var (
 	errCannedRetryTimeout = errors.New("canned_retry_timeout")
 	errNoContentTimeout   = errors.New("no_content_timeout")
+	errInitialSilence     = errors.New("initial_silence")
 )
+
+func (s *Server) initialSilenceTimeout() time.Duration {
+	if s.initialSilenceTimeoutOverride < 0 {
+		return 0
+	}
+	if s.initialSilenceTimeoutOverride > 0 {
+		return s.initialSilenceTimeoutOverride
+	}
+	return 25 * time.Second
+}
 
 func (s *Server) noContentTimeout() time.Duration {
 	if s.noContentTimeoutOverride > 0 {
 		return s.noContentTimeoutOverride
 	}
-	if s.cfg.NoContentSec <= 0 {
+	nc := s.noContentSecSetting()
+	if nc <= 0 {
 		return 0
 	}
-	return time.Duration(s.cfg.NoContentSec) * time.Second
+	return time.Duration(nc) * time.Second
 }
 
 func (s *Server) noContentNoteInterval() time.Duration {
 	if s.noContentNoteOverride > 0 {
 		return s.noContentNoteOverride
 	}
-	if s.cfg.WaitNoteSec < 0 {
+	s.cfgMu.RLock()
+	wn := s.cfg.WaitNoteSec
+	s.cfgMu.RUnlock()
+	if wn < 0 {
 		return 0
 	}
-	if s.cfg.WaitNoteSec == 0 {
+	if wn == 0 {
 		return 15 * time.Second
 	}
-	return time.Duration(s.cfg.WaitNoteSec) * time.Second
+	return time.Duration(wn) * time.Second
 }
 
 func (s *Server) initialWaitNoteDelay() time.Duration {
@@ -1840,6 +2916,8 @@ func shortWaitTitle(msg string) string {
 		return "Appel d'outil reçu, suite en cours…"
 	case strings.Contains(msg, "Préparation d'un appel d'outil"):
 		return "Préparation d'un appel d'outil…"
+	case strings.Contains(msg, "aucune réponse après"):
+		return "Nouvelle tentative (silence initial)…"
 	case strings.Contains(msg, "ne répond plus"):
 		return "Silence Google (outil interne probable)…"
 	}
@@ -1870,11 +2948,51 @@ func proxyWaitNoteWithTitle(now time.Time, title, msg string) string {
 	return fmt.Sprintf("\n**[%s] GMINI — %s**\nGMINI (pas le modèle — attente technique) : %s\n", now.Format("15:04:05"), title, msg)
 }
 
+// Canned-error retry budget for very large prompts. A retried answer on a
+// >=200 KiB prompt has a first token around 125 s at p90 (measured upstream), so
+// the default 55 s budget would abort the retry before the first text arrives.
+const (
+	cannedErrorLargePromptBytes   = 200 * 1024
+	cannedErrorLargePromptTimeout = 120 * time.Second
+)
+
 func (s *Server) cannedErrorRetryTimeout() time.Duration {
 	if s.cannedRetryTimeoutOverride > 0 {
 		return s.cannedRetryTimeoutOverride
 	}
-	return time.Duration(positive(s.cfg.CannedErrorRetrySec, 25)) * time.Second
+	s.cfgMu.RLock()
+	sec := s.cfg.CannedErrorRetrySec
+	s.cfgMu.RUnlock()
+	return time.Duration(positive(sec, 55)) * time.Second
+}
+
+// cannedErrorRetryTimeoutFor returns the retry timeout to arm for a prompt of
+// promptBytes bytes. The explicit override always wins (no extension); otherwise
+// a large prompt gets the extended budget when it is longer than the base one.
+func (s *Server) cannedErrorRetryTimeoutFor(promptBytes int) time.Duration {
+	if s.cannedRetryTimeoutOverride > 0 {
+		return s.cannedRetryTimeoutOverride
+	}
+	base := s.cannedErrorRetryTimeout()
+	if promptBytes >= cannedErrorLargePromptBytes && cannedErrorLargePromptTimeout > base {
+		return cannedErrorLargePromptTimeout
+	}
+	return base
+}
+
+// cannedErrorRetryExceeded reports whether elapsed exhausts the canned-error
+// retry budget. The extended large-prompt budget only applies while the upstream
+// stream is still alive (heartbeats > 0): a dead stream keeps the base budget so
+// it is cut fast instead of hanging for two minutes.
+func (s *Server) cannedErrorRetryExceeded(elapsed time.Duration, promptBytes, heartbeats int) bool {
+	if s.cannedRetryTimeoutOverride > 0 {
+		return elapsed >= s.cannedRetryTimeoutOverride
+	}
+	budget := s.cannedErrorRetryTimeout()
+	if promptBytes >= cannedErrorLargePromptBytes && heartbeats > 0 && cannedErrorLargePromptTimeout > budget {
+		budget = cannedErrorLargePromptTimeout
+	}
+	return elapsed >= budget
 }
 
 func modelDisplayLabel(model string, p gemini.GenParams) string {
@@ -2032,7 +3150,7 @@ func (s *Server) prepareStaleTokenAlert(ctx context.Context) {
 		return
 	}
 	mins := int(rot.TokenAge / time.Minute)
-	alert := fmt.Sprintf("GMINI : jeton de %d min — risque de repli sur un autre modèle ; actualisez le cookie depuis GMINI Control", mins)
+	alert := fmt.Sprintf("GMINI : jeton de %d min — risque de repli sur un autre modèle ; actualisez le cookie depuis GMINI Console-Web-UI", mins)
 	var streamNote string
 	now := s.currentNow()
 	s.staleWarnMu.Lock()
@@ -2074,26 +3192,255 @@ func (s *Server) promptWarnKB() int {
 }
 
 func (s *Server) maxHeldBytes() int {
-	if s.cfg.MaxHeldBytes < 0 {
+	v := s.cfgSnapshot().MaxHeldBytes
+	if v < 0 {
 		return 0
 	}
-	if s.cfg.MaxHeldBytes == 0 {
+	if v == 0 {
 		return 256 * 1024
 	}
-	return s.cfg.MaxHeldBytes
+	return v
 }
 
 func (s *Server) maxHeldDuration() time.Duration {
 	if s.heldDurationOverride > 0 {
 		return s.heldDurationOverride
 	}
-	if s.cfg.MaxHeldSec < 0 {
+	v := s.cfgSnapshot().MaxHeldSec
+	if v < 0 {
 		return 0
 	}
-	if s.cfg.MaxHeldSec == 0 {
+	if v == 0 {
 		return 120 * time.Second
 	}
-	return time.Duration(s.cfg.MaxHeldSec) * time.Second
+	return time.Duration(v) * time.Second
+}
+
+func (s *Server) heldStallDuration() time.Duration {
+	if s.heldStallOverride > 0 {
+		return s.heldStallOverride
+	}
+	v := s.cfgSnapshot().HeldStallSec
+	if v < 0 {
+		return 0
+	}
+	if v == 0 {
+		return 60 * time.Second
+	}
+	return time.Duration(v) * time.Second
+}
+
+func (s *Server) heldStallFastDuration() time.Duration {
+	if s.heldStallFastOverride > 0 {
+		return s.heldStallFastOverride
+	}
+	v := s.cfgSnapshot().HeldStallFastSec
+	if v < 0 {
+		return 0
+	}
+	if v == 0 {
+		return 25 * time.Second
+	}
+	return time.Duration(v) * time.Second
+}
+
+const largePromptStallThresholdBytes = 250 * 1024
+
+func (s *Server) effectiveHeldStallDurations(promptBytes int) (stall, fast time.Duration) {
+	stall = s.heldStallDuration()
+	fast = s.heldStallFastDuration()
+	if promptBytes >= largePromptStallThresholdBytes {
+		if s.heldStallOverride <= 0 && stall > 0 && stall < 90*time.Second {
+			stall = 90 * time.Second
+		}
+		if s.heldStallFastOverride <= 0 && fast > 0 && fast < 40*time.Second {
+			fast = 40 * time.Second
+		}
+	}
+	return stall, fast
+}
+
+func (s *Server) maxStallRetries() int {
+	v := s.cfgSnapshot().HeldStallRetries
+	if v < 0 {
+		return 0
+	}
+	if v == 0 {
+		return 3
+	}
+	if v > 5 {
+		return 5
+	}
+	return v
+}
+
+func (s *Server) stallRetryBackoff() time.Duration {
+	if s.stallRetryBackoffOverride < 0 {
+		return 0
+	}
+	if s.stallRetryBackoffOverride > 0 {
+		return s.stallRetryBackoffOverride
+	}
+	return 750*time.Millisecond + time.Duration(rand.Intn(751))*time.Millisecond
+}
+
+func (s *Server) waitRetryBackoff(ctx context.Context) bool {
+	if delay := s.stallRetryBackoff(); delay > 0 {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+	} else if ctx.Err() != nil {
+		return false
+	}
+	return true
+}
+
+// prepareRecoveryParams steps down 4 Hydrogen (mode=1, level=4) to level=2
+// (the highest-reliability thinking level) on recovery retries, preserving
+// p.TemporaryChat as configured.
+func prepareRecoveryParams(p gemini.GenParams) (gemini.GenParams, bool) {
+	if p.Mode == 1 && p.Level == 4 {
+		p.Level = 2
+		return p, true
+	}
+	return p, false
+}
+
+const nonFinalStallRetryNoContentTimeout = 80 * time.Second
+
+func (s *Server) nonFinalStallNoContentCap() time.Duration {
+	if s.nonFinalStallNoContentOverride > 0 {
+		return s.nonFinalStallNoContentOverride
+	}
+	return nonFinalStallRetryNoContentTimeout
+}
+
+// stallRetryNoContentCap returns the no-content timeout cap for a stall retry
+// attempt: non-final attempts (attempt < maxRetries) are capped so subsequent
+// retries (e.g. 2/2) can still run, while the final attempt keeps the full
+// noContentTimeout (0 = no cap).
+func (s *Server) stallRetryNoContentCap(attempt, maxRetries int) time.Duration {
+	if attempt >= maxRetries {
+		return 0
+	}
+	return s.nonFinalStallNoContentCap()
+}
+
+func appendResumeHint(ctx context.Context, msg string) string {
+	ri := reqFrom(ctx)
+	if ri == nil {
+		return msg
+	}
+	ri.inFlightMu.RLock()
+	priorCalls := 0
+	for _, c := range ri.toolFacts.Total.Counts {
+		priorCalls += c
+	}
+	priorCalls += len(ri.emittedTools)
+	ri.inFlightMu.RUnlock()
+	if priorCalls <= 0 {
+		return msg
+	}
+	return msg + fmt.Sprintf("\n\n_Contexte de reprise GMINI : %d appel(s) d'outil déjà exécuté(s) dans cette conversation ; envoyez « Continue » pour reprendre à l'étape suivante sans repartir de zéro._", priorCalls)
+}
+
+func (s *Server) markTerminalError(ctx context.Context, state, reason string) {
+	if ri := reqFrom(ctx); ri != nil {
+		ri.setTerminalError(state, reason)
+	}
+}
+
+func (s *Server) setErrorContext(ctx context.Context, service, fn, code, detail string) {
+	if ri := reqFrom(ctx); ri != nil {
+		ri.setErrorContext(service, fn, code, detail)
+	}
+}
+
+func (s *Server) markEarlyStopTerminalError(ctx context.Context, res streamToolsResult) {
+	switch res.earlyStopReason {
+	case "quota_pause":
+		s.markTerminalError(ctx, "Pause quota", "quota_pause")
+		s.setErrorContext(ctx, "upstream/google", "quotaTrip", "quota_fallback_pause", "Pause quota déclenchée en cours de flux")
+	case "stall":
+		s.markTerminalError(ctx, "Blocage outil", "stall")
+		s.setErrorContext(ctx, "stream/watchdog", "runStreamTools", "early_stop:stall", res.earlyStopMsg)
+		s.recordDiagIncident(ctx, "stall", "terminal", res.earlyStopMsg, false)
+	default:
+		s.markTerminalError(ctx, "Réponse interrompue", res.earlyStopReason)
+		s.setErrorContext(ctx, "stream/watchdog", "runStreamTools", "early_stop:runaway", res.earlyStopMsg)
+		s.recordDiagIncident(ctx, "runaway", "terminal", res.earlyStopMsg, false)
+	}
+}
+
+func (s *Server) prepareStallRetry(ctx context.Context, sse *sseStream, cid string, created int64, model string, progressive bool, p gemini.GenParams, res streamToolsResult, attempt, maxRetries int) (gemini.GenParams, bool) {
+	if !s.waitRetryBackoff(ctx) {
+		return p, false
+	}
+
+	retryParams := p
+	stepdown := ""
+	if retryParams.Mode == 1 {
+		if attempt == 1 && retryParams.Level == 4 {
+			retryParams.Level = 2
+			stepdown = "4->2"
+		} else if attempt >= 2 && retryParams.Level > 1 {
+			stepdown = fmt.Sprintf("%d->1", retryParams.Level)
+			retryParams.Level = 1
+		}
+	}
+	hintAdded := false
+	isWriteStall := strings.Contains(res.rawText, "write_file") || strings.Contains(res.rawText, "edit_file")
+	if attempt >= 1 && isWriteStall && !strings.Contains(retryParams.Prompt, "[Retry hint:") {
+		retryParams.Prompt += stallWriteFileRetryHint
+		hintAdded = true
+	}
+
+	s.stats.heldStallRetries.Add(1)
+	attrs := []any{
+		"attempt", attempt,
+		"max_retries", maxRetries,
+		"held_bytes", res.heldBytes,
+		"fast_stall", res.fastStall,
+		"temp_chat", retryParams.TemporaryChat,
+		"model_forwarded", res.modelForwarded,
+		"released", res.released,
+	}
+	if stepdown != "" {
+		attrs = append(attrs, "level_stepdown", stepdown)
+	}
+	if hintAdded {
+		attrs = append(attrs, "retry_hint", true)
+	}
+	s.rlog(ctx).Info("held_stall_retry", attrs...)
+
+	if progressive && s.cfg.StreamThoughts {
+		var note string
+		if res.noContentTimedOut {
+			sec := int(res.noContentElapsed.Round(time.Second).Seconds())
+			note = fmt.Sprintf("Google n'a envoyé aucun contenu (%d s d'attente ; %d battement(s)) : nouvelle tentative automatique (%d/%d)…", sec, res.heartbeats, attempt, maxRetries)
+		} else {
+			note = fmt.Sprintf("Gemini s'est figé en cours d'appel d'outil (%s reçus sans suite) : nouvelle tentative automatique (%d/%d)…", formatByteCount(res.heldBytes), attempt, maxRetries)
+		}
+		if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, proxyWaitNote(s.currentNow(), note))); err != nil {
+			s.rlog(ctx).Warn("sse write failed", "err", err)
+			return p, false
+		}
+	}
+	return retryParams, true
+}
+
+func formatByteCount(bytes int) string {
+	if bytes < 0 {
+		bytes = 0
+	}
+	if bytes < 1024 {
+		return fmt.Sprintf("%d o", bytes)
+	}
+	return fmt.Sprintf("%d Ko", koCount(bytes))
 }
 
 func (s *Server) heldNoteInterval() time.Duration {
@@ -2130,6 +3477,8 @@ func (s *Server) noteEarlyStop(ctx context.Context, reason string, toolCalls, ra
 		s.stats.earlyStopSize.Add(1)
 	case "duration":
 		s.stats.earlyStopDuration.Add(1)
+	case "stall":
+		s.stats.earlyStopStall.Add(1)
 	}
 	s.rlog(ctx).Warn("early_stop",
 		"reason", reason,
@@ -2155,10 +3504,10 @@ func (s *Server) maybeSuspectWarningFor(ctx context.Context, model, verdict, ser
 		if servedID != "" {
 			note += " (" + servedID + ")"
 		}
-		note += " : modèle réel non garanti ; actualiser le cookie via le raccourci 7 et vérifier GMINI Control.\n"
+		note += " : modèle réel non garanti ; actualiser le cookie via le raccourci 7 et vérifier GMINI Console-Web-UI.\n"
 	case verdict == "other_model" || strings.HasPrefix(verdict, "suspect:"):
 		note = "\n⚠ GMINI : cette réponse ne vient probablement pas du modèle demandé (" + model +
-			"). Google sert un autre modèle quand la limite d'utilisation du site Gemini est atteinte. Vérifiez la page GMINI Control avant de vous fier au résultat.\n"
+			"). Google sert un autre modèle quand la limite d'utilisation du site Gemini est atteinte. Vérifiez la page GMINI Console-Web-UI avant de vous fier au résultat.\n"
 	default:
 		s.suspectWarnMu.Lock()
 		if verdict == "confirmed" && s.suspectWarn != nil {
@@ -2268,6 +3617,9 @@ func (s *Server) awaitGenerate(ctx context.Context, sse *sseStream, p gemini.Gen
 			}
 			if res.err != nil {
 				s.rlog(ctx).Warn("stream+tools upstream error after SSE open", "err", res.err, "elapsed", elapsed())
+			} else if s.quotaAfterGenerate(ctx, p) {
+				res.text = quotaPauseMessage(s.quotaPauseSnapshot())
+				s.markTerminalError(ctx, "Pause quota", "quota_pause")
 			}
 			return res
 		}
@@ -2301,6 +3653,9 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	m, err := s.client.ResolveModel(req.Model)
 	if err != nil {
 		sendError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if s.quotaPreflight(w, r, m, flavorOpenAI) {
 		return
 	}
 
@@ -2366,6 +3721,10 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		sendError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
 	}
+	if s.quotaAfterGenerate(r.Context(), p) {
+		s.sendQuotaPause429(w, flavorOpenAI)
+		return
+	}
 	text, toolCalls := s.finishText(r.Context(), text, toolsActive, req.DeclaredTools())
 	if text != "" || len(toolCalls) > 0 {
 		s.recordModelSuccess(m.Name)
@@ -2418,6 +3777,9 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 	m, err := s.client.ResolveModel(name)
 	if err != nil {
 		sendError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if s.quotaPreflight(w, r, m, flavorGoogle) {
 		return
 	}
 
@@ -2492,6 +3854,10 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		sendError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
 	}
+	if s.quotaAfterGenerate(r.Context(), p) {
+		s.sendQuotaPause429(w, flavorGoogle)
+		return
+	}
 	response := s.googleResponse(r.Context(), m.Name, prompt, text, hasTools, req.DeclaredTools())
 
 	if stream {
@@ -2537,12 +3903,17 @@ func (s *Server) streamGoogle(ctx context.Context, w http.ResponseWriter, model 
 	emit, finish := s.echoEmitter(ctx, emitRaw, &full)
 
 	var hasCandidate, hasThought bool
-	err := s.client.GenerateStreamEvents(gctx, p, gemini.StreamHandlers{
+	guard := s.newQuotaGuard(ctx, p, func() bool { return sse != nil }, cancel)
+	err := s.client.GenerateStreamEvents(gctx, p, guard.wrap(gemini.StreamHandlers{
 		Text:      emit,
 		Thought:   func(string) { hasThought = true },
 		Candidate: func() { hasCandidate = true },
-	})
+	}))
 	finish()
+	if sse == nil && guard.isTripped() {
+		s.sendQuotaPause429(w, flavorGoogle)
+		return
+	}
 	if sse == nil {
 		switch {
 		case noFlush:
@@ -2602,6 +3973,9 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	m := s.client.ResolveModelOrDefault(req.Model)
+	if s.quotaPreflight(w, r, m, flavorAnthropic) {
+		return
+	}
 	prompt, images, toolsActive := req.Prompt()
 	s.noteRequestParams(r.Context(), "anthropic", body, len(images))
 	if len(images) > 0 && !s.client.ImagesSupported() {
@@ -2667,6 +4041,10 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	text, err := s.client.Generate(r.Context(), p)
 	if err != nil {
 		sendAnthropicError(w, http.StatusBadGateway, "upstream error: "+err.Error())
+		return
+	}
+	if s.quotaAfterGenerate(r.Context(), p) {
+		s.sendQuotaPause429(w, flavorAnthropic)
 		return
 	}
 	text, toolCalls := s.finishText(r.Context(), text, toolsActive, req.DeclaredTools())
@@ -2736,12 +4114,17 @@ func (s *Server) streamMessages(ctx context.Context, w http.ResponseWriter, msgI
 	emit, finish := s.echoEmitter(ctx, emitRaw, &acc)
 
 	var hasCandidate, hasThought bool
-	err := s.client.GenerateStreamEvents(gctx, p, gemini.StreamHandlers{
+	guard := s.newQuotaGuard(ctx, p, func() bool { return sse != nil }, cancel)
+	err := s.client.GenerateStreamEvents(gctx, p, guard.wrap(gemini.StreamHandlers{
 		Text:      emit,
 		Thought:   func(string) { hasThought = true },
 		Candidate: func() { hasCandidate = true },
-	})
+	}))
 	finish()
+	if sse == nil && guard.isTripped() {
+		s.sendQuotaPause429(w, flavorAnthropic)
+		return
+	}
 	if sse == nil {
 		// Nothing was streamed yet, so a normal HTTP error status is still possible.
 		switch {
@@ -2836,6 +4219,8 @@ type errorResponse struct {
 
 type errorDetail struct {
 	Message string `json:"message"`
+	Type    string `json:"type,omitempty"`
+	Code    string `json:"code,omitempty"`
 }
 
 // healthResponse is returned by GET /.

@@ -152,4 +152,22 @@ func TestBodyTemporaryChatFlag(t *testing.T) {
 	if !up.TemporaryChat || up.DynamicSlots["45"] == "" {
 		t.Errorf("UpstreamParams when TemporaryChat=true = %+v", up)
 	}
+
+	// Per-request GenParams.TemporaryChat override sets inner[45] = 1 even when client setting is false.
+	perReqBody, _, err := offClient.buildBody(GenParams{Prompt: "PROMPT", TemporaryChat: true, Mode: 1, Level: 1}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vals, _ := url.ParseQuery(perReqBody)
+	var outer []any
+	if err := json.Unmarshal([]byte(vals.Get("f.req")), &outer); err != nil {
+		t.Fatal(err)
+	}
+	var perInner []any
+	if err := json.Unmarshal([]byte(outer[1].(string)), &perInner); err != nil {
+		t.Fatal(err)
+	}
+	if perInner[45] != float64(1) || perInner[79] != float64(1) || perInner[80] != float64(1) {
+		t.Errorf("per-request override: inner[45]=%v inner[79]=%v inner[80]=%v, want 1/1/1", perInner[45], perInner[79], perInner[80])
+	}
 }

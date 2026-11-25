@@ -260,3 +260,129 @@ func TestToolPromptReminderPlacementAndToggle(t *testing.T) {
 		t.Fatalf("reminder should be absent when disabled")
 	}
 }
+
+func TestToolPromptReminderT2TrailingAndCounterExample(t *testing.T) {
+	defer SetToolPromptRules(true)
+	defer SetToolPromptReminder(true)
+	defer SetNoInternalCodeExecRule(true)
+	SetToolPromptRules(true)
+	SetToolPromptReminder(true)
+	SetNoInternalCodeExecRule(true)
+
+	tools := []Tool{
+		{
+			Type: "function",
+			Function: &ToolFunction{
+				Name:        "run_command",
+				Description: "Execute shell command",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"CommandLine":{"type":"string"}},"required":["CommandLine"]}`),
+			},
+		},
+	}
+
+	// T1: no assistant/tool history after <USER_REQUEST> -> reminder before <USER_REQUEST>
+	t1Msgs := []Message{
+		{Role: "system", Content: jsonString("sys")},
+		{Role: "user", Content: jsonString("ctx\n<USER_REQUEST>\ncheck git status\n</USER_REQUEST>")},
+	}
+	p1 := messagesToPrompt(t1Msgs, tools, toolChoiceMode{})
+	idxRem1 := strings.Index(p1, "NEVER trigger Gemini internal artifacts")
+	idxReq1 := strings.Index(p1, "<USER_REQUEST>")
+	if idxRem1 < 0 || idxRem1 >= idxReq1 {
+		t.Fatalf("T1: expected reminder before <USER_REQUEST>, idxRem=%d idxReq=%d", idxRem1, idxReq1)
+	}
+	if !strings.Contains(p1, "Do NOT output ```bash?code_reference") {
+		t.Fatalf("T1: expected explicit bash?code_reference counter-example, got:\n%s", p1)
+	}
+	if !strings.Contains(p1, "```tool_call\n{\"name\": \"run_command\", \"arguments\": {...}}\n```") {
+		t.Fatalf("T1: expected explicit tool_call format example, got:\n%s", p1)
+	}
+
+	// T2+: [Assistant]: and [Tool result for ...]: follow <USER_REQUEST> -> reminder at the VERY END
+	t2Msgs := []Message{
+		{Role: "system", Content: jsonString("sys")},
+		{Role: "user", Content: jsonString("ctx\n<USER_REQUEST>\ncheck git status\n</USER_REQUEST>")},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Type: "function", Function: ToolCallFunction{Name: "run_command", Arguments: `{"CommandLine":"ls"}`}}}},
+		{Role: "tool", ToolCallID: "c1", Content: jsonString("file1.go\nfile2.go")},
+	}
+	p2 := messagesToPrompt(t2Msgs, tools, toolChoiceMode{})
+	idxRem2 := strings.Index(p2, "NEVER trigger Gemini internal artifacts")
+	idxToolRes := strings.LastIndex(p2, "[Tool result for run_command]:")
+	if idxToolRes < 0 || idxRem2 <= idxToolRes {
+		t.Fatalf("T2+: expected reminder after last [Tool result for ...], idxToolRes=%d idxRem=%d\n%s", idxToolRes, idxRem2, p2)
+	}
+	if !strings.HasSuffix(p2, "```tool_call\n{\"name\": \"run_command\", \"arguments\": {...}}\n```") {
+		t.Fatalf("T2+: expected prompt to end with explicit tool_call reminder, tail=%q", p2[max(0, len(p2)-160):])
+	}
+
+	// Toggle GEMINI_NO_INTERNAL_CODE_EXEC_RULE off -> counter-example absent, reminder still at end on T2+
+	SetNoInternalCodeExecRule(false)
+	p2Off := messagesToPrompt(t2Msgs, tools, toolChoiceMode{})
+	if strings.Contains(p2Off, "code_reference") {
+		t.Fatalf("expected no code_reference counter-example when disabled, got:\n%s", p2Off)
+	}
+	if !strings.HasSuffix(p2Off, shortToolPromptReminder) {
+		t.Fatalf("expected T2+ prompt to end with shortToolPromptReminder when code-exec rule is off, tail=%q", p2Off[max(0, len(p2Off)-120):])
+	}
+}
+
+func TestCodeRefWaitMsBeforeAsyncDefault10000(t *testing.T) {
+	declared := []DeclaredTool{
+		decl("run_command", []string{"CommandLine", "Cwd", "WaitMsBeforeAsync"}, "CommandLine", "Cwd", "WaitMsBeforeAsync", "SafeToAutoRun"),
+	}
+	declared[0].PropTypes = map[string]string{
+		"WaitMsBeforeAsync": "integer",
+		"SafeToAutoRun":     "boolean",
+	}
+	rawJSON, name, ok := BuildCommandToolCallFromCodeRef("```bash?code_reference\ngit status\n```", declared, nil)
+	if !ok || name != "run_command" {
+		t.Fatalf("BuildCommandToolCallFromCodeRef failed: ok=%v name=%q raw=%q", ok, name, rawJSON)
+	}
+	var payload struct {
+		Name      string         `json:"name"`
+		Arguments map[string]any `json:"arguments"`
+	}
+	if err := json.Unmarshal([]byte(rawJSON), &payload); err != nil {
+		t.Fatalf("invalid generated JSON %q: %v", rawJSON, err)
+	}
+	if payload.Arguments["WaitMsBeforeAsync"] != float64(10000) {
+		t.Fatalf("WaitMsBeforeAsync = %v, want 10000", payload.Arguments["WaitMsBeforeAsync"])
+	}
+}
+
+func TestToolPromptReminderT2TrailingSystemMessageWithoutUserRequest(t *testing.T) {
+	defer SetToolPromptRules(true)
+	defer SetToolPromptReminder(true)
+	defer SetNoInternalCodeExecRule(true)
+	SetToolPromptRules(true)
+	SetToolPromptReminder(true)
+	SetNoInternalCodeExecRule(true)
+
+	tools := []Tool{
+		{
+			Type: "function",
+			Function: &ToolFunction{
+				Name:        "run_command",
+				Description: "Execute shell command",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"CommandLine":{"type":"string"}},"required":["CommandLine"]}`),
+			},
+		},
+	}
+
+	msgs := []Message{
+		{Role: "system", Content: jsonString("sys")},
+		{Role: "user", Content: jsonString("ctx\n<USER_REQUEST>\ncheck repo\n</USER_REQUEST>")},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Type: "function", Function: ToolCallFunction{Name: "run_command", Arguments: `{"CommandLine":"ls"}`}}}},
+		{Role: "tool", ToolCallID: "c1", Content: jsonString("main.go")},
+		{Role: "user", Content: jsonString("<SYSTEM_MESSAGE>\nTask finished\n</SYSTEM_MESSAGE>")},
+	}
+	got := messagesToPrompt(msgs, tools, toolChoiceMode{})
+	idxSys := strings.LastIndex(got, "<SYSTEM_MESSAGE>\nTask finished\n</SYSTEM_MESSAGE>")
+	idxRem := strings.Index(got, "NEVER trigger Gemini internal artifacts")
+	if idxSys < 0 || idxRem <= idxSys {
+		t.Fatalf("expected reminder AFTER trailing <SYSTEM_MESSAGE>, idxSys=%d idxRem=%d\n%s", idxSys, idxRem, got)
+	}
+	if !strings.HasSuffix(got, "```tool_call\n{\"name\": \"run_command\", \"arguments\": {...}}\n```") {
+		t.Fatalf("expected prompt to end with tool_call reminder example, tail=%q", got[max(0, len(got)-160):])
+	}
+}

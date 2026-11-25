@@ -29,6 +29,7 @@ import (
 type CallRecord struct {
 	Time           string `json:"time"`
 	RequestID      string `json:"request_id,omitempty"`
+	BinaryTag      string `json:"binary_tag,omitempty"`
 	Model          string `json:"model"`
 	ModelID        string `json:"model_id,omitempty"`
 	Level          int    `json:"thinking_level"`
@@ -224,7 +225,11 @@ func (c *Client) loadCalls() {
 	if path == "" {
 		return
 	}
-	var confirmedPairs [][2]string
+	type confirmedCall struct {
+		id, name string
+		at       time.Time
+	}
+	var confirmedPairs []confirmedCall
 	func() {
 		c.calls.mu.Lock()
 		defer c.calls.mu.Unlock()
@@ -245,7 +250,7 @@ func (c *Client) loadCalls() {
 				t, _ := time.Parse(time.RFC3339, r.Time)
 				c.calls.updateModelIdentity(r, t)
 				if r.Identity == "confirmed" && r.ServedID != "" && r.ServedName != "" {
-					confirmedPairs = append(confirmedPairs, [2]string{r.ServedID, r.ServedName})
+					confirmedPairs = append(confirmedPairs, confirmedCall{id: r.ServedID, name: r.ServedName, at: t})
 				}
 				if len(c.calls.recs) > callFileCompact {
 					c.calls.recs = c.calls.recs[len(c.calls.recs)-callLogKeep:]
@@ -257,7 +262,7 @@ func (c *Client) loadCalls() {
 		}
 	}()
 	for _, pair := range confirmedPairs {
-		c.syncConfirmedServedName(pair[0], pair[1])
+		c.syncConfirmedServedNameAt(pair.id, pair.name, pair.at)
 	}
 }
 
@@ -320,19 +325,29 @@ func (l *callJournal) thinksUsually(model string) bool {
 
 // recordCall finalises and stores one record, and logs it.
 func (c *Client) recordCall(r CallRecord, scan *idScan) {
+	if r.BinaryTag == "" {
+		r.BinaryTag = c.BinaryTag()
+	}
 	catalogue := map[string]struct{}{}
 	askedName := ""
+	askedDisplayName := ""
 	for _, m := range c.ListModels() {
 		if m.ModelID != "" {
 			catalogue[m.ModelID] = struct{}{}
 		}
 		if m.Name == r.Model {
 			askedName = m.Description
+			askedDisplayName = m.DisplayName
 		}
 	}
 	for _, w := range c.WithdrawnModels() {
 		if w.Model.Name == r.Model {
-			askedName = w.Model.Description
+			if askedName == "" {
+				askedName = w.Model.Description
+			}
+			if askedDisplayName == "" {
+				askedDisplayName = w.Model.DisplayName
+			}
 		}
 	}
 	r.SeenModelIDs, r.OtherHexIDs, r.Identity = scan.classify(r.ModelID, catalogue)
@@ -341,11 +356,15 @@ func (c *Client) recordCall(r CallRecord, scan *idScan) {
 		r.ServedID, r.ServedName = scan.servedID, scan.servedName
 		r.Identity = "confirmed"
 		if r.ModelID != "" && r.ServedID != r.ModelID {
-			r.Identity = "other_model"
-			// Seen 2026-11-15 on "4 Carbon": Google's reply carried the asked
-			// model's name with another id. Which of the two is right is unknown.
-			if askedName != "" && r.ServedName == askedName {
-				r.Identity = "name_only"
+			if IsAutoModel(r.ModelID, r.Model, askedDisplayName) {
+				r.Identity = "routed_auto"
+			} else {
+				r.Identity = "other_model"
+				// Seen 2026-11-15 on "4 Carbon": Google's reply carried the asked
+				// model's name with another id. Which of the two is right is unknown.
+				if askedName != "" && r.ServedName == askedName {
+					r.Identity = "name_only"
+				}
 			}
 		}
 	} else if r.Frames == 0 && r.Identity == "confirmed" {
@@ -387,13 +406,14 @@ func (c *Client) recordCall(r CallRecord, scan *idScan) {
 			"first_text_ms", r.FirstTextMS, "thought_bytes", r.ThoughtBytes)
 	} else {
 		if r.Identity == "confirmed" && r.ServedID != "" && r.ServedName != "" {
-			if prevDesc, changed := c.syncConfirmedServedName(r.ServedID, r.ServedName); changed {
+			recAt, _ := time.Parse(time.RFC3339, r.Time)
+			if prevDesc, changed := c.syncConfirmedServedNameAt(r.ServedID, r.ServedName, recAt); changed {
 				c.log.Info("served_name_changed", "request_id", r.RequestID, "model", r.Model, "model_id", r.ModelID,
 					"catalog_name", prevDesc, "served_name", r.ServedName, "synced", true)
 				c.saveState()
 			}
 		}
-		if c.cfg.LogParams || r.Identity == "canned_error" {
+		if c.cfg.LogParams || r.Identity == "canned_error" || r.Identity == "routed_auto" {
 			c.log.Info("served_model", "request_id", r.RequestID, "model", r.Model, "identity", r.Identity,
 				"served_id", r.ServedID, "served_name", r.ServedName,
 				"seen_model_ids", strings.Join(r.SeenModelIDs, ","), "other_hex_ids", r.OtherHexIDs)
@@ -491,7 +511,7 @@ func (l *callJournal) updateModelIdentity(r CallRecord, at time.Time) {
 		LastTime:    at,
 	}
 	switch r.Identity {
-	case "confirmed":
+	case "confirmed", "routed_auto":
 		st.MismatchSince = time.Time{}
 	case "name_only", "other_model":
 		if !prev.MismatchSince.IsZero() {

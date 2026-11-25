@@ -91,6 +91,13 @@ type reqInfo struct {
 	toolFacts        apiconv.ConversationToolFacts
 	emittedTools     []string
 	unverifiedClaim  string
+	terminalState    string
+	terminalReason   string
+	thinkingLevel    string
+	errorService     string
+	errorFunc        string
+	errorCode        string
+	errorDetail      string
 }
 
 func (ri *reqInfo) setServed(id, name, verdict string) {
@@ -137,6 +144,47 @@ func (ri *reqInfo) setSent(sentBytes int) {
 	}
 	ri.inFlightMu.Lock()
 	ri.sentBytes = sentBytes
+	ri.inFlightMu.Unlock()
+}
+
+func (ri *reqInfo) setThinkingLevel(level int) {
+	if ri == nil || level <= 0 {
+		return
+	}
+	ri.inFlightMu.Lock()
+	ri.thinkingLevel = fmt.Sprintf("lvl=%d", level)
+	ri.inFlightMu.Unlock()
+}
+
+func (ri *reqInfo) setTerminalError(state, reason string) {
+	if ri == nil || state == "" {
+		return
+	}
+	ri.inFlightMu.Lock()
+	ri.terminalState = state
+	if reason != "" {
+		ri.terminalReason = reason
+	}
+	ri.inFlightMu.Unlock()
+}
+
+func (ri *reqInfo) setErrorContext(service, fn, code, detail string) {
+	if ri == nil {
+		return
+	}
+	ri.inFlightMu.Lock()
+	if service != "" {
+		ri.errorService = service
+	}
+	if fn != "" {
+		ri.errorFunc = fn
+	}
+	if code != "" {
+		ri.errorCode = code
+	}
+	if detail != "" {
+		ri.errorDetail = detail
+	}
 	ri.inFlightMu.Unlock()
 }
 
@@ -199,6 +247,7 @@ func (ri *reqInfo) takeStaleStreamNote() string {
 type InFlightRequest struct {
 	ID              string   `json:"id"`
 	ConvID          string   `json:"conv_id,omitempty"`
+	BinaryTag       string   `json:"binary_tag,omitempty"`
 	State           string   `json:"state,omitempty"`
 	Model           string   `json:"model"`
 	ServedID        string   `json:"served_id,omitempty"`
@@ -223,6 +272,12 @@ type InFlightRequest struct {
 	StaleTokenAlert string   `json:"stale_token_alert,omitempty"`
 	EmittedTools    []string `json:"emitted_tools,omitempty"`
 	UnverifiedClaim string   `json:"unverified_claim,omitempty"`
+	Method          string   `json:"method,omitempty"`
+	Route           string   `json:"route,omitempty"`
+	ErrorService    string   `json:"error_service,omitempty"`
+	ErrorFunc       string   `json:"error_func,omitempty"`
+	ErrorCode       string   `json:"error_code,omitempty"`
+	ErrorDetail     string   `json:"error_detail,omitempty"`
 }
 
 func (ri *reqInfo) inFlightSnapshot(now time.Time) InFlightRequest {
@@ -249,6 +304,7 @@ func (ri *reqInfo) inFlightSnapshot(now time.Time) InFlightRequest {
 	return InFlightRequest{
 		ID:              ri.id,
 		ConvID:          ri.convID,
+		BinaryTag:       currentBinaryTag(),
 		State:           "En cours",
 		Model:           ri.model,
 		ServedID:        ri.servedID,
@@ -273,6 +329,12 @@ func (ri *reqInfo) inFlightSnapshot(now time.Time) InFlightRequest {
 		StaleTokenAlert: ri.staleTokenAlert,
 		EmittedTools:    append([]string(nil), ri.emittedTools...),
 		UnverifiedClaim: ri.unverifiedClaim,
+		Method:          ri.method,
+		Route:           ri.route,
+		ErrorService:    ri.errorService,
+		ErrorFunc:       ri.errorFunc,
+		ErrorCode:       ri.errorCode,
+		ErrorDetail:     ri.errorDetail,
 	}
 }
 
@@ -282,6 +344,13 @@ type ctxKey struct{}
 func reqFrom(ctx context.Context) *reqInfo {
 	ri, _ := ctx.Value(ctxKey{}).(*reqInfo)
 	return ri
+}
+
+// setReqModel records the resolved model for the request log (used before preflight 429).
+func setReqModel(ctx context.Context, model string) {
+	if ri := reqFrom(ctx); ri != nil && model != "" {
+		ri.model = model
+	}
 }
 
 // setReqMeta records the resolved model and stream flag for the request log.
@@ -404,6 +473,8 @@ type statsCounters struct {
 	earlyStopMarker      atomic.Int64
 	earlyStopSize        atomic.Int64
 	earlyStopDuration    atomic.Int64
+	earlyStopStall       atomic.Int64
+	heldStallRetries     atomic.Int64
 	unverifiedClaim      atomic.Int64
 	readWriteBatchSplit  atomic.Int64
 
@@ -424,8 +495,8 @@ type activeSet struct {
 }
 
 const (
-	inFlightHistoryMaxConvs   = 5
-	inFlightHistoryMaxEntries = 200
+	inFlightHistoryMaxConvs   = 20
+	inFlightHistoryMaxEntries = 500
 )
 
 // inFlightHistory retains finished request snapshots for the last N distinct
@@ -645,8 +716,9 @@ func (s *Server) withTracking(next http.Handler) http.Handler {
 		s.active.add(ri)
 		s.stats.requests.Add(1)
 		sw := &statusWriter{ResponseWriter: w}
-		// The management page polls its own API every few seconds: not logged.
-		quiet := strings.HasPrefix(ri.route, "/_ui") && r.Method == http.MethodGet
+		// The management page and local status controls poll every few seconds: not logged.
+		quiet := r.Method == http.MethodGet && (strings.HasPrefix(ri.route, "/_ui") ||
+			((ri.route == "/" || ri.route == "/v1/models" || ri.route == "/models") && r.Header.Get("X-GMINI-Quiet") == "1"))
 		if !quiet {
 			s.log.Info("request_start", "request_id", id, "method", r.Method, "route", ri.route)
 		}
@@ -660,19 +732,76 @@ func (s *Server) withTracking(next http.Handler) http.Handler {
 			}
 			if ri.model != "" {
 				snap := ri.inFlightSnapshot(time.Now())
+				if snap.BinaryTag == "" {
+					snap.BinaryTag = currentBinaryTag()
+				}
+				ri.inFlightMu.RLock()
+				termState := ri.terminalState
+				termReason := ri.terminalReason
+				intTool := ri.internalToolName
+				ri.inFlightMu.RUnlock()
 				switch {
 				case errors.Is(context.Cause(ctx), errAbortedOnShutdown):
 					snap.State = "Arrêt proxy"
 				case r.Context().Err() != nil:
 					snap.State = "Annulée"
+				case status >= 400 && termState != "":
+					snap.State = termState
 				case status >= 400:
 					snap.State = fmt.Sprintf("HTTP %d", status)
+					if snap.ErrorCode == "" {
+						if status >= 500 {
+							snap.ErrorCode = "http_5xx"
+						} else {
+							snap.ErrorCode = "http_4xx"
+						}
+					}
+					if snap.ErrorService == "" {
+						snap.ErrorService = "api/http"
+					}
+				case termState != "":
+					snap.State = termState
 				case ri.limitBannerHit.Load():
 					snap.State = "Limite Google"
 				default:
 					snap.State = "Terminée"
+					snap.StatusNote = ""
 				}
 				s.flightHist.record(snap)
+
+				// K37: anonymized activity record (metadata only — never secrets,
+				// cookies, keys, or prompt/response content).
+				outcome := "text_only"
+				switch {
+				case errors.Is(context.Cause(ctx), errAbortedOnShutdown) || r.Context().Err() != nil:
+					outcome = "cancelled"
+				case status >= 400 || termState != "":
+					outcome = "error"
+				case len(snap.EmittedTools) > 0:
+					outcome = "tool_calls_ok"
+				}
+				reason := activityReason(outcome, status)
+				if outcome == "error" && termReason != "" {
+					reason = termReason
+				}
+				s.recordDiagActivity(DiagEvent{
+					RequestID:    id,
+					Model:        ri.model,
+					ServedModel:  snap.ServedName,
+					ToolCalls:    len(snap.EmittedTools),
+					ToolNames:    snap.EmittedTools,
+					InternalTool: cleanInternalToolLabel(intTool),
+					TTFTMS:       ri.met.FirstByteMS.Load(),
+					DurationMS:   time.Since(ri.start).Milliseconds(),
+					PromptBytes:  snap.PromptBytes,
+					Status:       status,
+					Outcome:      outcome,
+					Reason:       reason,
+					Route:        ri.method + " " + ri.route,
+					Service:      snap.ErrorService,
+					Func:         snap.ErrorFunc,
+				})
+				s.recordToolsDBOnClose(ri, snap, termReason, status)
 			}
 			switch {
 			case status >= 500:

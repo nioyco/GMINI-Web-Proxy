@@ -185,3 +185,312 @@ func TestN1_IsUpstreamCannedError(t *testing.T) {
 		t.Errorf("widget glitch with errorMarker=true must stay glitch, not canned error")
 	}
 }
+
+func TestSanitizeAssistantHistory(t *testing.T) {
+	canned := "I seem to be encountering an error. Can I try something else for you?"
+	gotCanned := SanitizeAssistantHistory(canned)
+	if strings.Contains(gotCanned, "encountering an error") || !strings.Contains(gotCanned, "transient error") {
+		t.Errorf("canned error not neutralized: %q", gotCanned)
+	}
+
+	notice := "GMINI : Gemini s'est figé en cours d'appel d'outil (537 o reçus sans suite) ; demande interrompue."
+	gotNotice := SanitizeAssistantHistory(notice)
+	if strings.Contains(gotNotice, "GMINI :") || !strings.Contains(gotNotice, "transient error") {
+		t.Errorf("GMINI notice not neutralized: %q", gotNotice)
+	}
+
+	refusalWithRecap := "Le quota d'appels d'outils pour ce tour est épuisé (`0` appel restant). Voici l'état exact atteint :\n\n### Fichiers déjà créés\n- `routes.go`"
+	gotRefusal := SanitizeAssistantHistory(refusalWithRecap)
+	if strings.Contains(gotRefusal, "quota d'appels d'outils") || strings.Contains(gotRefusal, "0` appel restant") {
+		t.Errorf("refusal line leaked after sanitize: %q", gotRefusal)
+	}
+	if !strings.Contains(gotRefusal, "NO quota or call limit") || !strings.Contains(gotRefusal, "### Fichiers déjà créés\n- `routes.go`") {
+		t.Errorf("sanitize did not preserve factual recap or add corrective note: %q", gotRefusal)
+	}
+
+	refusalOnly := "Le quota d'appels d'outils est épuisé (`0` appel restant)."
+	gotOnly := SanitizeAssistantHistory(refusalOnly)
+	if gotOnly != "[Previous turn was interrupted before calling tools; all declared tools are active with NO quota or call limit.]" {
+		t.Errorf("refusal-only sanitize = %q", gotOnly)
+	}
+
+	normal := "J'ai terminé l'analyse. " + strings.Repeat("Détail technique. ", 80) + "\nLe mot quota apparaît ici loin du début."
+	if got := SanitizeAssistantHistory(normal); got != normal {
+		t.Errorf("normal assistant turn modified: got len=%d want len=%d", len(got), len(normal))
+	}
+}
+
+func TestMessagesAndGoogleContentsSanitizeHistoryAndAntiQuotaReminder(t *testing.T) {
+	refusal := "Le quota d'appels d'outils pour ce tour est épuisé (`0` appel restant). Voici le résumé :\n### État\n- `app.go` créé"
+	gminiNotice := "GMINI : Gemini s'est figé en cours d'appel d'outil (1 Ko reçus sans suite) ; demande interrompue."
+	canned := "I seem to be encountering an error. Can I try something else for you?"
+
+	req := ChatRequest{
+		Messages: []Message{
+			{Role: "user", Content: jsonString("continue")},
+			{Role: "assistant", Content: jsonString(canned)},
+			{Role: "assistant", Content: jsonString(gminiNotice)},
+			{Role: "assistant", Content: jsonString(refusal)},
+			{Role: "user", Content: jsonString("fais la suite")},
+		},
+		Tools: []Tool{{Type: "function", Function: &ToolFunction{Name: "write_file", Parameters: json.RawMessage(`{"type":"object"}`)}}},
+	}
+	prompt, _, active := req.Prompt()
+	if !active {
+		t.Fatal("expected toolsActive=true")
+	}
+	for _, bad := range []string{"encountering an error", "GMINI : Gemini s'est figé", "quota d'appels d'outils", "`0` appel restant"} {
+		if strings.Contains(prompt, bad) {
+			t.Errorf("OpenAI prompt still contains poisoned history %q", bad)
+		}
+	}
+	if !strings.Contains(prompt, "- `app.go` créé") {
+		t.Errorf("OpenAI prompt dropped factual recap from refusal turn")
+	}
+	if !strings.Contains(prompt, "NO tool call limit or quota per turn") {
+		t.Errorf("OpenAI prompt missing anti-quota reminder at end")
+	}
+
+	// tool_choice="none" keeps normal assistant content untouched and omits the reminder.
+	reqNone := ChatRequest{
+		Messages: []Message{
+			{Role: "assistant", Content: jsonString(refusal)},
+			{Role: "user", Content: jsonString("résume")},
+		},
+		Tools:      req.Tools,
+		ToolChoice: json.RawMessage(`"none"`),
+	}
+	pNone, _, activeNone := reqNone.Prompt()
+	if activeNone || strings.Contains(pNone, "NO tool call limit or quota per turn") || !strings.Contains(pNone, "quota d'appels d'outils") {
+		t.Errorf("tool_choice=none behavior unexpected: active=%v", activeNone)
+	}
+
+	gReq := GenerateContentRequest{
+		Contents: []GoogleContent{
+			{Role: "user", Parts: []GooglePart{{Text: "go"}}},
+			{Role: "model", Parts: []GooglePart{{Text: gminiNotice}}},
+			{Role: "model", Parts: []GooglePart{{Text: refusal}}},
+			{Role: "user", Parts: []GooglePart{{Text: "suite"}}},
+		},
+		Tools: []GoogleTool{{FunctionDeclarations: []GoogleFunctionDecl{{Name: "write_file", Parameters: json.RawMessage(`{"type":"object"}`)}}}},
+	}
+	gPrompt, _, gActive := gReq.Prompt()
+	if !gActive {
+		t.Fatal("expected google toolsActive=true")
+	}
+	for _, bad := range []string{"GMINI : Gemini s'est figé", "quota d'appels d'outils", "`0` appel restant"} {
+		if strings.Contains(gPrompt, bad) {
+			t.Errorf("Google prompt still contains poisoned history %q", bad)
+		}
+	}
+	if !strings.Contains(gPrompt, "- `app.go` créé") || !strings.Contains(gPrompt, "NO tool call limit or quota per turn") {
+		t.Errorf("Google prompt missing preserved recap or anti-quota reminder")
+	}
+}
+
+func TestK32_GlitchCanvaAndHistorySanitization(t *testing.T) {
+	canvaReplies := []string{
+		"Sure. First, I'll need your permission to turn on the Canva app.",
+		"I need your permission to turn on the Spotify app.",
+		"J'ai besoin de votre autorisation d'activer l'application Canva.",
+		"Merci de donner votre autorisation d’activer l'application partenaire.",
+	}
+	for _, s := range canvaReplies {
+		if !IsUpstreamGlitch(s) {
+			t.Errorf("IsUpstreamGlitch(%q) = false, want true", s)
+		}
+		got := SanitizeAssistantHistory(s)
+		if strings.Contains(got, "permission") || strings.Contains(got, "autorisation") || strings.Contains(got, "Canva") || !strings.Contains(got, "transient error") {
+			t.Errorf("SanitizeAssistantHistory(%q) = %q, expected transient error replacement", s, got)
+		}
+	}
+
+	longProse := strings.Repeat("Documentation normale. ", 20) + "Mention permission to turn on the Canva app in docs."
+	if IsUpstreamGlitch(longProse) {
+		t.Errorf("long prose (>400B) should not trigger IsUpstreamGlitch")
+	}
+
+	tailRefusalHistory := "### Fichiers déjà créés\n- `pkg/a.go` ok\n\n" +
+		strings.Repeat("Ligne de bilan technique.\n", 75) +
+		"\nEnvoie simplement `continue` pour poursuivre."
+	sanitized := SanitizeAssistantHistory(tailRefusalHistory)
+	if strings.Contains(sanitized, "Envoie simplement") {
+		t.Errorf("tail refusal line not stripped by SanitizeAssistantHistory: %q", sanitized)
+	}
+	if !strings.Contains(sanitized, "NO quota or call limit") || !strings.Contains(sanitized, "- `pkg/a.go` ok") {
+		t.Errorf("SanitizeAssistantHistory lost recap or corrective note: %q", sanitized)
+	}
+}
+
+func TestK32_IsUpstreamToolRefusalHeadTailAndZeroFalsePositives(t *testing.T) {
+	yes := []struct {
+		name string
+		text string
+	}{
+		{"mixed_0_remaining_fr", "Statut : `0 remaining` appels d'outils pour ce tour."},
+		{"a_zero_0_restants", "Le budget d'outils est à zéro (0 restants) pour ce tour."},
+		{"0_restants_bare", "Il y a 0 restants pour cette requête."},
+		{"tail_continue_fr_2000B", strings.Repeat("État vérifié dans le module.\n", 68) + "Envoie simplement `continue` pour poursuivre."},
+		{"tail_relance_session_2920B", strings.Repeat("Analyse des fichiers terminée.\n", 94) + "Merci de relancer une nouvelle session."},
+		{"tail_continue_en_2000B", strings.Repeat("Verified report section.\n", 80) + "Reply `continue` to proceed with the remaining edits."},
+		{"tail_send_continue_en", strings.Repeat("Checklist line completed.\n", 75) + "Send \"continue\" to finish the task."},
+	}
+	for _, tc := range yes {
+		if !IsUpstreamToolRefusal(tc.text) {
+			t.Errorf("%s (len=%d): expected IsUpstreamToolRefusal=true", tc.name, len(tc.text))
+		}
+	}
+
+	no := []struct {
+		name string
+		text string
+	}{
+		{
+			name: "summary_compaction_with_keywords",
+			text: "<summary>\n# Previous Session Summary\nFixed quota d'appels d'outils épuisé and `0 remaining` appels d'outils.\nAlso discussed relancez une nouvelle session and Envoie simplement `continue` pour poursuivre.\n</summary>",
+		},
+		{
+			name: "final_report_with_0_remaining_warnings_and_action_limit",
+			text: strings.Repeat("## Section vérifiée\nTout a été écrit via write_file.\n", 35) +
+				"Tests OK: 0 remaining warnings, 0 remaining errors.\n" +
+				"Remarque sur le quota d'appels d'outils, action limit et tool quota dans la doc. Verdict : Commit possible.",
+		},
+	}
+	for _, tc := range no {
+		if IsUpstreamToolRefusal(tc.text) {
+			t.Errorf("%s (len=%d): false positive in IsUpstreamToolRefusal", tc.name, len(tc.text))
+		}
+	}
+}
+
+func TestK34_LongAndExtendedToolRefusalsAndHandoffSummary(t *testing.T) {
+	long22KBHead := "L'exécution d'outils est désactivée pour ce tour (0 appel d'outil restant).\n" +
+		strings.Repeat("- fichier inspecté et documenté dans le bilan.\n", 480)
+	if len(long22KBHead) <= 20000 {
+		t.Fatalf("expected >20KB fixture, got %d", len(long22KBHead))
+	}
+	long22KBTail := strings.Repeat("Ligne de résumé factuel vérifié.\n", 660) +
+		"\nEnvoie « Continue » pour lancer le prochain lot."
+
+	yesRefusal := []struct {
+		name string
+		text string
+	}{
+		{"head_22KB_disabled_tools_28b9d77f", long22KBHead},
+		{"tail_22KB_continue_pour_lancer", long22KBTail},
+		{"no_access_outils_locaux_79aa7eb5", "Je n'ai pas accès aux outils locaux dans cette session."},
+		{"execution_outils_desactivee", "Exécution d'outils est désactivée pour ce tour (0 appel restant)."},
+		{"en_tools_disabled", "Tool execution is disabled for this turn with 0 tool calls remaining."},
+		{"pour_lancer_2f989f3b", strings.Repeat("État validé.\n", 180) + "Envoie « Continue » pour lancer la suite."},
+		{"pour_ecrire_utf8_verb", "Envoie simplement `continue` pour écrire les tests."},
+		{"en_reply_continue_to_launch", "Reply `continue` to launch the next batch."},
+	}
+	for _, tc := range yesRefusal {
+		if !IsUpstreamToolRefusal(tc.text) {
+			t.Errorf("%s (len=%d): expected IsUpstreamToolRefusal=true", tc.name, len(tc.text))
+		}
+	}
+
+	summaryCompaction := "<summary>\nL'exécution d'outils est désactivée (0 appel d'outil restant).\n### Étapes restantes\n- Tester\n</summary>\n" +
+		strings.Repeat("Context line.\n", 1500)
+	if IsUpstreamToolRefusal(summaryCompaction) || IsPostStallHandoffSummary(summaryCompaction) {
+		t.Errorf("<summary> compaction must never trigger refusal or handoff")
+	}
+
+	handoffYes := []string{
+		"### État exact d'avancement\n- `routes.go` écrit\n### Étapes restantes\n- Écrire `main.go`",
+		"Voici les fichiers et étapes restants à traiter :",
+		"Dernières actions à exécuter avant livraison :",
+		"### Prochaines étapes\n1. Créer `App.vue`",
+		"Remaining steps:\n- Update router.ts",
+		"Files remaining to create: index.ts, style.css",
+	}
+	for _, s := range handoffYes {
+		if !IsPostStallHandoffSummary(s) {
+			t.Errorf("expected IsPostStallHandoffSummary=true for %q", s)
+		}
+	}
+	handoffNo := []string{
+		"",
+		"### État d'avancement\n```tool_call\n{\"name\":\"write_file\",\"arguments\":{\"path\":\"a.go\",\"content\":\"ok\"}}\n```",
+		"J'ai terminé l'analyse complète. Verdict : Commit possible.",
+	}
+	for _, s := range handoffNo {
+		if IsPostStallHandoffSummary(s) {
+			t.Errorf("false positive IsPostStallHandoffSummary for %q", s)
+		}
+	}
+
+	sanLong := SanitizeAssistantHistory(long22KBHead)
+	if strings.Contains(sanLong, "exécution d'outils est désactivée") || !strings.Contains(sanLong, "NO quota or call limit") {
+		t.Errorf("22KB refusal not sanitized: %q", sanLong[:200])
+	}
+	sanAccess := SanitizeAssistantHistory("Je n'ai pas accès aux outils locaux.")
+	if strings.Contains(sanAccess, "pas accès aux outils locaux") || !strings.Contains(sanAccess, "NO quota or call limit") {
+		t.Errorf("outils locaux refusal not sanitized: %q", sanAccess)
+	}
+	sanHandoff := SanitizeAssistantHistory("### État d'avancement\n- `a.go` créé\n### Étapes restantes\n- écrire `b.go`")
+	if strings.Contains(sanHandoff, "État d'avancement") || strings.Contains(sanHandoff, "Étapes restantes") ||
+		!strings.Contains(sanHandoff, "- `a.go` créé") || !strings.Contains(sanHandoff, "partial status checklist") {
+		t.Errorf("handoff not sanitized cleanly: %q", sanHandoff)
+	}
+}
+
+// K36: a refusal written in the MIDDLE of a long reply (far from the first and
+// last 1500 bytes) must still be detected now that the whole text is scanned.
+func TestK36_IsUpstreamToolRefusalMidMessage(t *testing.T) {
+	mid := strings.Repeat("Ligne factuelle vérifiée.\n", 90) +
+		"Je n'ai pas accès aux outils locaux dans cette session." +
+		strings.Repeat("Fin de bilan factuel.\n", 90)
+	if len(mid) < 3500 || len(mid) > 5000 {
+		t.Fatalf("fixture len=%d, want ~4000", len(mid))
+	}
+	pos := strings.Index(mid, "Je n'ai pas accès")
+	if pos < 1500 || len(mid)-pos < 1500 {
+		t.Fatalf("refusal at %d is not mid-message (len=%d)", pos, len(mid))
+	}
+	if !IsUpstreamToolRefusal(mid) {
+		t.Errorf("mid-message refusal (len=%d, at byte %d) not detected", len(mid), pos)
+	}
+
+	// An English mid-message refusal too.
+	midEN := strings.Repeat("Verified factual line.\n", 90) +
+		"I do not have access to your local filesystem in this session." +
+		strings.Repeat("End of factual report.\n", 90)
+	if !IsUpstreamToolRefusal(midEN) {
+		t.Errorf("mid-message EN refusal (len=%d) not detected", len(midEN))
+	}
+
+	// No new false positive on the existing "no" shapes now that the whole text
+	// is scanned: summary compaction and a final report mentioning the vocabulary.
+	stillNo := []struct {
+		name string
+		text string
+	}{
+		{
+			name: "summary_compaction_with_keywords",
+			text: "<summary>\n# Previous Session Summary\nFixed quota d'appels d'outils épuisé and `0 remaining` appels d'outils.\nAlso discussed relancez une nouvelle session and Envoie simplement `continue` pour poursuivre.\n</summary>",
+		},
+		{
+			name: "final_report_with_0_remaining_warnings_and_action_limit",
+			text: strings.Repeat("## Section vérifiée\nTout a été écrit via write_file.\n", 35) +
+				"Tests OK: 0 remaining warnings, 0 remaining errors.\n" +
+				"Remarque sur le quota d'appels d'outils, action limit et tool quota dans la doc. Verdict : Commit possible.",
+		},
+		{
+			name: "long_report_mentioning_limits_without_claim",
+			text: strings.Repeat("La doc rappelle la limite d'appels d'outils configurable côté proxy.\n", 60) +
+				"Tout est conforme.",
+		},
+	}
+	for _, tc := range stillNo {
+		if IsUpstreamToolRefusal(tc.text) {
+			t.Errorf("%s (len=%d): new false positive with full-text scan", tc.name, len(tc.text))
+		}
+	}
+
+	// A tool_call block still wins over any refusal wording.
+	if IsUpstreamToolRefusal("Je n'ai pas accès aux outils locaux.\n```tool_call\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.go\"}}\n```") {
+		t.Error("a reply carrying a tool_call block must never be a refusal")
+	}
+}

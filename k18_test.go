@@ -115,6 +115,7 @@ func TestK18_T1_CodeRefBashAndTriggerCap(t *testing.T) {
 		cfg.SSEKeepaliveSec = 1
 		s := newServer(cfg, client, testLogger())
 		s.heldDurationOverride = 120 * time.Millisecond
+		s.heldStallOverride = 120 * time.Millisecond
 		s.keepaliveOverride = 30 * time.Millisecond
 		ts := httptest.NewServer(s.handler())
 		defer ts.Close()

@@ -18,3 +18,7 @@
 
 # Local analysis artifacts
 graphify-out/
+
+# Python bytecode
+__pycache__/
+*.pyc

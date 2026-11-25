@@ -5,14 +5,22 @@ import (
 	"github.com/nioyco/GMINI-Web-Proxy/pkg/apiconv"
 	"github.com/nioyco/GMINI-Web-Proxy/pkg/gemini"
 	"net/http"
+	"os"
+	"path/filepath"
 	"runtime/debug"
 	"time"
 )
+
+const uiVersion = "3.0.9"
 
 // statusResponse is the read-only diagnostic payload of GET /_status. It never
 // contains secrets: no cookie, key, token or prompt content.
 type statusResponse struct {
 	Version                string                  `json:"version"`
+	UIVersion              string                  `json:"ui_version"`
+	PID                    int                     `json:"pid"`
+	BinaryPath             string                  `json:"binary_path"`
+	BinaryName             string                  `json:"binary_name"`
 	Commit                 string                  `json:"commit"`
 	Dirty                  bool                    `json:"dirty"`
 	GoVersion              string                  `json:"go_version"`
@@ -43,10 +51,15 @@ type statusResponse struct {
 	PromptWarnKB           int                     `json:"prompt_warn_kb"`             // GEMINI_PROMPT_WARN_KB (default 300; 0 = off)
 	MaxHeldBytes           int                     `json:"max_held_bytes"`             // GEMINI_MAX_HELD_BYTES (0 = no limit)
 	MaxHeldSec             int                     `json:"max_held_sec"`               // GEMINI_MAX_HELD_SEC (0 = no limit)
+	HeldStallSec           int                     `json:"held_stall_sec"`             // GEMINI_HELD_STALL_SEC (0 = disabled)
+	HeldStallFastSec       int                     `json:"held_stall_fast_sec"`        // GEMINI_HELD_STALL_FAST_SEC (0 = disabled)
+	HeldStallRetriesMax    int                     `json:"held_stall_retries_max"`     // GEMINI_HELD_STALL_RETRIES (0..5)
 	InternalToolAction     string                  `json:"internal_tool_action"`       // GEMINI_INTERNAL_TOOL_ACTION (notify|retry|off)
 	CannedErrorRetry       string                  `json:"canned_error_retry"`         // GEMINI_CANNED_ERROR_RETRY (off|once)
-	CannedErrorRetrySec    int                     `json:"canned_error_retry_sec"`     // GEMINI_CANNED_ERROR_RETRY_SEC (default 25)
+	CannedErrorRetrySec    int                     `json:"canned_error_retry_sec"`     // GEMINI_CANNED_ERROR_RETRY_SEC (default 55)
 	NoContentSec           int                     `json:"no_content_sec"`             // GEMINI_NO_CONTENT_SEC (default 0)
+	PauseOnFallback        bool                    `json:"pause_on_fallback"`          // GEMINI_PAUSE_ON_FALLBACK (default true; K41)
+	QuotaPause             QuotaPauseState         `json:"quota_pause"`                // global premium pause state (K41)
 	WaitNoteSec            int                     `json:"wait_note_sec"`              // GEMINI_WAIT_NOTE_SEC (default 15; K18 T2)
 	ConfigLoadedAt         string                  `json:"config_loaded_at,omitempty"` // RFC 3339 timestamp of last .env load (K18 T5)
 	EnvModifiedSinceStart  bool                    `json:"env_modified_since_start"`   // true when .env mtime > ConfigLoadedAt (K18 T5)
@@ -200,10 +213,28 @@ func buildInfo() (commit string, dirty bool, goVersion string) {
 	return commit, dirty, bi.GoVersion
 }
 
+// binaryInfo returns the resolved executable path and its base name.
+func binaryInfo() (path, name string) {
+	exe, err := os.Executable()
+	if err != nil || exe == "" {
+		return "", ""
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil && resolved != "" {
+		exe = resolved
+	}
+	return exe, filepath.Base(exe)
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	commit, dirty, goVer := buildInfo()
+	binPath, binName := binaryInfo()
+	cfg := s.cfgSnapshot()
 	resp := statusResponse{
 		Version:             version,
+		UIVersion:           uiVersion,
+		PID:                 os.Getpid(),
+		BinaryPath:          binPath,
+		BinaryName:          binName,
 		Commit:              commit,
 		Dirty:               dirty,
 		GoVersion:           goVer,
@@ -213,12 +244,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		ModelsCount:         len(s.client.ModelNames()),
 		DefaultModel:        s.client.DefaultModelName(),
 		ActiveRequests:      s.active.count(),
-		SSEKeepaliveSec:     s.cfg.SSEKeepaliveSec,
-		ShutdownGraceSec:    s.cfg.ShutdownGraceSec,
-		InternalToolAction:  normalizeInternalToolAction(s.cfg.InternalToolAction),
-		CannedErrorRetry:    normalizeCannedErrorRetry(s.cfg.CannedErrorRetry),
-		CannedErrorRetrySec: positive(s.cfg.CannedErrorRetrySec, 25),
-		NoContentSec:        nonNegative(s.cfg.NoContentSec, 0),
+		SSEKeepaliveSec:     cfg.SSEKeepaliveSec,
+		ShutdownGraceSec:    cfg.ShutdownGraceSec,
+		InternalToolAction:  normalizeInternalToolAction(cfg.InternalToolAction),
+		CannedErrorRetry:    normalizeCannedErrorRetry(cfg.CannedErrorRetry),
+		CannedErrorRetrySec: positive(cfg.CannedErrorRetrySec, 55),
+		NoContentSec:        nonNegative(cfg.NoContentSec, 0),
+		PauseOnFallback:     cfg.PauseOnFallback,
+		QuotaPause:          s.quotaPauseSnapshot(),
 		Counters: map[string]int64{
 			"requests_total":            s.stats.requests.Load(),
 			"responses_2xx":             s.stats.status2xx.Load(),
@@ -241,6 +274,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			"early_stop_marker":         s.stats.earlyStopMarker.Load(),
 			"early_stop_size":           s.stats.earlyStopSize.Load(),
 			"early_stop_duration":       s.stats.earlyStopDuration.Load(),
+			"early_stop_stall":          s.stats.earlyStopStall.Load(),
+			"held_stall_retries":        s.stats.heldStallRetries.Load(),
 			"unverified_action_claim":   s.stats.unverifiedClaim.Load(),
 			"read_write_batch_split":    s.stats.readWriteBatchSplit.Load(),
 			"upstream_requests":         s.stats.upstreamRequests.Load(),
@@ -335,17 +370,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	resp.UpstreamParams = s.client.UpstreamParams()
 	resp.ToolPromptRules = apiconv.ToolPromptRules()
 	resp.NoInternalCodeExecRule = apiconv.NoInternalCodeExecRule()
-	resp.CodeRefFastpath = s.cfg.CodeRefFastpath
-	resp.ToolAuditNote = s.cfg.ToolAuditNote
-	resp.SplitReadWriteBatch = s.cfg.SplitReadWriteBatch
+	resp.CodeRefFastpath = cfg.CodeRefFastpath
+	resp.ToolAuditNote = cfg.ToolAuditNote
+	resp.SplitReadWriteBatch = cfg.SplitReadWriteBatch
 	resp.MarkerNeutralized = apiconv.MarkerNeutralization()
-	resp.StreamProgress, resp.StreamThoughts = s.cfg.StreamToolsProgress, s.cfg.StreamThoughts
-	resp.ThinkingLevel, resp.MaxPromptBytes = s.cfg.DefaultThinkingLevel, s.cfg.MaxPromptBytes
+	resp.StreamProgress, resp.StreamThoughts = cfg.StreamToolsProgress, cfg.StreamThoughts
+	resp.ThinkingLevel, resp.MaxPromptBytes = cfg.DefaultThinkingLevel, cfg.MaxPromptBytes
 	resp.PromptWarnKB = s.promptWarnKB()
-	resp.MaxHeldBytes, resp.MaxHeldSec = s.maxHeldBytes(), int(s.maxHeldDuration().Seconds())
+	resp.MaxHeldBytes, resp.MaxHeldSec, resp.HeldStallSec = s.maxHeldBytes(), int(s.maxHeldDuration().Seconds()), int(s.heldStallDuration().Seconds())
+	resp.HeldStallFastSec, resp.HeldStallRetriesMax = int(s.heldStallFastDuration().Seconds()), s.maxStallRetries()
 	resp.WaitNoteSec = int(s.noContentNoteInterval().Seconds())
-	if !s.cfg.ConfigLoadedAt.IsZero() {
-		resp.ConfigLoadedAt = s.cfg.ConfigLoadedAt.UTC().Format(time.RFC3339)
+	if !cfg.ConfigLoadedAt.IsZero() {
+		resp.ConfigLoadedAt = cfg.ConfigLoadedAt.UTC().Format(time.RFC3339)
 	}
 	resp.EnvModifiedSinceStart = s.envModifiedSinceStart()
 	resp.TraceEnabled = s.client.TraceEnabled()
@@ -363,17 +399,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	if !bg.LastAt.IsZero() {
 		bgLabel = fmt.Sprintf("%d sur 24 h", bg.Total24h)
 	}
-	idleQuietMin := s.cfg.IdleQuietMin
-	if s.cfg.Gemini.IdleQuiet < 0 {
+	idleQuietMin := cfg.IdleQuietMin
+	if cfg.Gemini.IdleQuiet < 0 {
 		idleQuietMin = 0
 	} else if idleQuietMin <= 0 {
 		idleQuietMin = int(gemini.DefaultIdleQuiet / time.Minute)
 	}
 	resp.BackgroundCalls = backgroundCallsStatus{
 		IdleQuietMin:              idleQuietMin,
-		CookieRotation:            s.cfg.CookieRotation,
-		CatalogRefreshAfterCookie: s.cfg.CatalogRefreshAfterCookie,
-		AuthRecovery:              s.cfg.AuthRecovery,
+		CookieRotation:            cfg.CookieRotation,
+		CatalogRefreshAfterCookie: cfg.CatalogRefreshAfterCookie,
+		AuthRecovery:              cfg.AuthRecovery,
 		Total24h:                  bg.Total24h,
 		Refused24h:                bg.Refused24h,
 		ByFamily24h:               byFam,

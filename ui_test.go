@@ -251,9 +251,8 @@ func TestUISessionDegradedExposedAndCleared(t *testing.T) {
 		"activée (conservée au redémarrage) — toutes les ",
 		"fait piloter Chrome sur Gemini sans demande de votre part",
 		"Actualiser le cookie maintenant",
-		`class="calls-scroll"`,
-		"vue scrollable de 15 lignes",
-		"12 dernières heures",
+		`class="full-table-wrap"`,
+		`id="demandes-unified"`,
 		"in_flight_history",
 	} {
 		if !strings.Contains(wHTML.Body.String(), want) {
@@ -275,7 +274,7 @@ func TestUIHistory12HoursAndLast5Conversations(t *testing.T) {
 	}
 
 	var fh inFlightHistory
-	for convIdx := 1; convIdx <= 6; convIdx++ {
+	for convIdx := 1; convIdx <= inFlightHistoryMaxConvs+1; convIdx++ {
 		convID := fmt.Sprintf("conv%02d", convIdx)
 		for step := 1; step <= 2; step++ {
 			fh.record(InFlightRequest{
@@ -287,19 +286,20 @@ func TestUIHistory12HoursAndLast5Conversations(t *testing.T) {
 		}
 	}
 	list := fh.list()
-	// Conv 06..02 kept (5 conversations * 2 steps = 10), conv 01 dropped.
-	if len(list) != 10 {
-		t.Fatalf("inFlightHistory len = %d, want 10 (5 convs * 2 steps)", len(list))
+	// Last inFlightHistoryMaxConvs kept (* 2 steps), conv01 dropped.
+	wantLen := inFlightHistoryMaxConvs * 2
+	if len(list) != wantLen {
+		t.Fatalf("inFlightHistory len = %d, want %d (%d convs * 2 steps)", len(list), wantLen, inFlightHistoryMaxConvs)
 	}
 	for _, item := range list {
 		if item.ConvID == "conv01" {
-			t.Fatalf("oldest 6th conversation conv01 should have been evicted: %+v", item)
+			t.Fatalf("oldest conversation conv01 should have been evicted: %+v", item)
 		}
 	}
 
-	// Verify the 200-entry safety cap within 5 conversations.
+	// Verify the max-entry safety cap within 1 conversation.
 	var fhCap inFlightHistory
-	for i := 0; i < 250; i++ {
+	for i := 0; i < inFlightHistoryMaxEntries+50; i++ {
 		fhCap.record(InFlightRequest{
 			ID:     fmt.Sprintf("r_%03d", i),
 			ConvID: "same_conv",

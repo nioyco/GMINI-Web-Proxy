@@ -235,8 +235,8 @@ func SplitPrematureReadWriteBatch(calls []ToolCall) (kept []ToolCall, deferred i
 
 var (
 	earlyFakeWriteOpenerRe = regexp.MustCompile(`(?i)^\s*(voici\s+(?:le|la)\s+(?:fichier|contenu|rapport|version|mise\s+à\s+jour)\b[^\n]{0,220}(?:mis[e]?\s+à\s+jour|corrigé|modifié|complété|contre-revue|/\S+\.\w+)|here\s+is\s+the\s+(?:updated|modified|complete|full)\s+file\b)`)
-	fakeWriteClaimRe       = regexp.MustCompile(`(?i)(voici\s+(?:le|la)\s+(?:fichier|rapport)\s+` + "`?" + `/[^\s` + "`" + `]+` + "`?" + `\s+(?:entièrement\s+)?(?:mis[e]?\s+à\s+jour|corrigé|modifié)|j['’]ai\s+(?:bien\s+)?(?:exécuté\s+l['’]écriture\s+sur\s+le\s+disque|écrit\s+(?:le\s+fichier|sur\s+le\s+disque|le\s+rapport)|mis\s+à\s+jour\s+(?:le\s+fichier|sur\s+le\s+disque|` + "`?" + `/[^\s` + "`" + `]+)|modifié\s+le\s+fichier\b|créé\s+le\s+fichier\b|enregistré\s+(?:les\s+modifications|le\s+fichier)\s+sur\s+le\s+disque)|livrable\b[^\n]{0,80}\b(?:est\s+(?:maintenant\s+)?(?:parfaitement\s+)?à\s+jour\s+sur\s+votre\s+machine)|i\s+have\s+(?:updated|written|saved|modified|created)\s+(?:the\s+file|it\s+to\s+disk))`)
-	fakeCommandClaimRe     = regexp.MustCompile(`(?i)(j['’]ai\s+(?:bien\s+)?(?:exécuté|lancé|relancé)\s+(?:les\s+tests|la\s+suite\s+de\s+tests|la\s+commande|go\s+test)|i\s+(?:have\s+)?(?:ran|executed)\s+(?:the\s+tests|go\s+test|the\s+command))`)
+	fakeWriteClaimRe       = regexp.MustCompile(`(?i)(voici\s+(?:le|la)\s+(?:fichier|rapport)\s+` + "`?" + `/[^\s` + "`" + `]+` + "`?" + `\s+(?:entièrement\s+)?(?:mis[e]?\s+à\s+jour|corrigé|modifié)|j['’]ai\s+(?:bien\s+)?(?:exécuté\s+l['’]écriture\s+sur\s+le\s+disque|écrit\s+(?:le\s+fichier|sur\s+le\s+disque|le\s+rapport)|mis\s+à\s+jour\s+(?:le\s+fichier|sur\s+le\s+disque|` + "`?" + `/[^\s` + "`" + `]+)|modifié\s+le\s+fichier\b|créé\s+le\s+fichier\b|enregistré\s+(?:les\s+modifications|le\s+fichier)\s+sur\s+le\s+disque)|(?:la\s+vue|le\s+composant)\s+\S+[^\n]{0,40}\s+a\s+été\s+(?:créé[e]?|écrit[e]?|modifié[e]?|mis[e]?\s+à\s+jour)|livrable\b[^\n]{0,80}\b(?:est\s+(?:maintenant\s+)?(?:parfaitement\s+)?à\s+jour\s+sur\s+votre\s+machine)|i\s+have\s+(?:updated|written|saved|modified|created)\s+(?:the\s+file|it\s+to\s+disk)|\b(?:le|la)\s+(?:fichier|rapport|livrable|vue|composant)\b[^\n]{0,60}\ba\s+été\s+(?:créé[e]?|écrit[e]?|modifié[e]?|enregistré[e]?)[^\n]{0,40}sur\s+le\s+disque)`)
+	fakeCommandClaimRe     = regexp.MustCompile(`(?i)(j['’]ai\s+(?:bien\s+)?(?:exécuté|lancé|relancé|démarré)\s+(?:la\s+suite\s+de\s+vérification|les\s+tests|la\s+suite\s+de\s+tests|le\s+build|la\s+commande|go\s+test)|i\s+(?:have\s+)?(?:ran|executed|launched|started|triggered|kicked\s+off)\s+(?:the\s+(?:verification\s+suite|test\s+suite|tests|build|checks|command)|go\s+test))`)
 	hypotheticalClaimRe    = regexp.MustCompile(`(?i)\b(je\s+peux|souhaites-tu|voulez-vous|veux-tu|si\s+tu\s+veux|tu\s+peux|vous\s+pouvez|pourrait|would\s+you\s+like|i\s+can|you\s+can)\b`)
 )
 
@@ -271,9 +271,84 @@ func IsEarlyFakeWriteOpener(text string, declared []DeclaredTool, sinceLastUser 
 	return earlyFakeWriteOpenerRe.MatchString(head)
 }
 
+// codeSpanRanges returns the [start,end) byte ranges of the fenced code blocks
+// (```...```) and inline backtick spans (`...`) of s, delimiters included. An
+// unterminated fence or span extends to the end of s.
+func codeSpanRanges(s string) [][2]int {
+	var out [][2]int
+	for i := 0; i < len(s); {
+		if strings.HasPrefix(s[i:], "```") {
+			end := strings.Index(s[i+3:], "```")
+			if end < 0 {
+				out = append(out, [2]int{i, len(s)})
+				break
+			}
+			stop := i + 3 + end + 3
+			out = append(out, [2]int{i, stop})
+			i = stop
+			continue
+		}
+		if s[i] == '`' {
+			end := strings.IndexByte(s[i+1:], '`')
+			if end < 0 {
+				out = append(out, [2]int{i, len(s)})
+				break
+			}
+			stop := i + 1 + end + 1
+			out = append(out, [2]int{i, stop})
+			i = stop
+			continue
+		}
+		i++
+	}
+	return out
+}
+
+// stripCodeSpans removes fenced code blocks (```...```) and inline backtick
+// spans (`...`) from s, delimiters included, so that a reply merely quoting
+// code is not mistaken for an action claim. An unterminated fence or span drops
+// the rest of the string.
+func stripCodeSpans(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	prev := 0
+	for _, r := range codeSpanRanges(s) {
+		b.WriteString(s[prev:r[0]])
+		prev = r[1]
+	}
+	b.WriteString(s[prev:])
+	return b.String()
+}
+
+// matchOutsideCode reports whether the match at loc starts or ends outside every
+// code span of spans. A claim whose whole match sits inside a fence or an inline
+// span is only quoted code, not a claim; a claim that merely mentions a path in
+// backticks ("Voici le fichier `/x/y.md` mis à jour") stays a real claim.
+func matchOutsideCode(loc [2]int, spans [][2]int) bool {
+	for _, r := range spans {
+		if loc[0] >= r[0] && loc[1] <= r[1] {
+			return false
+		}
+	}
+	return true
+}
+
+// findClaimOutsideCode returns the first match of re in t that is not entirely
+// inside a code span.
+func findClaimOutsideCode(re *regexp.Regexp, t string, spans [][2]int) []int {
+	for _, loc := range re.FindAllStringIndex(t, -1) {
+		if matchOutsideCode([2]int{loc[0], loc[1]}, spans) {
+			return loc
+		}
+	}
+	return nil
+}
+
 // DetectUnverifiedActionClaim checks a 0-tool-call reply against the verified
 // tool executions since the last user turn, flagging explicit claims of disk
-// writes or command runs that never happened on the wire.
+// writes or command runs that never happened on the wire. A claim whose whole
+// match lies inside a fenced code block or an inline backtick span is only
+// quoted code, so it is ignored.
 func DetectUnverifiedActionClaim(text string, declared []DeclaredTool, sinceLastUser ToolTurnSummary) (kind string, suspect bool) {
 	t := strings.TrimSpace(text)
 	if t == "" || len(declared) == 0 {
@@ -282,8 +357,9 @@ func DetectUnverifiedActionClaim(text string, declared []DeclaredTool, sinceLast
 	if strings.Contains(t, "```tool_call") || strings.Contains(t, "```function_call") {
 		return "", false
 	}
+	spans := codeSpanRanges(t)
 	if sinceLastUser.WriteCount == 0 && hasDeclaredWriteTool(declared) {
-		if loc := fakeWriteClaimRe.FindStringIndex(t); loc != nil {
+		if loc := findClaimOutsideCode(fakeWriteClaimRe, t, spans); loc != nil {
 			// Check the sentence around the match isn't conditional/future.
 			start := loc[0] - 40
 			if start < 0 {
@@ -299,7 +375,7 @@ func DetectUnverifiedActionClaim(text string, declared []DeclaredTool, sinceLast
 		}
 	}
 	if sinceLastUser.CommandCount == 0 && hasDeclaredCommandTool(declared) {
-		if loc := fakeCommandClaimRe.FindStringIndex(t); loc != nil {
+		if loc := findClaimOutsideCode(fakeCommandClaimRe, t, spans); loc != nil {
 			start := loc[0] - 40
 			if start < 0 {
 				start = 0

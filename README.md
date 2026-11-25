@@ -1,13 +1,14 @@
 # GMINI-Web-Proxy
 
 ![Version](https://img.shields.io/badge/version-v1.2.0-blue)
+![UI](https://img.shields.io/badge/Web%20UI-v3.0.9-0ea5e9)
 ![Go](https://img.shields.io/badge/Go-stdlib%20z%C3%A9ro%20d%C3%A9pendance-00ADD8)
-![État](https://img.shields.io/badge/%C3%A9tat-Lot%20K20%20op%C3%A9rationnel-1a7f4b)
+![État](https://img.shields.io/badge/%C3%A9tat-K55%20(0581e87--k55)%20op%C3%A9rationnel-1a7f4b)
 ![Plateforme](https://img.shields.io/badge/plateforme-macOS%20%2F%20Linux-lightgrey)
 
-Proxy HTTP local écrit en Go (**bibliothèque standard uniquement, zéro dépendance externe**) qui expose l'interface web de Google Gemini (`StreamGenerate` / `otAQ7b`) sous forme d'API compatible **OpenAI**, **Anthropic**, **OpenAI Responses** et **Google native**, avec un tableau de bord local (**GMINI Control**, `/_ui`), une sobriété réseau anti-robot, un suivi des tokens par modèle réel et des garde-fous mécaniques avancés pour les agents à outils (notamment **Antigravity** sur macOS).
+Proxy HTTP local écrit en Go (**bibliothèque standard uniquement, zéro dépendance externe**) qui expose l'interface web de Google Gemini (`StreamGenerate` / `otAQ7b`) sous forme d'API compatible **OpenAI**, **Anthropic**, **OpenAI Responses** et **Google native**, avec un tableau de bord local (**GMINI Console-Web-UI v3.0.9**, `/_ui`), une sobriété réseau anti-robot, une pause quota automatique sur repli modèle, un suivi des tokens par modèle réel, une base d'outils (`gemini_tools_db.jsonl`) et des garde-fous mécaniques avancés pour les agents à outils (notamment **Antigravity** sur macOS).
 
-> **Version actuelle : `v1.2.0` (Lot K20)** — voir l'historique détaillé dans [`CHANGELOG.md`](CHANGELOG.md) et la fiche synthétique d'exploitation dans [`docs/GUIDE_COMPLET_EXPLOITATION_GMINI.md`](docs/GUIDE_COMPLET_EXPLOITATION_GMINI.md).
+> **Version actuelle : `v1.2.0` · `UI 3.0.9` (lots K21–K55, build `go-gemini-web2api-p9-0581e87-k55`)** — voir l'historique complet dans [`CHANGELOG.md`](CHANGELOG.md) et la fiche synthétique d'exploitation dans [`docs/GUIDE_COMPLET_EXPLOITATION_GMINI.md`](docs/GUIDE_COMPLET_EXPLOITATION_GMINI.md).
 
 ---
 
@@ -34,7 +35,7 @@ Le projet est activement durci autour d'un usage quotidien intensif avec des cli
 
 | Version | Jalons | Ce qui est livré et vérifié |
 |---|---|---|
-| **`v1.2.0`** *(actuelle)* | **Lot K20** + suivi tokens + confidentialité temps réel | Synchronisation auto des noms de modèles confirmés par Google (`inner[42]`, ex. `95a4c0abcba24364` → **`4 Argon`**) ; audit mécanique anti-mensonge sur les outils (`GEMINI_TOOL_AUDIT_NOTE`) + séparation `read_file`+`write_file` (`GEMINI_SPLIT_READ_WRITE_BATCH`) + bilan vérifié en fin de tour ; estimation des tokens par modèle indiqué par Google et persistance `0600` (`.calls.jsonl`, `.tokens.jsonl`, `.flights.json`) ; bascule à chaud **Conversations temporaires** (`inner[45]=1`) dans `/_ui` ; clarté de l'actualisation auto au repos (`en veille (calme)`) ; fix SSE `openSSE` idempotent, retry K19/K20 via `runStreamTools`, arrêt polling `/_ui` sur `401` et fix CSS tuiles. |
+| **`v1.2.0`** *(actuelle, `0581e87-k24`)* | **Lots K20 – K24** (sur base `0581e87`) | **K21–K24** : rappel d'outils `T2+` (`hasPriorHistory` + contre-exemple `bash?code_reference`), drainage `200 ms` sur *early stop*, maintien `emitWaitNote` si `GEMINI_NO_CONTENT_SEC > 0`, ordre propre `served_model` < `client_cancelled` < `request_end` (`upstream_ms > 0`, `request_id`, `upstream_heartbeats`), silence `gate=quiet` en veille (`userActivityGen`), sondes silencieuses `X-GMINI-Quiet: 1`, `WaitMsBeforeAsync=10000` par défaut, et garde-fous `.env` persistants (`0o600`) pilotables en live via `POST /_ui/api/guardrails/set` (`#nc-toggle`, `#cer-toggle`) et Console `V2.0.0`. **K20** : sync auto **`4 Argon`**, `GEMINI_TOOL_AUDIT_NOTE`, `GEMINI_SPLIT_READ_WRITE_BATCH`, suivi tokens `.calls.jsonl`/`.tokens.jsonl`/`.flights.json`, bascule *Conversations temporaires*. |
 | **`v1.1.0`** | **Lots K14 – K19** | Sobriété anti-robot K14 (zéro appel de fond au repos `IdleQuiet=10 min`, rotation cookie & reprise auth `off` par défaut, backoff `/sorry` `5 → 60 min`, persistance `.state.json`) ; détection erreur interne Google (`inner[31]=true`, K15) et réponse vide (K16) ; règle anti-bac-à-sable interne (K17) ; raccourci **`code_ref_fastpath`** (`bash?code_reference` → `run_command`, K18 T1) ; auto-refresh cookie **`on_demand`** persisté (K18 T3/T4) ; détection & hot-reload `.env` (K18 T5) ; détection quotas/rapports simulés dans les pensées (K19). |
 | **`v1.0.0`** | **Lots P6 – K13** | Sécurité par défaut (`127.0.0.1:8081`, clé API obligatoire, arrêt propre `SIGINT`/`SIGTERM`, anti-SSRF) ; tableau de bord local **GMINI Control** (`/_ui`) protégé par jeton de session ; lecture d'identité réelle du modèle (`inner[39]`/`inner[42]`) et alerte repli silencieux ; keepalives SSE `15 s`, diffusion des pensées (`reasoning_content`), notes techniques `2 s`/`15 s`, alerte silence `45 s`, anti-écho, `early_stop` (`256 Ko`/`120 s`), traces complètes `0600`. |
 | **`v0.1.0`** | Base initiale | Passerelle Go zéro-dépendance issue de `n0madic/go-gemini-web2api`. |
@@ -241,14 +242,14 @@ Toutes les valeurs ci-dessous correspondent aux **vraies valeurs par défaut** c
 | `GEMINI_MAX_PROMPT_BYTES` | `0` | Limite dure sur la taille du prompt (`0` = illimité, sinon HTTP `413`). |
 | `GEMINI_PROMPT_WARN_KB` | `300` | Seuil (Ko) d'affichage en orange dans `/_ui`. |
 
-### Streaming, outils & garde-fous mécaniques (K9 – K20)
+### Streaming, outils & garde-fous mécaniques (K9 – K24)
 
 | Variable | Défaut | Description |
 |---|---|---|
 | `GEMINI_SSE_KEEPALIVE_SEC` | `15` | Fréquence des battements SSE `: keepalive` (secondes). |
 | `GEMINI_WAIT_NOTE_SEC` | `15` | Intervalle des notes d'attente dans `reasoning_content` (`0` = désactivé). |
 | `GEMINI_SILENCE_WARN_SEC` | `45` | Seuil d'alerte log si Google reste muet après les pensées. |
-| `GEMINI_NO_CONTENT_SEC` | `0` | Timeout si aucun contenu n'arrive (`0` = désactivé). |
+| `GEMINI_NO_CONTENT_SEC` | `0` | Timeout si aucun contenu n'arrive (`0` = désactivé ; `240` recommandé dans `.env.example` ; pilotable à chaud dans `/_ui` `#nc-toggle` & `Control V2.0.0`, écriture `.env` `0600`). |
 | `GEMINI_SHUTDOWN_GRACE_SEC` | `30` | Délai de grâce à l'arrêt propre. |
 | `GEMINI_STREAM_TOOLS_PROGRESS` | `true` | Diffusion progressive sur le chemin streaming + outils. |
 | `GEMINI_STREAM_THOUGHTS` | `true` | Diffusion en direct des pensées (`reasoning_content`). |
@@ -262,8 +263,8 @@ Toutes les valeurs ci-dessous correspondent aux **vraies valeurs par défaut** c
 | `GEMINI_NO_INTERNAL_CODE_EXEC_RULE` | `true` | Demande à Gemini de ne pas utiliser son bac à sable de code interne (K17 S2). |
 | `GEMINI_CODE_REF_FASTPATH` | `true` | Convertit immédiatement un bloc `bash?code_reference` simple en `run_command` (K18 T1). |
 | `GEMINI_INTERNAL_TOOL_ACTION` | `notify` | Action sur outil interne détecté : `notify` \| `retry` \| `off`. |
-| `GEMINI_CANNED_ERROR_RETRY` | `off` | Relance sur erreur interne Google (`inner[31]=true`) : `off` \| `once` (K15). |
-| `GEMINI_CANNED_ERROR_RETRY_SEC` | `25` | Temps max écoulé autorisant la relance `canned_error`. |
+| `GEMINI_CANNED_ERROR_RETRY` | `off` | Relance sur erreur interne Google (`inner[31]=true`) : `off` \| `once` (K15 ; pilotable à chaud via `/_ui` `#cer-toggle` & `Control V2.0.0`, écriture `.env` `0600` — K24). |
+| `GEMINI_CANNED_ERROR_RETRY_SEC` | `55` | Temps max écoulé autorisant la relance `canned_error`. |
 | `GEMINI_TOOL_AUDIT_NOTE` | `true` | Injecte le bilan vérifié des outils dans les pensées + contrôle anti-mensonge (K20). |
 | `GEMINI_SPLIT_READ_WRITE_BATCH` | `true` | Retient `write_file` lorsqu'il est mêlé à `read_file` dans le même lot (K20). |
 | `GEMINI_WARN_SUSPECT_FALLBACK` | `true` | Signale dans les pensées un repli probable sur un autre modèle. |

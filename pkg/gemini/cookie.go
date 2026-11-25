@@ -244,6 +244,9 @@ func (c *Client) RotateCookie(ctx context.Context) {
 			c.recordRotation(rotHTTPError, nil, info)
 		} else {
 			c.recordRotation(rotNoNewToken, nil, info)
+			if c.Authenticated() {
+				c.maybeRefreshBuildLabel(ctx, "build_label_cookie_refresh")
+			}
 		}
 		return
 	}
@@ -269,6 +272,9 @@ func (c *Client) RotateCookie(ctx context.Context) {
 	c.saveState()
 	c.recordRotation(rotRenewed, nil, info)
 	c.log.Info("rotated __Secure-1PSIDTS cookie")
+	if c.Authenticated() {
+		c.maybeRefreshBuildLabel(ctx, "build_label_cookie_refresh")
+	}
 	// The /app page is NOT reloaded after a rotation any more (AUDIT-13 A6): the
 	// XSRF token is refreshed only when a generation reports a session error.
 }
@@ -473,6 +479,13 @@ func (c *Client) RotationStatus() RotationStatus {
 
 // renameFile is os.Rename; a variable so tests can simulate a failing rename.
 var renameFile = os.Rename
+
+// WriteFileAtomic writes data to a temporary file in the same directory (created
+// with perm), fsyncs it, then renames it over path. On any failure the temp
+// file is removed and the previous file is left untouched. No backup copy is kept.
+func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+	return writeFileAtomic(path, data, perm)
+}
 
 // writeFileAtomic writes data to a temporary file in the same directory (created
 // 0600), fsyncs it, then renames it over path. On any failure the temp file is

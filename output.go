@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/nioyco/GMINI-Web-Proxy/pkg/apiconv"
@@ -39,10 +40,15 @@ func (s *Server) noteRefusal(ctx context.Context, text string) {
 // (so a real call is never affected), then the remaining text is cleaned of
 // history echoes. The refusal marker is evaluated on the raw reply.
 func (s *Server) finishText(ctx context.Context, raw string, toolsActive bool, declared []apiconv.DeclaredTool) (string, []apiconv.ToolCall) {
+	text, calls, _ := s.finishTextWithReport(ctx, raw, toolsActive, declared)
+	return text, calls
+}
+
+func (s *Server) finishTextWithReport(ctx context.Context, raw string, toolsActive bool, declared []apiconv.DeclaredTool) (string, []apiconv.ToolCall, apiconv.ParseReport) {
 	s.noteRefusal(ctx, raw)
 	text, calls := raw, []apiconv.ToolCall(nil)
+	var rep apiconv.ParseReport
 	if toolsActive && text != "" {
-		var rep apiconv.ParseReport
 		text, calls, rep = apiconv.ParseToolCallsWith(text, declared)
 		s.noteParse(ctx, rep)
 		if len(declared) > 0 && text != "" {
@@ -60,7 +66,15 @@ func (s *Server) finishText(ctx context.Context, raw string, toolsActive bool, d
 		text, st = apiconv.StripEcho(text)
 		s.noteEcho(ctx, st)
 	}
-	return text, calls
+	if toolsActive && len(calls) > 0 && len(rep.Unparsed) > 0 {
+		note := fmt.Sprintf("> ⚠ **GMINI** : %d bloc(s) `tool_call` n'a pas pu être parsé (JSON invalide) dans ce lot partiel ; les %d appel(s) valide(s) ont été transmis.", len(rep.Unparsed), len(calls))
+		if text == "" {
+			text = note
+		} else {
+			text += "\n\n" + note
+		}
+	}
+	return text, calls, rep
 }
 
 // googleResponse builds a generateContent reply with echo filtering and markers.
@@ -103,6 +117,11 @@ func (s *Server) echoEmitter(ctx context.Context, emitRaw func(string), acc *str
 func (s *Server) noteParse(ctx context.Context, rep apiconv.ParseReport) {
 	for _, u := range rep.Unparsed {
 		s.stats.toolCallUnparsed.Add(1)
+		reason := u.Reason
+		if reason == "" {
+			reason = "appel d'outil non analysable"
+		}
+		s.recordDiagIncident(ctx, "tool_call_unparsed", "unparsed_tool_call", reason, false)
 		s.rlog(ctx).Warn("tool_call_unparsed", "tag", u.Tag, "keys", safeKeyList(u.Keys),
 			"declared_tools", u.Declared, "reason", u.Reason)
 	}
@@ -122,14 +141,29 @@ func (s *Server) noteParse(ctx context.Context, rep apiconv.ParseReport) {
 }
 
 func (s *Server) markInternalToolDetected(ctx context.Context, name string) {
+	first := true
 	if ri := reqFrom(ctx); ri != nil {
 		ri.setInternalTool(name)
-		if !ri.internalTool.Swap(true) {
+		first = !ri.internalTool.Swap(true)
+		if first {
 			s.stats.internalToolDetected.Add(1)
 		}
-		return
+	} else {
+		s.stats.internalToolDetected.Add(1)
 	}
-	s.stats.internalToolDetected.Add(1)
+	if first {
+		model := ""
+		promptBytes := 0
+		if ri := reqFrom(ctx); ri != nil {
+			model = ri.model
+			ri.inFlightMu.RLock()
+			promptBytes = ri.promptBytes
+			ri.inFlightMu.RUnlock()
+		}
+		action := normalizeInternalToolAction(s.cfgSnapshot().InternalToolAction)
+		s.rlog(ctx).Warn("internal_tool_detected", "tool", name, "action", action, "model", model, "prompt_bytes", promptBytes)
+		s.recordDiagIncident(ctx, "internal_tool", action, "outil interne Google détecté : "+name, action == "retry")
+	}
 }
 
 // safeKeyList joins key names for logging, replacing anything that is not a plain

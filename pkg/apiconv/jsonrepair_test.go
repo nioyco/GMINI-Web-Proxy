@@ -86,3 +86,67 @@ func TestToolCallWithMissingClosingBrace(t *testing.T) {
 		}
 	}
 }
+
+func TestK34_UnescapedQuotesAndPartialBatchUnparsed(t *testing.T) {
+	t.Run("repairs_unescaped_quotes_and_raw_newlines_in_vue_write_file", func(t *testing.T) {
+		vueContent := "<template>\n  <div class=\"card\" style=\"color: red;\">\n    <Btn v-if=\"ok\" />\n  </div>\n</template>\n<script setup>\nconst cfg = {\"k\": \"v\"}\nconsole.log(cfg)\n</script>"
+		// Deliberately unescaped quotes and raw newlines inside Content:
+		rawContent := strings.ReplaceAll(vueContent, `\"`, `"`)
+		reply := "```tool_call\n{\"name\": \"write_file\", \"arguments\": {\"Path\": \"/app/App.vue\", \"Content\": \"" + rawContent + "\"}}\n```"
+
+		text, calls, rep := ParseToolCallsWith(reply, writeDecl)
+		if text != "" || len(calls) != 1 || rep.Repaired != 1 || len(rep.Unparsed) != 0 {
+			t.Fatalf("expected repaired write_file call: text=%q calls=%d rep=%+v", text, len(calls), rep)
+		}
+		var args map[string]string
+		if err := json.Unmarshal([]byte(calls[0].Function.Arguments), &args); err != nil {
+			t.Fatalf("invalid arguments JSON: %v (%s)", err, calls[0].Function.Arguments)
+		}
+		if args["Path"] != "/app/App.vue" || !strings.Contains(args["Content"], `class="card"`) || !strings.Contains(args["Content"], `{"k": "v"}`) {
+			t.Errorf("repaired Content altered: %+v", args)
+		}
+	})
+
+	t.Run("repairs_3rd_call_in_single_multi_call_fence", func(t *testing.T) {
+		reply := "```tool_call\n" +
+			"{\"name\":\"write_file\",\"arguments\":{\"Path\":\"1.vue\",\"Content\":\"ok\"}}\n" +
+			"{\"name\":\"write_file\",\"arguments\":{\"Path\":\"2.vue\",\"Content\":\"ok\"}}\n" +
+			"{\"name\":\"write_file\",\"arguments\":{\"Path\":\"3.vue\",\"Content\":\"<div class=\"x\">\nhello</div>\"}}\n" +
+			"```"
+		text, calls, rep := ParseToolCallsWith(reply, writeDecl)
+		if text != "" || len(calls) != 3 || rep.Repaired != 1 || len(rep.Unparsed) != 0 {
+			t.Fatalf("expected 3 calls recovered, got text=%q calls=%d rep=%+v", text, len(calls), rep)
+		}
+	})
+
+	t.Run("partial_single_fence_keeps_valid_prefix_and_reports_trailing_unparsed", func(t *testing.T) {
+		reply := "```tool_call\n" +
+			"{\"name\":\"write_file\",\"arguments\":{\"Path\":\"1.go\",\"Content\":\"ok\"}}\n" +
+			"{\"name\":\"write_file\",\"arguments\":{\"Path\":\"2.go\",\"Content\":\"ok\"}}\n" +
+			"{\"name\":\"write_file\", BROKEN SYNTAX WITHOUT COLON}\n" +
+			"```"
+		_, calls, rep := ParseToolCallsWith(reply, writeDecl)
+		if len(calls) != 2 || len(rep.Unparsed) != 1 {
+			t.Fatalf("expected 2 valid calls + 1 unparsed report, got calls=%d rep=%+v", len(calls), rep)
+		}
+	})
+
+	t.Run("partial_multi_fence_batch_keeps_3_valid_and_reports_1_unparsed", func(t *testing.T) {
+		reply := "```tool_call\n{\"name\":\"write_file\",\"arguments\":{\"Path\":\"1.go\",\"Content\":\"ok\"}}\n```\n" +
+			"```tool_call\n{\"name\":\"write_file\",\"arguments\":{\"Path\":\"2.go\",\"Content\":\"ok\"}}\n```\n" +
+			"```tool_call\n{\"name\":\"write_file\", BROKEN}\n```\n" +
+			"```tool_call\n{\"name\":\"write_file\",\"arguments\":{\"Path\":\"4.go\",\"Content\":\"ok\"}}\n```"
+		_, calls, rep := ParseToolCallsWith(reply, writeDecl)
+		if len(calls) != 3 || len(rep.Unparsed) != 1 {
+			t.Fatalf("expected 3 valid calls + 1 unparsed report, got calls=%d rep=%+v", len(calls), rep)
+		}
+	})
+
+	t.Run("truncated_unescaped_quote_call_never_repaired", func(t *testing.T) {
+		cut := "```tool_call\n{\"name\": \"write_file\", \"arguments\": {\"Content\": \"<div class=\"card\">début"
+		_, calls, _ := ParseToolCallsWith(cut, writeDecl)
+		if len(calls) != 0 {
+			t.Fatalf("truncated block must never execute: %+v", calls)
+		}
+	})
+}

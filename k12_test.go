@@ -102,7 +102,7 @@ func TestB2_InternalToolActionModes(t *testing.T) {
 		var calls atomic.Int32
 		_, client := k9Client(t, rtFn(func(r *http.Request) (*http.Response, error) {
 			calls.Add(1)
-			longPrefix := strings.Repeat("Hello ", 80) // > earlyHold (400 bytes), so released to client
+			longPrefix := strings.Repeat("Hello ", 800) // > earlyHold (4500 bytes on 1st attempt when tools active), so released to client
 			inner24 := make([]any, 25)
 			inner24[24] = []any{[]any{[]any{"google", "search", 2}}}
 			body := fakeStreamServed(longPrefix, "", "e6fa609c3fa255c0", "3.1 Pro") +

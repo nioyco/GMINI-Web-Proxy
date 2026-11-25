@@ -3,19 +3,40 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GMINI Control</title>
+<title>GMINI Console-Web-UI</title>
+<link id="favicon" rel="icon" type="image/svg+xml" href="/favicon.ico">
 <style>
 :root{--bg:#f6f7f9;--card:#fff;--ink:#16181d;--mute:#5d6470;--line:#dfe3e8;--ok:#1a7f4b;--okbg:#e3f4ea;--warn:#9a5b00;--warnbg:#fff1d6;--bad:#b3261e;--badbg:#fde7e5;--info:#1d4f91;--infobg:#e4eefb;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
 @media (prefers-color-scheme:dark){:root{--bg:#111316;--card:#1a1d22;--ink:#e8eaee;--mute:#9aa2ae;--line:#2c313a;--ok:#6fd49b;--okbg:#17352a;--warn:#f0b65a;--warnbg:#3a2c12;--bad:#ff8f86;--badbg:#3d1c1a;--info:#8fbcff;--infobg:#17293f}}
 *{box-sizing:border-box}
+html,body{height:100%}
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-header{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;justify-content:space-between;padding:18px 24px 8px;max-width:1320px}
-header .hleft{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline}
-h1{font-size:20px;margin:0}
+header{position:sticky;top:0;z-index:20;display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:8px 16px;background:var(--card);border-bottom:1px solid var(--line)}
+header .hleft{display:flex;flex-wrap:wrap;gap:12px;align-items:center;flex:1;min-width:0}
+header .hright{display:flex;gap:10px;align-items:center}
+h1{font-size:18px;margin:0}
 h2{font-size:15px;margin:0 0 10px}
 .sub{color:var(--mute);font-size:12px}
-main{padding:10px 24px 40px;display:grid;gap:18px;max-width:1320px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;overflow-x:auto}
+.icon-btn{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;padding:0}
+.ico{width:18px;height:18px;flex:none;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.layout{display:flex;align-items:flex-start;min-height:calc(100vh - 52px)}
+nav#sidebar{position:sticky;top:52px;align-self:flex-start;width:230px;flex:none;height:calc(100vh - 52px);overflow-y:auto;overflow-x:hidden;background:var(--card);border-right:1px solid var(--line);padding:10px 8px;display:flex;flex-direction:column;gap:2px;transition:width .15s}
+nav#sidebar a{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;color:var(--ink);text-decoration:none;white-space:nowrap;position:relative}
+nav#sidebar a:hover{background:var(--bg)}
+nav#sidebar a.active{background:var(--infobg);color:var(--info);font-weight:600}
+nav#sidebar a .lbl{flex:1;overflow:hidden;text-overflow:ellipsis}
+nav#sidebar a .nb{flex:none}
+body.collapsed nav#sidebar{width:54px}
+body.collapsed nav#sidebar a{justify-content:center;padding:9px 0}
+body.collapsed nav#sidebar a .lbl{display:none}
+body.collapsed nav#sidebar a .nb{position:absolute;top:1px;right:2px;font-size:10px;padding:0 5px;line-height:15px}
+main{flex:1;min-width:0;width:100%;max-width:none;padding:14px 20px 40px;display:grid;gap:16px;align-content:start}
+.view{display:none;gap:16px;min-width:0}
+.view.on{display:grid}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;overflow-x:auto;min-width:0}
+.card.pause{border-color:var(--bad);background:var(--badbg)}
+.card.pause h2{color:var(--bad)}
+.card.pause .acts{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:8px}
 .groups{display:grid;gap:16px}
 .group-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--mute);margin:0 0 8px 2px}
 .tiles{display:grid;gap:12px;align-items:stretch}
@@ -41,6 +62,9 @@ code,.mono{font-family:var(--mono);font-size:12px}
 button{font:inherit;padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer}
 button:hover:not(:disabled){border-color:var(--mute)}
 button:disabled{opacity:.5;cursor:not-allowed}
+button.primary{background:var(--bad);color:#fff;border-color:var(--bad);font-weight:600}
+button.sm{padding:2px 8px;font-size:12px}
+a.ext{color:var(--info)}
 .note{color:var(--mute);font-size:12px;line-height:1.55;margin:12px 0 0;padding:8px 12px;background:var(--bg);border-left:3px solid var(--line);border-radius:0 6px 6px 0}
 .note ul{margin:4px 0 0;padding-left:18px}
 .note li{margin:2px 0}
@@ -51,16 +75,85 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .calls-scroll th{position:sticky;top:0;background:var(--card);z-index:1;padding:8px 10px 8px 10px}
 .calls-scroll td{padding:7px 10px}
 #err{display:none}
+.ctl{font:inherit;padding:4px 8px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+.diag-controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:13px}
+.diag-controls label{display:flex;gap:6px;align-items:center}
+.diag-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;align-items:start;margin-top:12px}
+.diag-grid .calls-scroll{max-height:520px}
+.inflight-scroll{max-height:600px}
+.diag-grid .tile{min-width:0}
+.diag-export-sticky{position:sticky;top:52px;z-index:10;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:12px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.full-table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px}
+.full-table-wrap table{margin:0}
+.full-table-wrap th{position:sticky;top:0;background:var(--card);z-index:1;padding:8px 10px}
+.full-table-wrap td{padding:7px 10px}
+.diag-detail{white-space:normal;word-break:normal;min-width:220px}
+.tdb-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;margin-bottom:8px}
+.tdb-summary-box{margin-bottom:10px;border:1px solid var(--line);border-radius:8px;padding:6px 10px;background:var(--bg)}
+.tdb-summary-box summary{cursor:pointer;font-weight:600;font-size:12px;color:var(--mute)}
+.tdb-stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px}
+.tdb-stats-grid .tile{padding:8px 10px}
+.tdb-stats-grid th,.tdb-stats-grid td{padding:4px 6px;font-size:12px}
+.tdb-table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px}
+.tdb-table-wrap table{margin:0}
+.tdb-table-wrap th{position:sticky;top:0;background:var(--card);z-index:1;padding:7px 10px}
+.tdb-table-wrap td{padding:6px 10px}
+.diag-export{margin-top:14px}
+.opts{margin-top:10px;padding-top:8px;border-top:1px solid var(--line);display:flex;flex-wrap:wrap;gap:14px;align-items:center;font-size:13px}
+.hide{display:none}
+.mt6{margin-top:6px}
+.ml6{margin-left:6px}
+.sync-box{margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}
+.sync-opts{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-bottom:8px;font-size:13px}
+.sync-acts{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.sumlinks{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+@media (max-width:900px){
+.diag-grid{grid-template-columns:minmax(0,1fr)}
+nav#sidebar{position:fixed;left:0;z-index:15;width:54px;box-shadow:none}
+nav#sidebar a{justify-content:center;padding:9px 0}
+nav#sidebar a .lbl{display:none}
+nav#sidebar a .nb{position:absolute;top:1px;right:2px;font-size:10px;padding:0 5px}
+body.drawer nav#sidebar{width:230px;box-shadow:2px 0 12px rgba(0,0,0,.25)}
+body.drawer nav#sidebar a{justify-content:flex-start;padding:9px 10px}
+body.drawer nav#sidebar a .lbl{display:block}
+body.drawer nav#sidebar a .nb{position:static;font-size:12px;padding:1px 8px}
+main{margin-left:54px;padding:12px}
+}
 </style>
 </head>
 <body>
-<header><div class="hleft"><h1>GMINI Control</h1><span class="sub" id="ver"></span></div><span class="sub" id="upd"></span></header>
+<header>
+  <div class="hleft">
+    <button class="icon-btn" id="sidebar-toggle" aria-expanded="true" aria-controls="sidebar" title="Replier / déplier le menu ([)"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
+    <h1>GMINI Console-Web-UI</h1>
+    <span id="state-pill"></span>
+    <span id="state-connect"></span>
+    <span class="sub" id="ver"></span>
+  </div>
+  <div class="hright"><span class="sub" id="upd"></span></div>
+</header>
+<div class="layout">
+<nav id="sidebar" aria-label="Navigation principale">
+  <a href="#etat" data-page="etat" title="État GMINI"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span class="lbl">État GMINI</span><span class="nb" id="nb-etat"></span></a>
+  <a href="#modeles" data-page="modeles" title="Modèles & Antigravity"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/></svg><span class="lbl">Modèles &amp; Antigravity</span><span class="nb" id="nb-modeles"></span></a>
+  <a href="#diagnostic" data-page="diagnostic" title="Diagnostic Proxy"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><span class="lbl">Diagnostic Proxy</span><span class="nb" id="nb-diagnostic"></span></a>
+  <a href="#outils" data-page="outils" title="Base appels outils Gemini"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2.4-2.4z"/></svg><span class="lbl">Base outils</span><span class="nb" id="nb-outils"></span></a>
+  <a href="#demandes" data-page="demandes" title="Demandes & Appels"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg><span class="lbl">Demandes &amp; Appels</span><span class="nb" id="nb-demandes"></span></a>
+  <a href="#quota" data-page="quota" title="Quota & Consommation"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg><span class="lbl">Quota &amp; Consommation</span><span class="nb" id="nb-quota"></span></a>
+  <a href="#reglages" data-page="reglages" title="Réglages & Garde-fous"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg><span class="lbl">Réglages &amp; Garde-fous</span><span class="nb" id="nb-reglages"></span></a>
+</nav>
 <main>
 <div class="card bad" id="err"></div>
+<div class="card pause hide" id="quotapause"></div>
 <div class="card warn" id="idwarn" style="display:none"></div>
 <div class="card warn" id="envwarn" style="display:none"></div>
-<div class="groups" id="tiles"></div>
 
+<div class="view" id="page-etat">
+<div class="groups" id="tiles-top"></div>
+<section class="card" id="summary"></section>
+</div>
+
+<div class="view" id="page-modeles">
 <section class="card">
 <div class="row"><h2>Modèles détectés chez Google et qui répond réellement</h2><button id="refresh">Actualiser le catalogue</button></div>
 <table id="models"></table>
@@ -79,6 +172,16 @@ button:disabled{opacity:.5;cursor:not-allowed}
 <h2>Antigravity sur ce Mac</h2>
 <table id="apps"></table>
 <p class="note" id="appmsg">Une seule copie à la fois : elles partagent leurs réglages. « Relais anti-coupure » est nécessaire pour les demandes de plus de 300 secondes.</p>
+<div id="agpatchopts" style="margin-top:10px;padding-top:8px;border-top:1px solid var(--line);display:flex;flex-wrap:wrap;gap:14px;align-items:center;font-size:13px">
+  <span class="sub"><b>Options lors d'un patch :</b></span>
+  <label><input type="checkbox" id="ag-patch-sync" checked> Synchroniser les modèles après patch</label>
+  <label><input type="checkbox" id="ag-patch-levels" checked> Sous-menus d'effort Low / Medium / High (Hydrogen, Neon, Argon)</label>
+  <label><input type="checkbox" id="ag-patch-dedup" checked> Supprimer les doublons (corrige sous-menu Argon)</label>
+  <label><input type="checkbox" id="ag-patch-keep-legacy" checked> Conserver les anciens alias (3.1 Pro…)</label>
+  <label><input type="checkbox" id="ag-patch-rename"> Renommer les libellés existants</label>
+</div>
+<div id="agpatch"></div>
+<div id="agdmg"></div>
 </section>
 
 <section class="card">
@@ -86,19 +189,125 @@ button:disabled{opacity:.5;cursor:not-allowed}
 <table id="ag"></table>
 <div id="agcmd"></div>
 </section>
+</div>
 
-<section class="card">
-<div class="row"><h2>Demandes en cours</h2><span class="sub" id="inflight-meta">En cours + 5 dernières conversations (max 200 · vue scrollable 15 lignes)</span></div>
-<div class="calls-scroll"><table id="inflight"></table></div>
-<p class="note">État en direct pendant le traitement de la demande (dès la position 39 lue chez Google) et historique des 5 dernières conversations (max 200 demandes). Aucun contenu de conversation n'est affiché ici.</p>
+<div class="view" id="page-diagnostic">
+<section class="card" id="diagnostics">
+<div class="row">
+  <h2>DIAGNOSTIC PROXY</h2>
+  <span class="sub" id="diag-meta">Chargement des diagnostics…</span>
+</div>
+<div class="diag-export-sticky">
+  <div class="row" style="margin-bottom:6px">
+    <span class="k">Exporter les diagnostics</span>
+    <span class="sub" id="diag-export-msg"></span>
+  </div>
+  <div class="diag-controls">
+    <label class="sub">Fenêtre
+      <select class="ctl" id="diag-export-window">
+        <option value="1h" selected>1 h</option>
+        <option value="6h">6 h</option>
+        <option value="24h">24 h</option>
+        <option value="all">Tout</option>
+      </select>
+    </label>
+    <label class="sub">Format
+      <select class="ctl" id="diag-export-format">
+        <option value="json" selected>JSON (archive .zip)</option>
+        <option value="csv">CSV</option>
+        <option value="md">Markdown</option>
+        <option value="all">Archive complète (.zip)</option>
+      </select>
+    </label>
+    <button id="diag-export">Exporter</button>
+    <span class="sub">Anonymisé : horodatages, modèles, tailles et délais uniquement.</span>
+  </div>
+</div>
+<div class="row">
+  <div class="diag-controls">
+    <label class="sub">Nature
+      <select class="ctl" id="diag-nature">
+        <option value="all" selected>Tous</option>
+        <option value="activity">Activités</option>
+        <option value="incident">Incidents</option>
+        <option value="errors">Erreurs</option>
+      </select>
+    </label>
+    <label class="sub">Fenêtre
+      <select class="ctl" id="diag-window">
+        <option value="15m">15 min</option>
+        <option value="1h" selected>1 h</option>
+        <option value="6h">6 h</option>
+        <option value="24h">24 h</option>
+        <option value="all">Tout</option>
+      </select>
+    </label>
+    <label class="sub">Filtre
+      <input class="ctl" type="text" id="diag-filter" placeholder="modèle, type, détail…" size="22">
+    </label>
+  </div>
+  <div class="diag-controls">
+    <button id="diag-prev" disabled>Plus récents</button>
+    <button id="diag-next" disabled>Plus anciens</button>
+  </div>
+</div>
+<p class="sub" id="diag-summary" style="margin:0 0 10px"></p>
+<div id="diag-err"></div>
+<div class="full-table-wrap"><table id="diag-unified"></table></div>
 </section>
+</div>
 
+<div class="view" id="page-outils">
 <section class="card">
-<div class="row"><h2>Derniers appels (12 h)</h2><span class="sub" id="calls-meta">12 dernières heures · vue scrollable de 15 lignes</span></div>
-<div class="calls-scroll"><table id="calls"></table></div>
-<p class="note">Historique sur les 12 dernières heures (tailles et délais uniquement : aucun contenu de conversation n'est affiché ici).</p>
+<div class="tdb-toolbar">
+  <h2 style="margin:0">BASE APPELS OUTILS GEMINI</h2>
+  <div class="diag-controls">
+    <label class="sub">Fenêtre
+      <select class="ctl" id="tdb-window">
+        <option value="24h" selected>24 h</option>
+        <option value="7d">7 j</option>
+        <option value="all">Tout</option>
+      </select>
+    </label>
+    <label class="sub">Type
+      <select class="ctl" id="tdb-kind">
+        <option value="all" selected>Tous</option>
+        <option value="local">Outils locaux</option>
+        <option value="internal_google">Outils internes Google</option>
+      </select>
+    </label>
+    <label class="sub">Version
+      <input class="ctl" type="text" id="tdb-version" placeholder="ex. K49" size="7">
+    </label>
+    <label class="sub">Filtre
+      <input class="ctl" type="text" id="tdb-filter" placeholder="outil, modèle, note…" size="16">
+    </label>
+    <button id="tdb-export-json">Exporter JSON</button>
+    <button id="tdb-export-csv">Exporter CSV</button>
+  </div>
+</div>
+<p class="sub" id="tdb-summary" style="margin:0 0 8px"></p>
+<details open class="tdb-summary-box">
+  <summary>Synthèse par version &amp; outils bloquants</summary>
+  <div class="tdb-stats-grid">
+    <div class="tile"><div class="tile-head"><span class="k">Par version binaire</span></div><table id="tdb-versions"></table></div>
+    <div class="tile"><div class="tile-head"><span class="k">Top outils internes bloquants</span></div><table id="tdb-blocking"></table></div>
+  </div>
+</details>
+<div class="tdb-table-wrap"><table id="tdb-table"></table></div>
 </section>
+</div>
 
+<div class="view" id="page-demandes">
+<section class="card">
+<div class="row"><h2>Demandes &amp; Appels (temps réel + 12 h)</h2><span class="sub" id="demandes-meta">En cours + historique (20 conv., max 500) + appels 12 h</span></div>
+<div class="full-table-wrap"><table id="demandes-unified"></table></div>
+<p class="note">Vue unifiée en temps réel : demandes en cours épinglées en haut, suivies de l'historique enrichi des appels (niveaux, 1re pensée/1er texte, outils, erreurs, tailles et délais — aucun contenu de conversation n'est affiché).</p>
+</section>
+</div>
+
+<div class="view" id="page-quota">
+<section class="card" id="quota-pause-tile"></section>
 <section class="card">
 <h2>Quota Google & Estimation des tokens</h2>
 <p id="quota" style="margin:0 0 10px"></p>
@@ -113,11 +322,18 @@ button:disabled{opacity:.5;cursor:not-allowed}
   </ul>
 </div>
 </section>
+</div>
+
+<div class="view" id="page-reglages">
+<div class="groups" id="tiles-bottom"></div>
+</div>
 </main>
+</div>
 <script>
 const TOKEN="__UI_TOKEN__";
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const errMsg=(j,status)=>(j&&j.error&&typeof j.error==="object"?j.error.message:j&&j.error)||(j&&j.message)||("Erreur "+status);
 const dur=ms=>ms==null||ms<0?"—":ms<1000?ms+" ms":(ms/1000).toFixed(ms<10000?1:0)+" s";
 const ko=n=>n==null?"—":n<1024?n+" o":(n/1024).toFixed(1)+" Ko";
 const koKB=n=>n==null?"—":(n/1024).toFixed(1)+" Ko";
@@ -131,12 +347,13 @@ function tokCell(c){
   const g=c.google_model||c.served_name;
   return `<b>${tokFmt(tot)}</b><div class="sub">E:${tokFmt(inT)} · P:${tokFmt(thT)} · R:${tokFmt(txT)}${g?" · "+esc(g):""}</div>`;
 }
-const age=s=>s==null?"—":s<90?s+" s":s<5400?Math.round(s/60)+" min":(s/3600).toFixed(1)+" h";
+const age=s=>s==null?"—":s<90?Math.round(s)+" s":s<5400?Math.round(s/60)+" min":(s/3600).toFixed(1)+" h";
 const hm=t=>t?new Date(t).toLocaleTimeString("fr-FR"):"—";
 const hmShort=t=>t?new Date(t).toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"}):"—";
 const badge=(c,t)=>`<span class="b ${c}">${esc(t)}</span>`;
 function who(identity,suspect,seen,served){
   if(identity==="canned_error")return badge("bad","Erreur interne"+(served?" ("+served+")":""));
+  if(identity==="routed_auto")return badge("info","Auto → "+(served||"?"));
   if(identity==="other_model")return badge("bad","Autre modèle : "+(served||seen||"?"));
   if(identity==="name_only")return badge("warn","Nom indiqué : "+(served||"?")+", identifiant différent");
   if(suspect==="no_thoughts")return badge("warn","Repli probable");
@@ -152,26 +369,155 @@ function why(e){
   if(/google blocked/.test(e))return "Google a refusé cet appel (page anti-robot). Le catalogue déjà connu reste utilisé ; ne pas réessayer tout de suite.";
   return e;
 }
+function pageOf(){const h=(location.hash||"").replace(/^#/,"");return PAGES.indexOf(h)>=0?h:"etat";}
+const PAGES=["etat","modeles","diagnostic","outils","demandes","quota","reglages"];
+function route(){
+  const p=pageOf();
+  PAGES.forEach(k=>{const v=$("page-"+k);if(v)v.classList.toggle("on",k===p);});
+  document.querySelectorAll("nav#sidebar a[data-page]").forEach(a=>{const on=a.dataset.page===p;a.classList.toggle("active",on);if(on)a.setAttribute("aria-current","page");else a.removeAttribute("aria-current");});
+  document.body.classList.remove("drawer");
+}
+function setNb(k,txt,cls){const e=$("nb-"+k);if(!e)return;e.className="nb"+(txt?" b "+cls:"");e.textContent=txt||"";}
+function fmtPausedAt(t){return t?new Date(t).toLocaleString("fr-FR"):"—";}
+function pauseDetails(qp){
+  const kv=(k,v)=>`<div class="kv"><span class="kv-k">${k}</span><span class="kv-v">${v}</span></div>`;
+  return `<div class="kv-list">`+
+    kv("Déclenché par",`<code>${esc(qp.triggered_by_label||qp.triggered_by_model||"—")}</code> → servi : <b>${esc(qp.served_name||qp.served_id||"3.5 Flash-Lite")}</b>`)+
+    kv("Cause",esc(qp.reason==="limit_banner"?"bannière de limite Google":qp.reason==="other_model"?"autre modèle servi par Google":(qp.reason||"—")))+
+    (qp.limit_banner?kv("Bannière Google",esc(qp.limit_banner)):"")+
+    kv("Mise en pause",esc(fmtPausedAt(qp.paused_at)))+
+    kv("Requêtes bloquées",`<b>${qp.blocked_count||0}</b>`)+
+    `</div>`;
+}
+let flashErr="";
+async function resumeQuota(btn){
+  if(btn)btn.disabled=true;
+  try{
+    const r=await fetch("/_ui/api/quota/resume",{method:"POST",headers:{"X-GMINI-UI":TOKEN}});
+    let j={};try{j=await r.json();}catch{}
+    if(!r.ok){flashErr="Reprise impossible : "+errMsg(j,r.status);}
+  }catch(e){flashErr="Reprise impossible : "+e.message;}
+  finally{load();}
+}
+function faviconSvg(dot){
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="ag" x1="8" y1="54" x2="56" y2="10" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#2563eb"/><stop offset="55%" stop-color="#06b6d4"/><stop offset="100%" stop-color="#f97316"/></linearGradient></defs><circle cx="32" cy="32" r="30" fill="#111827" stroke="#2c313a" stroke-width="2"/><path d="M16 47L30 14c.8-1.9 3.2-1.9 4 0l14 33h-7.2l-3.4-8.5c-3.8-2.6-7.6 1.5-11.4 0L22.6 47H16zm11.8-13.5c2.6 1.1 5.8-1.6 8.4-.5L32 22.5l-4.2 11z" fill="url(#ag)"/><circle cx="51" cy="51" r="9" fill="${dot}" stroke="#111827" stroke-width="3"/></svg>`;
+}
+let lastFavState="";
+function updateFavicon(state){
+  if(state===lastFavState)return;
+  lastFavState=state;
+  const el=$("favicon");if(!el)return;
+  const dot=state==="bad"?"#f85149":state==="warn"?"#d29922":"#3fb950";
+  el.href="data:image/svg+xml,"+encodeURIComponent(faviconSvg(dot));
+}
+function renderGlobal(d,s){
+  const qp=s.quota_pause||d.quota_pause||{};
+  const ss=s.session_state||{};
+  const gb=s.google_block||{};
+  const pill=!s.authenticated?badge("bad","Non connectée"):qp.active?badge("bad","Pause Quota"):ss.session_degraded?badge("warn","Session affaiblie"):badge("ok","En ligne");
+  $("state-pill").innerHTML=pill;
+  const hc=$("state-connect");
+  if(hc){
+    if(!s.authenticated){
+      const ar=s.cookie_auto_refresh||{};
+      const dis=(ar.running||ar.manual_cooldown_sec>0)?"disabled":"";
+      const lbl=ar.running?"Connexion en cours…":"Lancer la connexion Google";
+      hc.innerHTML=`<button id="hdr-connect" class="primary sm" ${dis}>${esc(lbl)}</button>`;
+      const b=$("hdr-connect");
+      if(b)b.onclick=()=>triggerGoogleConnect(b,"ui_connect");
+    }else{hc.innerHTML="";}
+  }
+  updateFavicon((!s.authenticated||qp.active||ss.session_degraded||gb.active)?"warn":"ok");
+  const qb=$("quotapause");
+  if(qp.active){
+    qb.classList.remove("hide");
+    qb.innerHTML=`<h2>⏸ Pause Quota active — Modèles premium en pause (Hydrogen, Neon, Argon/Carbon)</h2>`+pauseDetails(qp)+
+      `<div class="sub mt6">Auto / Flash reste disponible.</div>`+
+      `<div class="acts"><a class="ext" href="https://gemini.google.com/usage" target="_blank" rel="noopener noreferrer">Vérifier le quota sur Gemini</a><button id="quota-resume-banner" class="primary">Reprendre les modèles premium</button></div>`;
+    $("quota-resume-banner").onclick=()=>resumeQuota($("quota-resume-banner"));
+  }else{qb.classList.add("hide");qb.innerHTML="";}
+  setNb("modeles",String((d.models||[]).length),"none");
+  const inc=(diagState.summary&&diagState.summary.incident_count)||0;
+  setNb("diagnostic",inc?String(inc):"",inc?"warn":"none");
+  const nf=Math.max(0,(s.active_requests||0)-1);
+  setNb("demandes",nf?String(nf):"",nf?"info":"none");
+  setNb("quota",qp.active?"PAUSE":"","bad");
+  renderQuotaPage(d,s,qp);
+  renderSummary(d,s,qp);
+}
+function renderQuotaPage(d,s,qp){
+  const c=s.counters||{};
+  const kv=(k,v)=>`<div class="kv"><span class="kv-k">${k}</span><span class="kv-v">${v}</span></div>`;
+  const pof=!!s.pause_on_fallback;
+  $("quota-pause-tile").innerHTML=`<div class="tile-head"><h2 style="margin:0">Pause Quota &amp; Repli modèle</h2>${qp.active?badge("bad","Actif"):badge("ok","Aucune pause")}</div>`+
+    `<div class="kv-list mt6">`+
+    (qp.active?pauseDetails(qp):kv("État","Aucune pause : les modèles premium sont disponibles"))+
+    kv("Bannières de limite détectées",`<b>${c.limit_banner_detected||0}</b>`)+
+    kv("<code>GEMINI_PAUSE_ON_FALLBACK</code>",(pof?badge("info","on"):badge("none","off"))+`<button id="pof-toggle" class="sm ml6">${pof?"Désactiver":"Activer"}</button>`)+
+    `</div>`+
+    `<div class="sumlinks"><a class="ext" href="https://gemini.google.com/usage" target="_blank" rel="noopener noreferrer">Vérifier le quota sur Gemini</a>`+
+    `<button id="quota-resume-page" class="primary" ${qp.active?"":"disabled"}>Reprendre les modèles premium</button></div>`+
+    `<p class="note">Quand Google remplace un modèle premium par un autre ou annonce une limite, le proxy met en pause les modèles premium (Auto / Flash reste disponible) pour ne pas consommer le quota.</p>`;
+  $("quota-resume-page").onclick=()=>resumeQuota($("quota-resume-page"));
+  $("pof-toggle").onclick=async()=>{const b=$("pof-toggle");b.disabled=true;try{const r=await fetch("/_ui/api/guardrails/set",{method:"POST",headers:{"X-GMINI-UI":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({pause_on_fallback:!pof})});if(!r.ok){let j={};try{j=await r.json();}catch{}flashErr="Réglage refusé : "+errMsg(j,r.status);}}catch(e){flashErr="Réglage refusé : "+e.message;}finally{load();}};
+}
+function renderSummary(d,s,qp){
+  const kv=(k,v)=>`<div class="kv"><span class="kv-k">${k}</span><span class="kv-v">${v}</span></div>`;
+  const inc=(diagState.summary&&diagState.summary.incident_count)||0;
+  const links=[["modeles","Modèles & Antigravity"],["diagnostic","Diagnostic Proxy"],["demandes","Demandes & Appels"],["quota","Quota & Consommation"],["reglages","Réglages & Garde-fous"]].map(x=>`<a class="ext" href="#${x[0]}" data-page="${x[0]}">${esc(x[1])}</a>`).join(" · ");
+  $("summary").innerHTML=`<h2>Synthèse rapide</h2><div class="kv-list">`+
+    kv("Pause Quota",qp.active?badge("bad","Active ("+(qp.blocked_count||0)+" bloquée(s))"):badge("ok","Aucune pause"))+
+    kv("Requêtes en cours",`<b>${Math.max(0,(s.active_requests||0)-1)}</b>`)+
+    kv("Incidents (fenêtre diagnostic "+esc(diagState.window)+")",`<b>${inc}</b>`)+
+    `</div>`+
+    (s.temporary_chat?`<p class="note" style="margin:8px 0 0;color:var(--warn);font-weight:600">⚠ Discussions temporaires activées (GEMINI_TEMPORARY_CHAT=true) : augmente fortement les refus d'outils (×5 à ×8) sur 4 Hydrogen — recommandé : désactivé.</p>`:"")+
+    `<div class="sumlinks">${links}</div>`;
+  $("summary").querySelectorAll("a[data-page]").forEach(a=>a.onclick=e=>{e.preventDefault();goto(a.dataset.page);});
+}
+function goto(k){if(location.hash!=="#"+k)history.pushState(null,"","#"+k);route();window.scrollTo(0,0);}
+function applySidebar(c){
+  document.body.classList.toggle("collapsed",c);
+  const t=$("sidebar-toggle");if(t)t.setAttribute("aria-expanded",c?"false":"true");
+}
+function initShell(){
+  let c;
+  try{const v=localStorage.getItem("gmini_ui_sidebar_collapsed");c=v==null?window.innerWidth<900:v==="1";}catch{c=window.innerWidth<900;}
+  applySidebar(c);
+  const toggle=()=>{
+    if(window.innerWidth<900){const o=document.body.classList.toggle("drawer");$("sidebar-toggle").setAttribute("aria-expanded",o?"true":"false");return;}
+    c=!document.body.classList.contains("collapsed");applySidebar(c);
+    try{localStorage.setItem("gmini_ui_sidebar_collapsed",c?"1":"0");}catch{}
+  };
+  $("sidebar-toggle").onclick=toggle;
+  document.addEventListener("keydown",e=>{if(e.key==="["&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!/^(INPUT|TEXTAREA|SELECT)$/.test((e.target&&e.target.tagName)||""))toggle();});
+  document.querySelectorAll("nav#sidebar a[data-page]").forEach(a=>a.onclick=e=>{e.preventDefault();goto(a.dataset.page);});
+  window.addEventListener("hashchange",route);
+  window.addEventListener("popstate",route);
+  route();
+}
 let pollTimer=null;
 async function load(){
   let d;
   try{
     const r=await fetch("/_ui/api/state",{headers:{"X-GMINI-UI":TOKEN},cache:"no-store"});
     if(r.status===401){
+      updateFavicon("bad");
       if(pollTimer){clearInterval(pollTimer);pollTimer=null;}
-      $("err").innerHTML=`Le proxy a redémarré : cette page utilise un ancien jeton. <button onclick="location.reload()" style="margin-left:8px;padding:3px 10px;font-size:12px">Recharger la page</button>`;
+      $("err").innerHTML=`Le proxy a redémarré : cette page utilise un ancien jeton. <button id="err-reload" class="sm ml6">Recharger la page</button>`;
       $("err").style.display="block";
+      $("err-reload").onclick=()=>location.reload();
       return;
     }
     if(!r.ok)throw new Error("Erreur "+r.status);
-    d=await r.json();$("err").style.display="none";
-  }catch(e){$("err").textContent="Proxy injoignable : "+e.message;$("err").style.display="block";return}
+    d=await r.json();$("err").style.display="none";if(flashErr){$("err").textContent=flashErr;$("err").style.display="block";flashErr="";}
+  }catch(e){updateFavicon("bad");$("err").textContent="Proxy injoignable : "+e.message;$("err").style.display="block";return}
   const s=d.status,g=s.google_block,ss=s.session_state||{};
   refreshNextMs=ss.catalog_refresh_cooldown_sec>0?Date.now()+ss.catalog_refresh_cooldown_sec*1000:0;
   if(refreshNextMs>0&&!$("refreshmsg").dataset.err)$("refreshmsg").dataset.auto="1";
   syncRefresh();
-  $("ver").textContent=`version ${s.version} · ${String(s.commit).slice(0,7)}${s.dirty?" (modifié)":""} · ${d.listen}`;
+  $("ver").textContent=`version ${s.version} · UI ${s.ui_version||"—"} · ${s.binary_name||"?"} · ${String(s.commit).slice(0,7)}${s.dirty?" (modifié)":""} · ${d.listen}`;
   $("upd").textContent="mis à jour à "+new Date().toLocaleTimeString("fr-FR");
+  renderGlobal(d,s);
   const mm=(s.model_identities||[]).filter(x=>x.mismatch_since);
   if(mm.length){
     const labelOf=name=>{const m=(d.models||[]).find(x=>x.name===name);return (m&&(m.description||m.display_name))||name;};
@@ -191,8 +537,9 @@ async function load(){
   const arLast=ar.running?`en cours… (${esc(ar.last_trigger||"manual")})`:ar.last_ok==null?"aucun":`${ar.last_ok?"OK":"échec (code "+ar.last_exit_code+")"} · ${dur(ar.last_duration_ms)} (${hmShort(ar.last_attempt_at)}, ${esc(ar.last_trigger||"—")})`;
   const arBtn=ar.configured?` <button id="ar-toggle" style="padding:2px 8px;font-size:12px">${ar.enabled?"Désactiver":"Activer"}</button><div class="sub">fait piloter Chrome sur Gemini sans demande de votre part</div>`:"";
   const arRunDis=ar.running||ar.manual_cooldown_sec>0?"disabled":"";
-  const arRunLabel=ar.running?"en cours…":ar.manual_cooldown_sec>0?`Actualiser le cookie maintenant (${fmtCooldown(ar.manual_cooldown_sec)})`:"Actualiser le cookie maintenant";
-  const arRunBtn=ar.configured?`<div style="margin-top:6px"><button id="ar-run" style="padding:3px 10px;font-size:12px" ${arRunDis}>${esc(arRunLabel)}</button><div class="sub" id="ar-msg">${esc(arRunMsg)}</div></div>`:"";
+  const arRunLabel=ar.running?"Connexion en cours…":ar.manual_cooldown_sec>0?`Actualiser le cookie maintenant (${fmtCooldown(ar.manual_cooldown_sec)})`:"Actualiser le cookie maintenant";
+  const connectBtn=!s.authenticated?`<div style="margin-bottom:6px"><button id="ar-connect" class="primary" style="padding:5px 12px;font-size:13px" ${arRunDis}>${ar.running?"Connexion en cours…":"Lancer la connexion Google"}</button></div>`:"";
+  const arRunBtn=ar.configured?`<div style="margin-top:6px">${connectBtn}<button id="ar-run" style="padding:3px 10px;font-size:12px" ${arRunDis}>${esc(arRunLabel)}</button><div class="sub" id="ar-msg">${esc(arRunMsg)}</div></div>`:`<div style="margin-top:6px">${connectBtn}<div class="sub" id="ar-msg">${esc(arRunMsg)}</div></div>`;
   const bg=s.background_calls||{};
   const bgFam=bg.by_family_24h||{};
   const bgBreakdown=["accounts","app","batchexecute","generate","other"].filter(f=>bgFam[f]>0).map(f=>`${f} : ${bgFam[f]}`).join(" · ");
@@ -227,18 +574,20 @@ async function load(){
     kv("<code>no_internal_code_exec_rule</code>",s.no_internal_code_exec_rule?"on":"off")+
     kv("<code>tool_audit_note</code> / <code>split_rw</code>",`${s.tool_audit_note?"on":"off"} / ${s.split_read_write_batch?"on":"off"}`)+
     kv("<code>wait_note_sec</code>",`${s.wait_note_sec??15} s`)+
+    kv("<code>no_content_sec</code>",(s.no_content_sec>0?badge("warn",s.no_content_sec+" s"):badge("none","0 (off)"))+`<button id="nc-toggle" style="margin-left:6px;padding:2px 8px;font-size:12px">${s.no_content_sec>0?"Désactiver":"Activer (240 s)"}</button>`)+
     kv("<code>cookie_auto_refresh</code>",ar.enabled?"on":"off")+
     `</div>`;
   const behaviorBody=`<div class="kv-list">`+
     kv("Niveau de réflexion par défaut",`<b>${esc(s.thinking_level_default||"non envoyé")}</b>`)+
     kv("Outils internes Gemini",badge(s.internal_tool_action==="retry"?"warn":s.internal_tool_action==="off"?"none":"info",esc(s.internal_tool_action||"notify")))+
-    kv("Relance erreur interne",badge(s.canned_error_retry==="once"?"warn":"none",esc(s.canned_error_retry||"off"))+(s.canned_error_retry==="once"?` <span class="sub">max ${s.canned_error_retry_sec||25} s</span>`:""))+
+    kv("Relance erreur interne",badge(s.canned_error_retry==="once"?"warn":"none",esc(s.canned_error_retry||"off"))+(s.canned_error_retry==="once"?` <span class="sub">max ${s.canned_error_retry_sec||25} s</span>`:"")+`<button id="cer-toggle" style="margin-left:6px;padding:2px 8px;font-size:12px">${s.canned_error_retry==="once"?"Désactiver":"Activer (once)"}</button>`)+
     `</div>`;
   const behaviorFoot=`<span class="sub">notify = note · retry = relance (1 quota en plus) · off = pas de relance</span>`;
   const privacyBody=`<div class="kv-list">`+
     kv("Trace des échanges",s.content_trace_enabled?badge("info","Activée"):badge("none","Désactivée"))+
-    kv("Conversations temporaires",(s.temporary_chat?badge("info","Activées"):badge("none","Désactivées"))+` <button id="tc-toggle" style="margin-left:6px;padding:2px 8px;font-size:12px">${s.temporary_chat?"Désactiver":"Activer"}</button>`)+
-    `</div>`;
+    kv("Conversations temporaires",(s.temporary_chat?badge("warn","Activées"):badge("none","Désactivées"))+` <button id="tc-toggle" style="margin-left:6px;padding:2px 8px;font-size:12px">${s.temporary_chat?"Désactiver":"Activer"}</button>`)+
+    `</div>`+
+    (s.temporary_chat?`<p class="note" style="margin:8px 0 0;color:var(--warn);font-weight:600">⚠ Discussions temporaires activées (GEMINI_TEMPORARY_CHAT=true) : augmente fortement les refus d'outils (×5 à ×8) sur 4 Hydrogen — recommandé : désactivé.</p>`:"");
   const privacyFoot=`<span class="sub">inner[45]=1 : n'enregistre pas les échanges dans l'historique web Gemini (conservé au redémarrage).</span>`;
   const groups=[
     {title:"Session, Proxy & Santé",cols:"tiles-3",cards:[
@@ -247,7 +596,7 @@ async function load(){
       renderCard("Appels de fond & Rotation","",healthBody,rotFoot),
     ]},
     {title:"Garde-fous & Compteurs",cols:"tiles-4",cards:[
-      renderCard("Arrêts anticipés",s.counters?.early_stop?badge("warn",String(s.counters.early_stop)):badge("none","0"),`<div class="kv-list">${kv("Marqueur",s.counters?.early_stop_marker||0)}${kv("Taille",s.counters?.early_stop_size||0)}${kv("Durée",s.counters?.early_stop_duration||0)}</div>`,""),
+      renderCard("Arrêts anticipés",s.counters?.early_stop?badge("warn",String(s.counters.early_stop)):badge("none","0"),`<div class="kv-list">${kv("Marqueur",s.counters?.early_stop_marker||0)}${kv("Taille",s.counters?.early_stop_size||0)}${kv("Durée",s.counters?.early_stop_duration||0)}${kv("Gel",s.counters?.early_stop_stall||0)}${s.counters?.held_stall_retries?kv("Reprises gel",s.counters.held_stall_retries):""}</div>`,""),
       renderCard("Appels non convertis",s.counters?.tool_call_unconverted?badge("bad",String(s.counters.tool_call_unconverted)):badge("none","0"),`<div class="kv-list">${kv("Action non vérifiée",s.counters?.unverified_action_claim||0)}${kv("Lot lecture+écriture coupé",s.counters?.read_write_batch_split||0)}</div>`,""),
       renderCard("Raccourci code_reference",badge(s.code_ref_fastpath?"info":"none",s.code_ref_fastpath?"on":"off")+" "+(s.counters?.code_ref_fastpath?badge("warn",String(s.counters.code_ref_fastpath)):badge("none","0")),`<div class="sub">Conversion directe <code>GEMINI_CODE_REF_FASTPATH</code> (0 = attente normale).</div>`,""),
       renderCard("Réponses vides Google",s.counters?.upstream_empty_reply?badge("bad",String(s.counters.upstream_empty_reply)):badge("none","0"),`<div class="sub">Flux clos sans candidat, texte ni pensée.</div>`,""),
@@ -258,29 +607,83 @@ async function load(){
       renderCard("Journal & Confidentialité","",privacyBody,privacyFoot),
     ]},
   ];
-  $("tiles").innerHTML=groups.map(grp=>`<div><div class="group-title">${grp.title}</div><div class="tiles ${grp.cols}">${grp.cards.join("")}</div></div>`).join("");
+  const renderGroup=grp=>`<div><div class="group-title">${grp.title}</div><div class="tiles ${grp.cols}">${grp.cards.join("")}</div></div>`;
+  $("tiles-top").innerHTML=renderGroup(groups[0]);
+  $("tiles-bottom").innerHTML=groups.slice(1).map(renderGroup).join("");
   const envReloadTile=$("env-reload-tile");
   if(envReloadTile){envReloadTile.onclick=async()=>{envReloadTile.disabled=true;try{await fetch("/_ui/api/config/reload",{method:"POST",headers:{"X-GMINI-UI":TOKEN}});}finally{load();}};}
   const arToggle=$("ar-toggle");
   if(arToggle){arToggle.onclick=async()=>{arToggle.disabled=true;try{await fetch("/_ui/api/cookie-refresh/toggle",{method:"POST",headers:{"X-GMINI-UI":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({enabled:!ar.enabled})});}finally{load();}};}
   const tcToggle=$("tc-toggle");
   if(tcToggle){tcToggle.onclick=async()=>{tcToggle.disabled=true;try{await fetch("/_ui/api/temporary-chat/toggle",{method:"POST",headers:{"X-GMINI-UI":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({enabled:!s.temporary_chat})});}finally{load();}};}
+  const ncToggle=$("nc-toggle");
+  if(ncToggle){ncToggle.onclick=async()=>{ncToggle.disabled=true;try{await fetch("/_ui/api/guardrails/set",{method:"POST",headers:{"X-GMINI-UI":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({no_content_sec:s.no_content_sec>0?0:240})});}finally{load();}};}
+  const cerToggle=$("cer-toggle");
+  if(cerToggle){cerToggle.onclick=async()=>{cerToggle.disabled=true;try{await fetch("/_ui/api/guardrails/set",{method:"POST",headers:{"X-GMINI-UI":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({canned_error_retry:s.canned_error_retry==="once"?"off":"once"})});}finally{load();}};}
+async function triggerGoogleConnect(btn,src){
+  if(btn){btn.disabled=true;btn.textContent="Connexion en cours…";}
+  arRunMsg="Connexion en cours…";
+  const msgEl=$("ar-msg");if(msgEl)msgEl.textContent=arRunMsg;
+  const t0=Date.now();
+  try{
+    const ep=src==="ui_connect"?"/_ui/api/cookies/refresh":"/_ui/api/cookie-refresh/run";
+    const r=await fetch(ep,{method:"POST",headers:{"X-GMINI-UI":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({source:src||"ui"})});
+    let j={};try{j=await r.json();}catch{}
+    const ms=Date.now()-t0;
+    if(!r.ok){arRunMsg="Échec ("+ms+" ms) : "+errMsg(j,r.status)+(j.cooldown_sec>0?" ("+fmtCooldown(j.cooldown_sec)+")":"");}
+    else{arRunMsg="OK — connexion lancée ("+ms+" ms)";}
+  }catch(e){arRunMsg="Échec : "+e.message;}
+  finally{load();}
+}
+  const arConnect=$("ar-connect");
+  if(arConnect){arConnect.onclick=()=>triggerGoogleConnect(arConnect,"ui_connect");}
   const arRun=$("ar-run");
-  if(arRun){arRun.onclick=async()=>{arRun.disabled=true;arRun.textContent="en cours…";arRunMsg="";try{const r=await fetch("/_ui/api/cookie-refresh/run",{method:"POST",headers:{"X-GMINI-UI":TOKEN}});const j=await r.json();if(!r.ok){arRunMsg=(j.error||("Erreur "+r.status))+(j.cooldown_sec>0?" ("+fmtCooldown(j.cooldown_sec)+")":"");}}catch(e){arRunMsg="Échec : "+e.message;}finally{load();}};}
+  if(arRun){arRun.onclick=()=>triggerGoogleConnect(arRun,"ui");}
   if(ar.running){setTimeout(()=>{if(!document.hidden)load();},1000);}
   $("models").innerHTML="<tr><th>Nom chez Google</th><th>Nom à utiliser (proxy)</th><th>Identifiant stable</th><th>Qui répond (dernier appel)</th><th class=num>Demandes sur 5 h</th><th class=num>code_reference (5 h)</th><th class=num>Avec pensées</th><th class=num>1er signe (médiane)</th><th class=num>1er texte (médiane)</th><th>Dernier appel</th></tr>"+
     d.models.map(m=>{const cname=m.description||m.display_name||"";const renamed=m.last_identity==="confirmed"&&m.last_served&&cname&&m.last_served!==cname;const failBadge=m.unresponsive?`<div style="margin-top:4px">${badge("bad","ne répond plus depuis "+hmShort(m.failure_since)+" — "+m.failure_count+" échecs de suite")}</div>`:"";const crCell=m.code_ref_5h?(m.code_ref_5h+(m.median_code_ref_pause_ms>=0?" ("+dur(m.median_code_ref_pause_ms)+")":"")):"—";return `<tr><td><b>${esc(cname||"—")}</b>${m.default?' <span class="sub">défaut</span>':""}<div class="sub">${esc([m.menu_label,m.family].filter(Boolean).join(" · "))}</div>${failBadge}</td><td><code>${esc(m.name)}</code></td><td><code>${esc(m.model_id||"—")}</code></td><td>${m.withdrawn_since?badge("warn","Absent du dernier catalogue depuis "+hm(m.withdrawn_since))+'<div class="sub">la demande est quand même envoyée ; si cela dure, se reconnecter à Google (session affaiblie) ou vérifier la limite d\'utilisation</div>':who(m.last_time?m.last_identity:"",m.last_suspect,m.last_seen_models,m.last_served)+(renamed?`<div class="sub" style="color:var(--info);font-weight:600">Google nomme maintenant ce modèle : ${esc(m.last_served)} — actualiser le catalogue</div>`:"")}</td><td class=num>${m.calls_5h||0}</td><td class=num>${crCell}</td><td class=num>${m.calls?m.with_thoughts+" / "+m.calls:"—"}</td><td class=num>${dur(m.median_first_sign_ms)}</td><td class=num>${dur(m.median_first_text_ms)}</td><td>${hm(m.last_time)}</td></tr>`;}).join("");
   const apps=d.apps||[],anyRun=apps.some(x=>x.running);
-  $("apps").innerHTML=apps.length?"<tr><th>Copie</th><th>Version</th><th>Modèles du proxy</th><th>Relais anti-coupure</th><th>État</th><th></th></tr>"+
-    apps.map((x,i)=>`<tr><td><b>${esc(x.name)}</b></td><td>${esc(x.version||"—")}</td><td>${x.custom_models?badge("ok","Oui"):badge("none","Non (officielle)")}</td><td>${x.relay?badge("ok","Oui"):x.custom_models?badge("warn","Non : coupure à 300 s"):"—"}</td><td>${x.running?badge("info","Ouverte"):badge("none","Fermée")}</td><td>${anyRun?"":`<button data-app="${i}">Ouvrir</button>`}</td></tr>`).join(""):"<tr><td class=sub>Aucune copie d'Antigravity trouvée.</td></tr>";
+  const patch=d.antigravity_patch||{};
+  const patchRun=patch.state==="running";
+  $("apps").innerHTML=apps.length?"<tr><th>Copie</th><th>Version</th><th>Type</th><th>Modèles du proxy</th><th>Relais anti-coupure</th><th>État</th><th></th></tr>"+
+    apps.map((x,i)=>{
+      const typeCell=x.kind==="official"
+        ? badge("none","Officielle")+(x.is_latest?" "+badge("info","Dernière officielle"):"")+(!x.has_patched_clone&&x.patchable?" "+badge("warn","⚠ Non patchée"):"")
+        : badge("ok","Clone P1/P5a");
+      const openDis=anyRun||patchRun?"disabled":"";
+      const openBtn=`<button data-app="${i}" ${openDis}>Ouvrir</button>`;
+      const patchBtn=x.patchable?` <button data-patch="${i}" ${openDis}>Patcher en clone P1/P5a</button>`:"";
+      return `<tr><td><b>${esc(x.name)}</b></td><td>${esc(x.version||"—")}</td><td>${typeCell}</td><td>${x.custom_models?badge("ok","Oui"):badge("none","Non (officielle)")}</td><td>${x.relay?badge("ok","Oui"):x.custom_models?badge("warn","Non : coupure à 300 s"):"—"}</td><td>${x.running?badge("info","Ouverte"):badge("none","Fermée")}</td><td style="white-space:nowrap">${anyRun&&!x.patchable?"":(anyRun?"":openBtn)+patchBtn}</td></tr>`;
+    }).join(""):"<tr><td class=sub>Aucune copie d'Antigravity trouvée.</td></tr>";
   document.querySelectorAll("button[data-app]").forEach(b=>b.onclick=async()=>{
     const x=apps[+b.dataset.app];
     if(!x.relay&&x.custom_models&&!confirm("Cette copie n'a pas le relais : les demandes de plus de 300 secondes seront coupées. Ouvrir quand même ?"))return;
     try{const r=await fetch("/_ui/api/antigravity/launch",{method:"POST",headers:{"X-GMINI-UI":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({path:x.path})});const j=await r.json();
-      $("appmsg").textContent=j.launched?`${j.name} s'ouvre.`:j.error==="already_running"?`${j.name} est déjà ouverte : fermez-la d'abord.`:"Ouverture impossible."}
+      $("appmsg").textContent=j.launched?`${j.name} s'ouvre.`:(j.error==="already_running"||(j.error&&j.error.code==="already_running"))?`${j.name} est déjà ouverte : fermez-la d'abord.`:"Ouverture impossible."}
     catch(e){$("appmsg").textContent="Échec : "+e.message}
     setTimeout(load,2500);
   });
+  document.querySelectorAll("button[data-patch]").forEach(b=>b.onclick=async()=>{
+    const x=apps[+b.dataset.patch];
+    const syncAfter=$("ag-patch-sync")?$("ag-patch-sync").checked:true;
+    const withLevels=$("ag-patch-levels")?$("ag-patch-levels").checked:true;
+    const dedup=$("ag-patch-dedup")?$("ag-patch-dedup").checked:true;
+    const keepLegacy=$("ag-patch-keep-legacy")?$("ag-patch-keep-legacy").checked:true;
+    const renameEx=$("ag-patch-rename")?$("ag-patch-rename").checked:false;
+    const optsTxt=syncAfter?`\nSync modèles : oui (niveaux=${withLevels?"oui":"non"}, doublons=${dedup?"supprimés":"conservés"}, anciens alias=${keepLegacy?"conservés":"retirés"}, renommer=${renameEx?"oui":"non"})`:"\nSync modèles : non";
+    if(!confirm(`Cloner et patcher ${x.name} (v${x.version||"?"}) vers ${x.target_clone_name||"clone P1/P5a"} ?\nL'application officielle reste intacte.${optsTxt}`))return;
+    try{
+      const r=await fetch("/_ui/api/antigravity/patch",{method:"POST",headers:{"X-GMINI-UI":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({source_path:x.path,rebuild:false,sync_models_after:syncAfter,sync_with_levels:withLevels,sync_deduplicate:dedup,sync_keep_legacy:keepLegacy,sync_rename:renameEx})});
+      const j=await r.json();
+      if(!r.ok){$("appmsg").textContent="Échec patch : "+errMsg(j,r.status);}
+      else{$("appmsg").textContent=`Patch en cours pour v${x.version||"?"}…`;pollPatchStatus();}
+    }catch(e){$("appmsg").textContent="Échec patch : "+e.message;}
+    load();
+  });
+  renderPatchStatus(patch);
+  if(patchRun)pollPatchStatus();
+  const dmgs=d.antigravity_dmgs||[];
+  $("agdmg").innerHTML=dmgs.length?`<div class="note">Images disque dans <code>~/Downloads</code> : ${dmgs.map(m=>`<code>${esc(m.name)}</code> (${m.size_mb} Mo)`).join(" · ")}</div>`:"";
   const n5=d.models.reduce((t,m)=>t+(m.calls_5h||0),0);
   $("quota").innerHTML=`<b>${n5}</b> demande(s) envoyée(s) à Gemini par ce proxy sur les 5 dernières heures`+(n5?` — estimation : ${Math.min(100,Math.round(n5*2.6))} % de la fenêtre de 5 h si tout est parti sur 3.1 Pro.`:".");
   const tu=d.token_usage||{};
@@ -297,28 +700,428 @@ async function load(){
       return `<tr><td>${lbl}${g.served_id?`<div class="sub"><code>${esc(g.served_id)}</code></div>`:""}</td><td class=num>${w5.requests||0}</td><td class=num>${tokFmt(w5.input_tokens||0)}</td><td class=num>${tokFmt(w5.thought_tokens||0)}</td><td class=num>${tokFmt(w5.text_tokens||0)}</td><td class=num><b>${tokFmt(w5.total_tokens||0)}</b></td><td class=num>${tokFmt(w12.total_tokens||0)}</td><td class=num>${tokFmt(wa.total_tokens||0)} (${wa.requests||0})</td><td class=num>${maxIn?tokFmt(maxIn)+" ("+pct+")":"—"}</td></tr>`;
     }).join(""):"<tr><td colspan=9 class=sub>Aucune donnée de tokens enregistrée pour le moment.</td></tr>");
   const a=d.antigravity;
-  if(a.file_state!=="ok"){$("ag").innerHTML=`<tr><td>Fichier des modèles d'Antigravity ${a.file_state==="off"?"non consulté (désactivé)":a.file_state==="absent"?"introuvable":"illisible"}.</td></tr>`;$("agcmd").innerHTML=""}
+  if(a.file_state!=="ok"){$("ag").innerHTML=`<tr><td>Fichier des modèles d'Antigravity ${a.file_state==="off"?"non consulté (désactivé)":a.file_state==="absent"?"introuvable":"illisible"}.</td></tr>`;$("agcmd").innerHTML="";}
   else{
     $("ag").innerHTML="<tr><th>Affiché dans Antigravity</th><th>Modèle du proxy</th><th>État</th><th class=num>Délai maximal</th><th class=num>Relais anti-coupure</th></tr>"+
-      a.entries.map(e=>`<tr><td><b>${esc(e.display_name)}</b></td><td><code>${esc(e.model)}</code></td><td>${e.status==="ok"?badge("ok","Dans le catalogue"):badge("bad","Absent du catalogue")}</td><td class=num>${e.timeout_ms?dur(e.timeout_ms):"—"}</td><td class=num>${e.relay_keepalive_ms?dur(e.relay_keepalive_ms):badge("warn","Absent : coupure à 300 s")}</td></tr>`).join("")+
+      a.entries.map(e=>{
+        const stBadge=e.status==="ok"?badge("ok","Dans le catalogue"):e.status==="alias"?badge("info","Alias actif → "+(e.alias_target||"?")):badge("bad","Absent du catalogue");
+        return `<tr><td><b>${esc(e.display_name)}</b></td><td><code>${esc(e.model)}</code></td><td>${stBadge}</td><td class=num>${e.timeout_ms?dur(e.timeout_ms):"—"}</td><td class=num>${e.relay_keepalive_ms?dur(e.relay_keepalive_ms):badge("warn","Absent : coupure à 300 s")}</td></tr>`;
+      }).join("")+
       a.missing.map(n=>`<tr><td>${badge("warn","Aucune entrée")}</td><td><code>${esc(n)}</code></td><td colspan=3 class="sub">Modèle détecté mais pas encore proposé dans Antigravity</td></tr>`).join("");
-    $("agcmd").innerHTML=`<p class="note">Pour créer ou renommer les entrées (Antigravity fermé), lancer dans le dossier <code>SUIVI_PROJET/5_Outils_et_diagnostics</code> :</p><code class="cmd">python3 synchroniser_modeles_gmini.py --rename --apply</code><p class="note">Variantes par niveau de réflexion :</p><code class="cmd">python3 synchroniser_modeles_gmini.py --efforts low,high --apply</code>`;
+    ensureAgSyncPanel();
   }
   const promptWarnBytes=(s.prompt_warn_kb!=null?s.prompt_warn_kb:300)*1024;
   const fmtPrompt=n=>{const txt=koKB(n);return promptWarnBytes>0&&n!=null&&n>promptWarnBytes?`<span style="color:var(--warn);font-weight:600">${txt}</span>`:txt;};
-  const inflight = d.in_flight || [];
+  const inflightRaw = d.in_flight || [];
+  const inflightSeen = new Set();
+  const inflight = inflightRaw.filter(c => {
+    if (!c) return false;
+    if (c.id) {
+      if (inflightSeen.has(c.id)) return false;
+      inflightSeen.add(c.id);
+    }
+    return true;
+  });
   const inflightHist = d.in_flight_history || [];
-  const allInflight = inflight.concat(inflightHist);
-  const convCount = new Set(allInflight.map(c => c.conv_id || c.id)).size;
-  $("inflight-meta").textContent = `${inflight.length} en cours · ${inflightHist.length} en historique (${convCount}/5 conv., max 200 · vue scrollable de 15 lignes)`;
-  const stateBadge = (c, live) => live ? badge("info", "En cours") : c.state === "Terminée" ? badge("ok", "Terminée") : badge("warn", c.state || "Terminée");
-  const rowInflight = (c, live) => `<tr${live ? ' style="background:var(--infobg)"' : ""}><td>${hm(c.start_time)}</td><td><code>${esc(c.conv_id || "—")}</code></td><td>${stateBadge(c, live)}</td><td><code>${esc(c.model)}</code></td><td>${c.identity ? who(c.identity, "", "", c.served_name) : (live ? badge("info", "En attente d'identification…") : badge("none", "Non indiqué"))}${(c.emitted_tools && c.emitted_tools.length) ? `<div class="sub" style="color:var(--ok);font-weight:600">outils : ${esc(c.emitted_tools.join(", "))}</div>` : ""}${c.unverified_claim ? `<div class="sub" style="color:var(--bad);font-weight:600">⚠ action prétendue sans outil (${esc(c.unverified_claim)})</div>` : ""}${c.internal_tool ? `<div class="sub" style="color:var(--warn);font-weight:600">outil interne détecté : ${esc(c.internal_tool)}</div>` : ""}${c.limit_banner ? `<div class="sub" style="color:var(--bad);font-weight:600">limite annoncée par Google : ${esc(c.limit_banner)}</div>` : ""}${c.stale_token_alert ? `<div class="sub" style="color:var(--bad);font-weight:600">⚠ ${esc(c.stale_token_alert)}</div>` : ""}${c.status_note ? (c.status_note.startsWith("Google : ") ? `<div class="sub" style="color:var(--info);font-weight:600">⏳ ${esc(c.status_note)}</div>` : `<div class="sub" style="color:var(--warn);font-weight:600">⚠ ${esc(c.status_note)}</div>`) : ""}</td><td class=num>${fmtPrompt(c.prompt_bytes)}</td><td class=num>${ko(c.thought_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${ko(c.sent_bytes)}</td><td class=num>${tokCell(c)}</td><td class=num>${live ? (c.last_frame_age_sec > 0 ? age(c.last_frame_age_sec) : "à l'instant") : "—"}</td><td class=num>${dur(c.duration_ms)}</td><td><code>${esc((c.id||"").slice(0,8))}</code></td></tr>`;
-  $("inflight").innerHTML = "<thead><tr><th>Heure début</th><th>Conv.</th><th>État</th><th>Modèle demandé</th><th>Qui répond (déroulé)</th><th class=num>Prompt</th><th class=num>Pensées</th><th class=num>Reçus</th><th class=num>Transmis</th><th class=num>Tokens (est.)</th><th class=num>Dernière trame</th><th class=num>Durée</th><th>Requête</th></tr></thead><tbody>" +
-    (allInflight.length ? inflight.map(c => rowInflight(c, true)).join("") + inflightHist.map(c => rowInflight(c, false)).join("") : "<tr><td colspan=13 class=sub>Aucune demande en cours ou récente.</td></tr>") + "</tbody>";
-  const callsList=d.calls||[];
-  $("calls-meta").textContent=`${callsList.length} sur les 12 dernières heures (vue scrollable de 15 lignes)`;
-  $("calls").innerHTML="<thead><tr><th>Heure</th><th>Modèle demandé</th><th>Qui répond</th><th class=num>Niveau</th><th class=num>Durée</th><th class=num>1re pensée</th><th class=num>1er texte</th><th class=num>Prompt</th><th class=num>Réponse</th><th class=num>Pensées</th><th class=num>Tokens (est.)</th><th>Erreur</th><th>Requête</th></tr></thead><tbody>"+
-    (callsList.length?callsList.map(c=>`<tr><td>${hm(c.time)}</td><td><code>${esc(c.model)}</code></td><td>${who(c.identity,c.suspect,(c.seen_model_ids||[]).join(", "),c.served_name)}</td><td class=num>${c.thinking_level||"—"}</td><td class=num>${dur(c.duration_ms)}</td><td class=num>${dur(c.first_thought_ms)}</td><td class=num>${dur(c.first_text_ms)}</td><td class=num>${fmtPrompt(c.prompt_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${ko(c.thought_bytes)}</td><td class=num>${tokCell(c)}</td><td>${c.error?badge("bad",c.error):""}</td><td><code>${esc((c.request_id||"").slice(0,8))}</code></td></tr>`).join(""):"<tr><td colspan=13 class=sub>Aucun appel enregistré sur les 12 dernières heures.</td></tr>")+"</tbody>";
+  const callsList = d.calls || [];
+  const callsByReq = new Map();
+  const ungroupedCalls = [];
+  callsList.forEach(cl => {
+    if (!cl) return;
+    if (cl.request_id) {
+      if (!callsByReq.has(cl.request_id)) callsByReq.set(cl.request_id, []);
+      callsByReq.get(cl.request_id).push(cl);
+    } else {
+      ungroupedCalls.push(cl);
+    }
+  });
+  callsByReq.forEach(arr => arr.sort((a, b) => Date.parse(a.time || 0) - Date.parse(b.time || 0)));
+  inflight.forEach(c => {
+    c.attempts = c.id ? (callsByReq.get(c.id) || []) : [];
+  });
+  const seenIds = new Set(inflightSeen);
+  const mergedHist = [];
+  inflightHist.forEach(c => {
+    if (!c) return;
+    if (c.id) {
+      if (seenIds.has(c.id)) return;
+      seenIds.add(c.id);
+    }
+    const attempts = c.id ? (callsByReq.get(c.id) || []) : [];
+    const cl = attempts.length ? attempts[attempts.length - 1] : null;
+    mergedHist.push({
+      ...c,
+      binary_tag: c.binary_tag || (cl && cl.binary_tag) || "",
+      thinking_level: c.thinking_level || (cl && cl.thinking_level) || "",
+      first_thought_ms: c.first_thought_ms != null ? c.first_thought_ms : (cl ? cl.first_thought_ms : null),
+      first_text_ms: c.first_text_ms != null ? c.first_text_ms : (cl ? cl.first_text_ms : null),
+      call_error: (cl && cl.error) || "",
+      suspect: (cl && cl.suspect) || "",
+      seen_model_ids: (cl && cl.seen_model_ids) || null,
+      attempts,
+    });
+  });
+  const pushCallGroup = (reqId, attempts) => {
+    const last = attempts[attempts.length - 1];
+    const first = attempts[0];
+    const totalDur = attempts.reduce((acc, a) => acc + (Number(a.duration_ms) || 0), 0);
+    mergedHist.push({
+      id: reqId || "",
+      conv_id: "",
+      binary_tag: last.binary_tag || first.binary_tag || "",
+      state: last.error ? "Erreur" : "Terminée",
+      model: last.model || first.model || "",
+      served_name: last.served_name || first.served_name || "",
+      google_model: last.served_name || first.served_name || "",
+      identity: last.identity || first.identity || "",
+      start_time: first.time || last.time || "",
+      duration_ms: totalDur || last.duration_ms,
+      prompt_bytes: last.prompt_bytes,
+      thought_bytes: last.thought_bytes,
+      text_bytes: last.text_bytes,
+      total_tokens: last.total_tokens,
+      thinking_level: last.thinking_level || "",
+      first_thought_ms: last.first_thought_ms,
+      first_text_ms: last.first_text_ms,
+      call_error: last.error || "",
+      suspect: last.suspect || "",
+      seen_model_ids: last.seen_model_ids || null,
+      attempts,
+    });
+  };
+  callsByReq.forEach((attempts, reqId) => {
+    if (seenIds.has(reqId)) return;
+    seenIds.add(reqId);
+    pushCallGroup(reqId, attempts);
+  });
+  ungroupedCalls.forEach(cl => pushCallGroup("", [cl]));
+  mergedHist.sort((a, b) => Date.parse(b.start_time || 0) - Date.parse(a.start_time || 0));
+  const convCount = new Set(inflight.concat(mergedHist).map(c => c.conv_id || c.id)).size;
+  const dmMeta = $("demandes-meta");
+  if (dmMeta) dmMeta.textContent = `${inflight.length} en cours · ${mergedHist.length} en historique (${convCount}/20 conv., max 500)`;
+  const isErrState = st => /^(Erreur|Timeout|Refus outils|Pause quota|Réponse |Glitch|Blocage|HTTP [45])/.test(st || "");
+  const isInfoNote = n => /^(Google : |Demande envoyée|Préparation d'un appel d'outil)/.test(n || "");
+  const stateBadge = (c, live) => live ? badge("info", "En cours") : c.state === "Terminée" ? badge("ok", "Terminée") : isErrState(c.state) ? badge("bad", c.state) : badge("warn", c.state || "Terminée");
+  const outcomeSummaryBadge = (c, live) => {
+    if (live) return "";
+    const atts = c.attempts || [];
+    const nAtt = atts.length;
+    const finalOk = c.state === "Terminée" && !isErrState(c.state) && !c.call_error;
+    const hadErr = atts.some(a => !!a.error);
+    if (finalOk && (nAtt > 1 || hadErr)) return `<div class="mt6">${badge("ok", `Récupérée (${nAtt} tent.)`)}</div>`;
+    if (!finalOk && isErrState(c.state)) return `<div class="mt6">${badge("bad", nAtt > 1 ? `Échec (${nAtt} tent.)` : "Échec (1 tent.)")}</div>`;
+    if (finalOk) return `<div class="mt6">${badge("none", "Direct")}</div>`;
+    return "";
+  };
+  const attemptsTrail = (c, live) => {
+    const atts = c.attempts || [];
+    if (!atts.length) return "";
+    const finalOk = !live && c.state === "Terminée" && !isErrState(c.state) && !c.call_error;
+    return `<div class="mt6">` + atts.map((a, i) => {
+      const lvl = a.thinking_level ? ` · lvl ${esc(a.thinking_level)}` : "";
+      const dStr = a.duration_ms != null ? ` · ${dur(a.duration_ms)}` : "";
+      if (a.error) {
+        const recoveredLater = finalOk || atts.slice(i + 1).some(x => !x.error);
+        const cls = recoveredLater ? "var(--warn)" : "var(--bad)";
+        const b = recoveredLater ? badge("warn", "récupérée") : badge("bad", "échec");
+        return `<div class="sub" style="color:${cls};font-weight:600">T${i + 1}${lvl}${dStr} · ${esc(a.error)} ${b}</div>`;
+      }
+      return `<div class="sub" style="color:var(--ok);font-weight:600">T${i + 1}${lvl}${dStr} ${badge("ok", i > 0 ? "OK après retry" : "OK")}</div>`;
+    }).join("") + `</div>`;
+  };
+  const whoInflight = (c, live) => c.identity ? who(c.identity, c.suspect || "", (c.seen_model_ids || []).join(", "), c.served_name) : (c.error_code === "quota_pause_blocked" || (c.state || "").includes("Pause quota")) ? badge("bad", "Bloqué par GMINI (pré-vol)") : (live ? badge("info", "En attente d'identification…") : badge("none", "Non indiqué"));
+  const errBoxInflight = c => {
+    const meta = [c.error_service, c.error_func, (c.method && c.route) ? (c.method + " " + c.route) : c.route].filter(Boolean).map(esc).join(" · ");
+    const cause = [c.error_code, c.error_detail, c.call_error].filter(Boolean).map(esc).join(" — ");
+    if (!meta && !cause) return "";
+    const isErr = isErrState(c.state) || !!c.error_code || !!c.error_detail || !!c.call_error;
+    const col = isErr ? "var(--bad)" : "var(--info)";
+    return `<div class="sub" style="color:${col};font-weight:600">${meta ? `<div>Service · Fonction · Appel : ${meta}</div>` : ""}${cause ? `<div>Cause : ${cause}</div>` : ""}</div>`;
+  };
+  const rowDemand = (c, live) => {
+    const timingSub = (c.first_thought_ms != null || c.first_text_ms != null) ? `<div class="sub">P:${dur(c.first_thought_ms)} · T:${dur(c.first_text_ms)}</div>` : "";
+    return `<tr${live ? ' style="background:var(--infobg)"' : ""}><td>${hm(c.start_time)}</td><td><code>${esc(c.conv_id || "—")}</code></td><td><span class="b none">${esc(c.binary_tag || "—")}</span></td><td>${stateBadge(c, live)}${outcomeSummaryBadge(c, live)}</td><td><code>${esc(c.model)}</code>${c.thinking_level ? `<div class="sub">lvl ${esc(c.thinking_level)}</div>` : ""}</td><td>${whoInflight(c, live)}${attemptsTrail(c, live)}${errBoxInflight(c)}${(c.emitted_tools && c.emitted_tools.length) ? `<div class="sub" style="color:var(--ok);font-weight:600">outils : ${esc(c.emitted_tools.join(", "))}</div>` : ""}${c.unverified_claim ? `<div class="sub" style="color:var(--bad);font-weight:600">⚠ action prétendue sans outil (${esc(c.unverified_claim)})</div>` : ""}${c.internal_tool ? `<div class="sub" style="color:var(--warn);font-weight:600">outil interne détecté : ${esc(c.internal_tool)}</div>` : ""}${c.limit_banner ? `<div class="sub" style="color:var(--bad);font-weight:600">limite annoncée par Google : ${esc(c.limit_banner)}</div>` : ""}${c.stale_token_alert ? `<div class="sub" style="color:var(--bad);font-weight:600">⚠ ${esc(c.stale_token_alert)}</div>` : ""}${c.status_note ? (isInfoNote(c.status_note) ? `<div class="sub" style="color:var(--info);font-weight:600">⏳ ${esc(c.status_note)}</div>` : `<div class="sub" style="color:var(--warn);font-weight:600">⚠ ${esc(c.status_note)}</div>`) : ""}</td><td class=num>${fmtPrompt(c.prompt_bytes)}</td><td class=num>${ko(c.thought_bytes)}</td><td class=num>${ko(c.text_bytes)}</td><td class=num>${c.sent_bytes != null ? ko(c.sent_bytes) : "—"}</td><td class=num>${tokCell(c)}</td><td class=num>${live ? (c.last_frame_age_sec > 0 ? age(c.last_frame_age_sec) : "à l'instant") : "—"}</td><td class=num>${dur(c.duration_ms)}${timingSub}</td><td><code>${esc((c.id||"").slice(0,8))}</code></td></tr>`;
+  };
+  const dmT = $("demandes-unified");
+  if (dmT) {
+    dmT.innerHTML = "<thead><tr><th>Heure début</th><th>Conv.</th><th>Version</th><th>État</th><th>Modèle demandé</th><th>Qui répond (déroulé)</th><th class=num>Prompt</th><th class=num>Pensées</th><th class=num>Reçus</th><th class=num>Transmis</th><th class=num>Tokens (est.)</th><th class=num>Dernière trame</th><th class=num>Durée / 1er signe</th><th>Requête</th></tr></thead><tbody>" +
+      ((inflight.length || mergedHist.length) ? inflight.map(c => rowDemand(c, true)).join("") + mergedHist.map(c => rowDemand(c, false)).join("") : "<tr><td colspan=14 class=sub>Aucune demande en cours ou récente.</td></tr>") + "</tbody>";
+  }
+  loadDiagnostics();
+  loadToolsDB();
+}
+let tdbWired=false;
+async function exportToolsDB(fmt){
+  const w=$("tdb-window")?$("tdb-window").value:"all";
+  const k=$("tdb-kind")?$("tdb-kind").value:"all";
+  const v=$("tdb-version")?$("tdb-version").value.trim():"";
+  const q=$("tdb-filter")?$("tdb-filter").value.trim():"";
+  const url=`/_ui/api/tools-db/export?format=${encodeURIComponent(fmt)}&window=${encodeURIComponent(w)}&kind=${encodeURIComponent(k)}&version=${encodeURIComponent(v)}&q=${encodeURIComponent(q)}`;
+  const r=await fetch(url,{headers:{"X-GMINI-UI":TOKEN}});
+  if(!r.ok)return;
+  const blob=await r.blob();
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download=`gemini-tools-db.${fmt}`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+async function loadToolsDB(){
+  if(!$("tdb-table"))return;
+  if(!tdbWired){
+    tdbWired=true;
+    ["tdb-window","tdb-kind"].forEach(id=>{if($(id))$(id).onchange=loadToolsDB;});
+    ["tdb-version","tdb-filter"].forEach(id=>{if($(id))$(id).oninput=loadToolsDB;});
+    if($("tdb-export-json"))$("tdb-export-json").onclick=()=>exportToolsDB("json");
+    if($("tdb-export-csv"))$("tdb-export-csv").onclick=()=>exportToolsDB("csv");
+  }
+  const w=$("tdb-window").value,k=$("tdb-kind").value,v=$("tdb-version").value.trim(),q=$("tdb-filter").value.trim();
+  try{
+    const r=await fetch(`/_ui/api/tools-db?window=${encodeURIComponent(w)}&kind=${encodeURIComponent(k)}&version=${encodeURIComponent(v)}&q=${encodeURIComponent(q)}&limit=200`,{headers:{"X-GMINI-UI":TOKEN}});
+    const j=await r.json();
+    if(!r.ok)return;
+    const s=j.summary||{};
+    $("tdb-summary").textContent=`${s.total||0} entrées · Locaux : ${s.local_count||0} · Internes Google : ${s.internal_count||0} · Succès/Récupérés : ${s.success_count||0} (${s.success_rate_pct||0} %) · Échecs : ${s.failure_count||0}`;
+    setNb("outils",s.total?String(s.total):"","info");
+    const vers=s.by_version||[];
+    $("tdb-versions").innerHTML="<thead><tr><th>Version</th><th class=num>Total</th><th class=num>OK</th><th class=num>Échecs</th><th class=num>Succès</th></tr></thead><tbody>"+
+      (vers.length?vers.map(x=>`<tr><td><code>${esc(x.version)}</code></td><td class=num>${x.total}</td><td class=num>${x.ok}</td><td class=num>${x.fail}</td><td class=num>${x.success_rate_pct}%</td></tr>`).join(""):"<tr><td colspan=5 class=sub>Aucune donnée.</td></tr>")+"</tbody>";
+    const blk=s.top_blocking_internal||[];
+    $("tdb-blocking").innerHTML="<thead><tr><th>Outil interne Google</th><th class=num>Échecs</th><th class=num>Total</th></tr></thead><tbody>"+
+      (blk.length?blk.map(x=>`<tr><td><code title="${esc(x.name)}">${esc(cleanInternalToolLabel(x.name))}</code></td><td class=num>${x.fail}</td><td class=num>${x.total}</td></tr>`).join(""):"<tr><td colspan=3 class=sub>Aucun outil interne bloquant.</td></tr>")+"</tbody>";
+    const items=j.items||[];
+    $("tdb-table").innerHTML="<thead><tr><th>Date</th><th>Version</th><th>Modèle</th><th>Type</th><th>Outils</th><th>Action</th><th>Issue</th><th class=num>Durée</th><th>Note</th></tr></thead><tbody>"+
+      (items.length?items.map(it=>{
+        const ok=it.outcome==="tool_calls_ok"||it.outcome==="recovered";
+        const ob=ok?badge("ok",it.outcome):badge("bad",it.outcome);
+        const kb=it.tool_kind==="internal_google"?badge("warn","internal_google"):badge("info","local");
+        const rawTools=(it.tool_names||[]).join(", ");
+        const dispTools=it.tool_kind==="internal_google"?(it.tool_names||[]).map(cleanInternalToolLabel).join(", "):rawTools;
+        return `<tr><td>${hm(it.ts)}</td><td><code>${esc(it.binary_tag||it.binary_version||"—")}</code></td><td><code>${esc(it.model_requested)}</code></td><td>${kb}</td><td><code title="${esc(rawTools)}">${esc(dispTools||"—")}</code></td><td>${esc(it.proxy_action)}</td><td>${ob}</td><td class=num>${dur(it.duration_ms)}</td><td class="sub">${esc(it.note||"")}</td></tr>`;
+      }).join(""):"<tr><td colspan=9 class=sub>Aucun appel d'outil enregistré.</td></tr>")+"</tbody>";
+  }catch(_){}
+}
+// ---- Diagnostics proxy : activité, incidents, export ----
+const diagState={window:"1h",nature:"all",limit:200,offset:0,filter:"",items:[],summary:null,total:0,hasMore:false,err:""};
+let diagWired=false;
+function cleanInternalToolLabel(raw){
+  const s=String(raw||"").trim();
+  if(!s)return "";
+  const cleaned=s.split(/\s+/).filter(p=>!/^https?:\/\//i.test(p)).join(" ").trim();
+  if(!cleaned)return "outil interne Google";
+  const low=cleaned.toLowerCase();
+  if(low.includes("searching the web")||low.includes("google_search"))return low.includes("searching the web")?"Google Search — Searching the web":"Google Search";
+  if(low.includes("drive_mcp"))return "Google Drive (drive_mcp)";
+  return cleaned;
+}
+function diagKind(it){return String(it&&it.kind||"")==="incident"?"incident":"activity";}
+function diagMatch(it,f){
+  if(!f)return true;
+  const hay=[it.ts,it.kind,it.model,it.served_model,it.type,it.detail,it.reason,it.status,it.outcome,it.request_id,it.tool_calls,it.tool_names,it.internal_tool].filter(v=>v!=null).join(" ").toLowerCase();
+  return hay.indexOf(f)>=0;
+}
+function diagTypeBadge(t){
+  const s=String(t||"incident");
+  return /err|fail|block|timeout|empty|degrad|refus/i.test(s)?badge("bad",s):badge("warn",s);
+}
+function diagActBadge(it){
+  const out=String(it.outcome||"");
+  const st=Number(it.status)||0;
+  if(st>=400||out==="error")return badge("bad",out||("HTTP "+st));
+  if(out==="tool_calls_ok")return badge("ok","tool_calls_ok");
+  if(out==="cancelled")return badge("warn","cancelled");
+  return badge("none",out||"activité");
+}
+function renderDiagnostics(){
+  const uniT=$("diag-unified");
+  if(!uniT)return;
+  const f=String(diagState.filter||"").trim().toLowerCase();
+  const nat=String(diagState.nature||"all");
+  const rows=[];
+  (diagState.items||[]).forEach(it=>{
+    if(!diagMatch(it,f))return;
+    const isInc=diagKind(it)==="incident";
+    const isErr=(it.status&&Number(it.status)>=400)||/err|fail|timeout|refus|glitch|block|canned/i.test(String(it.outcome||"")+" "+String(it.type||"")+" "+String(it.reason||""));
+    if(nat==="activity"&&isInc)return;
+    if(nat==="incident"&&!isInc)return;
+    if(nat==="errors"&&!isErr)return;
+    rows.push(it);
+  });
+  const incByReq=new Map();
+  (diagState.items||[]).forEach(it=>{
+    if(diagKind(it)==="incident"&&it.request_id){
+      const st=incByReq.get(it.request_id)||{total:0,recovered:0};
+      st.total++;
+      if(it.recovered)st.recovered++;
+      incByReq.set(it.request_id,st);
+    }
+  });
+  uniT.innerHTML="<thead><tr><th>Heure</th><th>Requête</th><th>Version</th><th>Type / Statut</th><th>Modèle &amp; Served</th><th>Outils</th><th>Détail / Raison</th><th class=num>TTFT / Durée / Prompt</th><th>Récupéré</th></tr></thead><tbody>"+
+    (rows.length?rows.map(it=>{
+      const isInc=diagKind(it)==="incident";
+      const isErr=(it.status&&Number(it.status)>=400)||/err|fail|timeout|refus|glitch|block|canned/i.test(String(it.outcome||"")+" "+String(it.type||"")+" "+String(it.reason||""));
+      const reqCol=`<code>${esc((it.request_id||"—").slice(0,8))}</code>`;
+      const typeCol=isInc?`${badge("warn","Incident")} ${diagTypeBadge(it.type)}`:`${badge("none","Activité")} ${diagActBadge(it)}`;
+      const mdl=`<code>${esc(it.model||it.served_model||"—")}</code>`+(it.served_model&&it.served_model!==it.model?`<div class="sub">→ <code>${esc(it.served_model)}</code></div>`:"");
+      const tn=Array.isArray(it.tool_names)?[...new Set(it.tool_names)].filter(Boolean):[];
+      const localTools=tn.length?badge("info",tn.map(esc).join(", ")):(it.tool_calls?badge("info",String(it.tool_calls)):"");
+      const itool=it.internal_tool?`<div class="${localTools?"mt6":""}" title="${esc(it.internal_tool)}">${badge("warn",cleanInternalToolLabel(it.internal_tool))}</div>`:"";
+      const toolsCol=(localTools||itool)?(localTools+itool):"—";
+      const loc=[it.route,it.service,it.func].filter(Boolean).map(esc).join(" · ");
+      const mainDet=isInc?esc(it.detail||"—"):[it.status,it.outcome].filter(Boolean).map(esc).join(" · ");
+      const reasonLine=it.reason?`<div class="sub">${esc(it.reason)}</div>`:"";
+      const locLine=loc?`<div class="sub" style="color:${isErr?"var(--bad)":"var(--info)"};font-weight:600">${loc}</div>`:"";
+      const metricsCol=isInc?"—":`<span class="sub">${dur(it.ttft_ms)} / ${dur(it.duration_ms)} / ${ko(it.prompt_bytes)}</span>`;
+      const reqStats=it.request_id?incByReq.get(it.request_id):null;
+      const recCol=isInc
+        ?(it.recovered?badge("ok","oui"):badge("bad","non"))
+        :((isErr||String(it.outcome||"")==="cancelled")?badge("bad","non"):(reqStats&&reqStats.recovered>0?badge("ok",`récupérée (${reqStats.recovered})`):badge("ok","direct")));
+      return `<tr><td title="${esc(it.ts||"")}">${hm(it.ts)}</td><td>${reqCol}</td><td><span class="b none">${esc(it.binary_tag||"—")}</span></td><td>${typeCol}</td><td>${mdl}</td><td>${toolsCol}</td><td class="diag-detail">${mainDet}${reasonLine}${locLine}</td><td class=num>${metricsCol}</td><td>${recCol}</td></tr>`;
+    }).join(""):"<tr><td colspan=9 class=sub>Aucun événement sur cette fenêtre. Si une session tourne dans Antigravity, vérifiez que le modèle sélectionné porte bien la mention « (GMINI-Proxy) ».</td></tr>")+"</tbody>";
+  const sm=diagState.summary||{};
+  const sum=$("diag-summary");
+  if(sum)sum.innerHTML=`<b>${sm.activity_count||0}</b> activités · <b>${sm.incident_count||0}</b> incidents · <b>${sm.error_count||0}</b> erreurs · <b>${sm.tool_calls_total||0}</b> appels d'outils <span class="sub">(réussis : ${sm.ok_count||0})</span>`;
+  const shown=rows.length;
+  const meta=$("diag-meta");
+  if(meta)meta.textContent=`${shown} affiché(s)`+(shown?` — ${diagState.offset+1}–${diagState.offset+shown} sur ${diagState.total}`:` · ${diagState.total} au total`)+` · fenêtre ${diagState.window}`+(f?` · filtre « ${String(diagState.filter).trim()} »`:"");
+  const prev=$("diag-prev"),next=$("diag-next");
+  if(prev)prev.disabled=!diagState.offset||diagState.offset<=0;
+  if(next)next.disabled=!diagState.hasMore;
+  const errBox=$("diag-err");
+  if(errBox)errBox.innerHTML=diagState.err?`<p class="note" style="margin:0 0 10px">${badge("bad","Diagnostics indisponibles")} ${esc(diagState.err)}</p>`:"";
+}
+async function loadDiagnostics(){
+  wireDiagnostics();
+  if(!$("diag-unified"))return;
+  try{
+    const qs="kind=all&window="+encodeURIComponent(diagState.window)+"&limit="+diagState.limit+"&offset="+diagState.offset;
+    const r=await fetch("/_ui/api/diagnostics?"+qs,{headers:{"X-GMINI-UI":TOKEN},cache:"no-store"});
+    if(!r.ok)throw new Error("Erreur "+r.status);
+    const j=await r.json();
+    diagState.items=Array.isArray(j.items)?j.items:[];
+    diagState.total=Number(j.total)||0;
+    diagState.hasMore=!!j.has_more;
+    diagState.summary=j.summary||{};
+    diagState.err="";
+  }catch(e){diagState.err=e&&e.message?e.message:String(e);}
+  renderDiagnostics();
+}
+function diagFileName(cd,fmt,win){
+  let name="";
+  if(cd){const m=/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);if(m&&m[1])name=m[1].trim();}
+  if(name){try{name=decodeURIComponent(name);}catch{}}
+  if(name)return name;
+  const ext=(fmt==="all"||fmt==="json")?"zip":(fmt==="md"?"md":fmt);
+  return `gmini-diagnostics-${win}-${new Date().toISOString().slice(0,10)}.${ext}`;
+}
+async function exportDiagnostics(){
+  const btn=$("diag-export"),msg=$("diag-export-msg");
+  const win=$("diag-export-window")?$("diag-export-window").value:"1h";
+  const fmt=$("diag-export-format")?$("diag-export-format").value:"json";
+  if(btn)btn.disabled=true;
+  if(msg)msg.textContent="Préparation…";
+  try{
+    const r=await fetch("/_ui/api/diagnostics/export",{method:"POST",headers:{"X-GMINI-UI":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({format:fmt,window:win,since:"",model:""})});
+    if(!r.ok){
+      let detail="Erreur "+r.status;
+      try{const j=await r.json();detail=errMsg(j,r.status);}catch{}
+      throw new Error(detail);
+    }
+    const blob=await r.blob();
+    const name=diagFileName(r.headers.get("Content-Disposition")||"",fmt,win);
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a");
+    a.href=url;a.download=name;a.rel="noopener";
+    document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>{try{URL.revokeObjectURL(url);}catch{}},2000);
+    if(msg)msg.innerHTML=badge("ok","téléchargé")+" "+esc(name);
+  }catch(e){
+    if(msg)msg.innerHTML=badge("bad","échec")+" "+esc(e&&e.message?e.message:String(e));
+  }finally{if(btn)btn.disabled=false;}
+}
+function wireDiagnostics(){
+  if(diagWired)return;
+  diagWired=true;
+  const w=$("diag-window"),n=$("diag-nature"),f=$("diag-filter"),prev=$("diag-prev"),next=$("diag-next"),ex=$("diag-export");
+  if(w)w.onchange=()=>{diagState.window=w.value;diagState.offset=0;loadDiagnostics();};
+  if(n)n.onchange=()=>{diagState.nature=n.value;renderDiagnostics();};
+  if(f)f.oninput=()=>{diagState.filter=f.value;renderDiagnostics();};
+  if(prev)prev.onclick=()=>{diagState.offset=Math.max(0,diagState.offset-diagState.limit);loadDiagnostics();};
+  if(next)next.onclick=()=>{if(!diagState.hasMore)return;diagState.offset+=diagState.limit;loadDiagnostics();};
+  if(ex)ex.onclick=()=>{exportDiagnostics();};
+}
+let patchPollTimer=null;
+function renderPatchStatus(p){
+  const box=$("agpatch");
+  if(!box)return;
+  if(!p||!p.state||p.state==="idle"){box.innerHTML="";return;}
+  const b=p.state==="running"?badge("info","En cours ("+(p.step||"…")+")"):p.state==="succeeded"?badge("ok","Clone prêt"):badge("bad","Échec");
+  const logs=(p.logs||[]).slice(-10).map(l=>esc(l)).join("\n");
+  box.innerHTML=`<div class="note" style="margin-top:10px"><div><b>Patch Antigravity :</b> ${b}${p.source_version?" · v"+esc(p.source_version):""}${p.error?" — "+esc(p.error):""}</div>${p.target_path?`<div class="sub">Cible : <code>${esc(p.target_path)}</code></div>`:""}${logs?`<pre class="cmd" style="margin-top:6px;max-height:140px;overflow:auto">${logs}</pre>`:""}</div>`;
+}
+function pollPatchStatus(){
+  if(patchPollTimer)return;
+  patchPollTimer=setInterval(async()=>{
+    try{
+      const r=await fetch("/_ui/api/antigravity/patch/status",{headers:{"X-GMINI-UI":TOKEN},cache:"no-store"});
+      if(!r.ok)return;
+      const j=await r.json();
+      renderPatchStatus(j);
+      if(j.state!=="running"){clearInterval(patchPollTimer);patchPollTimer=null;load();}
+    }catch{}
+  },1500);
+}
+function ensureAgSyncPanel(){
+  const host=$("agcmd");
+  if(!host||$("ag-sync-controls"))return;
+  host.innerHTML=`<div id="ag-sync-controls" class="sync-box">
+    <div class="sync-opts">
+      <label><input type="checkbox" id="ag-sync-levels" checked> Sous-menus Low / Medium / High (Hydrogen, Neon, Argon)</label>
+      <label><input type="checkbox" id="ag-sync-dedup" checked> Supprimer les doublons (corrige sous-menu Argon)</label>
+      <label><input type="checkbox" id="ag-sync-keep-legacy" checked> Conserver les anciens modèles (alias)</label>
+      <label><input type="checkbox" id="ag-sync-rename"> Renommer les libellés existants</label>
+    </div>
+    <div class="sync-acts">
+      <button id="ag-sync-preview">Prévisualiser la sync</button>
+      <button id="ag-sync-apply">Importer / Mettre à jour dans Antigravity</button>
+    </div>
+    <div id="ag-sync-result"></div>
+    <p class="note">Ou en ligne de commande dans <code>SUIVI_PROJET/5_Outils_et_diagnostics</code> (Antigravity fermé) :</p>
+    <code class="cmd">python3 synchroniser_modeles_gmini.py --levels --dedup --apply</code>
+  </div>`;
+  const syncPayload=mode=>JSON.stringify({
+    mode,
+    with_levels:$("ag-sync-levels").checked,
+    deduplicate:$("ag-sync-dedup").checked,
+    keep_legacy:$("ag-sync-keep-legacy").checked,
+    rename_existing:$("ag-sync-rename").checked,
+    migrate_aliases:false
+  });
+  const renderSyncRes=j=>{
+    const fmtList=(lbl,arr)=>arr&&arr.length?`<div><b>${lbl} (${arr.length}) :</b> ${arr.map(x=>`<code>${esc(x.model)}</code> (${esc(x.display_name)})`).join(", ")}</div>`:"";
+    $("ag-sync-result").innerHTML=`<div class="note" style="margin-top:8px"><div><b>${j.mode==="apply"?"Synchronisation appliquée":"Simulation"} :</b> ${esc(j.summary||"")}</div>${j.backup_path?`<div class="sub">Sauvegarde 0600 : <code>${esc(j.backup_path)}</code></div>`:""}${fmtList("Ajoutés",j.added)}${fmtList("Renommés",j.renamed)}${fmtList("Migrés",j.migrated)}${fmtList("Retirés",j.removed)}</div>`;
+  };
+  $("ag-sync-preview").onclick=async()=>{
+    $("ag-sync-preview").disabled=true;
+    try{
+      const r=await fetch("/_ui/api/antigravity/sync-models",{method:"POST",headers:{"X-GMINI-UI":TOKEN,"Content-Type":"application/json"},body:syncPayload("dry_run")});
+      const j=await r.json();
+      if(!r.ok)$("ag-sync-result").innerHTML=`<div class="note">${badge("bad",errMsg(j,r.status))}</div>`;
+      else renderSyncRes(j);
+    }catch(e){$("ag-sync-result").innerHTML=`<div class="note">${badge("bad",e.message)}</div>`;}
+    finally{$("ag-sync-preview").disabled=false;}
+  };
+  $("ag-sync-apply").onclick=async()=>{
+    if(!confirm("Mettre à jour custom_models.json (sauvegarde 0600 créée au préalable ; Antigravity doit être fermé) ?"))return;
+    $("ag-sync-apply").disabled=true;
+    try{
+      const r=await fetch("/_ui/api/antigravity/sync-models",{method:"POST",headers:{"X-GMINI-UI":TOKEN,"Content-Type":"application/json"},body:syncPayload("apply")});
+      const j=await r.json();
+      if(!r.ok)$("ag-sync-result").innerHTML=`<div class="note">${badge("bad",errMsg(j,r.status))}</div>`;
+      else{renderSyncRes(j);load();}
+    }catch(e){$("ag-sync-result").innerHTML=`<div class="note">${badge("bad",e.message)}</div>`;}
+    finally{$("ag-sync-apply").disabled=false;}
+  };
 }
 let refreshNextMs=0;
 let arRunMsg="";
@@ -347,11 +1150,11 @@ $("refresh").onclick=async()=>{
   try{const r=await fetch("/_ui/api/models/refresh",{method:"POST",headers:{"X-GMINI-UI":TOKEN}});const j=await r.json();
     if(j.cooldown_sec>0)refreshNextMs=Date.now()+j.cooldown_sec*1000;
     if(j.refreshed){$("refreshmsg").textContent=`Catalogue actualisé : ${j.models_count} modèles.`;}
-    else{const msg="Non actualisé : "+why(j.error||String(r.status));$("refreshmsg").dataset.err=msg;$("refreshmsg").textContent=msg;}
+    else{const msg="Non actualisé : "+why(String(errMsg(j,r.status)));$("refreshmsg").dataset.err=msg;$("refreshmsg").textContent=msg;}
   }catch(e){$("refreshmsg").textContent="Échec : "+e.message}
   syncRefresh();load();
 };
-load();pollTimer=setInterval(()=>{if(!document.hidden)load()},5000);setInterval(()=>{if(!document.hidden&&refreshNextMs>0)syncRefresh()},1000);
+initShell();load();pollTimer=setInterval(()=>{if(!document.hidden)load()},5000);setInterval(()=>{if(!document.hidden&&refreshNextMs>0)syncRefresh()},1000);
 </script>
 </body>
 </html>

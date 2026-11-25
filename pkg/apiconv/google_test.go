@@ -160,3 +160,34 @@ func TestGoogleStreamError(t *testing.T) {
 		t.Errorf("usage metadata missing or empty: %+v", resp.UsageMetadata)
 	}
 }
+
+func TestGoogleToolPromptReminderT2EndAndCounterExample(t *testing.T) {
+	defer SetToolPromptRules(true)
+	defer SetToolPromptReminder(true)
+	defer SetNoInternalCodeExecRule(true)
+	SetToolPromptRules(true)
+	SetToolPromptReminder(true)
+	SetNoInternalCodeExecRule(true)
+
+	req := &GenerateContentRequest{
+		Tools: []GoogleTool{{FunctionDeclarations: []GoogleFunctionDecl{{
+			Name:        "run_command",
+			Description: "Run shell command",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"CommandLine":{"type":"string"}},"required":["CommandLine"]}`),
+		}}}},
+		Contents: []GoogleContent{
+			{Role: "user", Parts: []GooglePart{{Text: "ctx\n<USER_REQUEST>\nrun tests\n</USER_REQUEST>"}}},
+			{Role: "model", Parts: []GooglePart{{FunctionCall: &googleFunctionCall{Name: "run_command", Args: json.RawMessage(`{"CommandLine":"pwd"}`)}}}},
+			{Role: "user", Parts: []GooglePart{{FunctionResponse: &googleFunctionResponse{Name: "run_command", Response: json.RawMessage(`{"stdout":"/tmp"}`)}}}},
+		},
+	}
+	got := googleContentsToPrompt(req)
+	idxToolRes := strings.LastIndex(got, "[Tool result for run_command]:")
+	idxRem := strings.Index(got, "NEVER trigger Gemini internal artifacts")
+	if idxToolRes < 0 || idxRem <= idxToolRes {
+		t.Fatalf("expected reminder after [Tool result for run_command]:, idxToolRes=%d idxRem=%d\n%s", idxToolRes, idxRem, got)
+	}
+	if !strings.HasSuffix(got, "```function_call\n{\"name\": \"run_command\", \"args\": {...}}\n```") {
+		t.Fatalf("expected Google prompt to end with function_call format example, tail=%q", got[max(0, len(got)-160):])
+	}
+}

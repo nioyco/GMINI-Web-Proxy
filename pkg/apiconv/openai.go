@@ -274,39 +274,68 @@ func SetNoInternalCodeExecRule(on bool) { noInternalCodeExecRule.Store(on) }
 func NoInternalCodeExecRule() bool { return noInternalCodeExecRule.Load() }
 
 const shortToolPromptReminder = "Reminder: use ONLY the provided tools above.\n" +
-	"NEVER trigger Gemini internal artifacts, Canvas, widgets, web search, or Google extensions.\n" +
+	"Local tools are active via proxy: access local files/paths ONLY via ```tool_call``` (or `function_call` in Google format).\n" +
+	"There is NO tool call limit or quota per turn: call the declared tools directly whenever needed.\n" +
+	"NEVER trigger Gemini internal artifacts, widgets, web search, or any built-in assistant feature, internal tool, or external connector, and never prefix tool names with any namespace.\n" +
 	"Reply directly in plain text when no tool is needed."
 
-// insertToolPromptReminder places the short B3 reminder just before the last
-// user request (before <USER_REQUEST> if present, or before the last user part).
-func insertToolPromptReminder(parts []string, lastUserIdx int, cmdToolName string) []string {
+// insertToolPromptReminder places the short B3 reminder at the very end of the
+// prompt when assistant/tool history follows the last user message (T2+), or
+// just before <USER_REQUEST> (or the last user part) on the initial turn (T1).
+func insertToolPromptReminder(parts []string, lastUserIdx int, cmdToolName string, googleFormat bool) []string {
 	if !toolPromptReminder.Load() || !toolPromptRules.Load() {
 		return parts
 	}
 	reminder := shortToolPromptReminder
 	if cmdToolName != "" && noInternalCodeExecRule.Load() {
-		reminder += "\nNEVER use built-in code execution or write a code_reference block; call \"" + cmdToolName + "\" directly."
-	}
-	if lastUserIdx >= 0 && lastUserIdx < len(parts) {
-		if pos := strings.LastIndex(parts[lastUserIdx], "<USER_REQUEST>"); pos >= 0 {
-			u := parts[lastUserIdx]
-			parts[lastUserIdx] = u[:pos] + reminder + "\n" + u[pos:]
-			return parts
+		fence, argsKey := "tool_call", "arguments"
+		if googleFormat {
+			fence, argsKey = "function_call", "args"
 		}
-		out := make([]string, 0, len(parts)+1)
-		out = append(out, parts[:lastUserIdx]...)
-		out = append(out, reminder)
-		out = append(out, parts[lastUserIdx:]...)
-		return out
+		reminder += "\nNEVER use built-in code execution or write a code_reference block; call \"" + cmdToolName + "\" directly.\n" +
+			"Do NOT output ```bash?code_reference or any shell markdown code block. To run ANY command, you MUST output:\n" +
+			"```" + fence + "\n{\"name\": \"" + cmdToolName + "\", \"" + argsKey + "\": {...}}\n```"
 	}
-	return append(parts, reminder)
+	if lastUserIdx < 0 || lastUserIdx >= len(parts) {
+		return append(parts, reminder)
+	}
+	// On T2+ turns, [Assistant]: / [Tool result for ...]: parts follow the
+	// initial user message (or in Google format the last user part itself is a
+	// [Tool result for ...] block, or a trailing user wakeup like
+	// <SYSTEM_MESSAGE>...</SYSTEM_MESSAGE> follows prior turns without
+	// <USER_REQUEST>). Place the reminder at the very end so it stays in the
+	// model's recency window.
+	hasPriorHistory := false
+	for _, part := range parts {
+		if strings.HasPrefix(part, "[Assistant]:") ||
+			strings.HasPrefix(part, "[Tool result for ") ||
+			strings.Contains(part, "\n[Tool result for ") {
+			hasPriorHistory = true
+			break
+		}
+	}
+	if lastUserIdx < len(parts)-1 ||
+		strings.Contains(parts[lastUserIdx], "[Tool result for ") ||
+		(hasPriorHistory && !strings.Contains(parts[lastUserIdx], "<USER_REQUEST>")) {
+		return append(parts, reminder)
+	}
+	if pos := strings.LastIndex(parts[lastUserIdx], "<USER_REQUEST>"); pos >= 0 {
+		u := parts[lastUserIdx]
+		parts[lastUserIdx] = u[:pos] + reminder + "\n" + u[pos:]
+		return parts
+	}
+	out := make([]string, 0, len(parts)+1)
+	out = append(out, parts[:lastUserIdx]...)
+	out = append(out, reminder)
+	out = append(out, parts[lastUserIdx:]...)
+	return out
 }
 
 // toolSpecificRules formats environment instructions for specific active tools (K8, K17 S2).
 func toolSpecificRules(hasWriteFile, hasSearchWeb bool, cmdToolName string) string {
 	var extra []string
 	if hasWriteFile {
-		extra = append(extra, "- The word \"artifact\" in instructions refers to a local file to write with the provided \"write_file\" tool, never Gemini's built-in artifact, Canvas or skills features.")
+		extra = append(extra, "- The word \"artifact\" in instructions refers to a local file to write with the provided \"write_file\" tool, never Gemini's built-in artifact or skills features.")
 	}
 	if hasSearchWeb {
 		extra = append(extra, "- Web searches must be performed only using the provided \"search_web\" tool, never built-in web search.")
@@ -393,7 +422,8 @@ const noEchoRules = "Rules about the conversation history:\n" +
 	"- NEVER repeat or replay earlier tool results or earlier assistant messages, and NEVER write, invent or simulate a tool result: tool results are supplied only by the system after your tool call is executed.\n" +
 	"- Answer only the latest request, using earlier results as context.\n" +
 	"Rules about the environment:\n" +
-	"- Files, folders and projects named by the user are on the user's local machine: reach them only with the tools above. You have NO Google Workspace, Gmail, Drive, Canvas, widget or other Google extension here: never use or mention them.\n" +
+	"- Files, folders and projects named by the user are on the user's local machine: reach them ONLY with the tools above.\n" +
+	"- NEVER invoke, call, or delegate to any built-in assistant feature, web lookup, internal tool, widget, or external connector — not even on the first turn — and never prefix tool names with any namespace: use ONLY the declared local tools above.\n" +
 	"- The tools above are not built-in model features: invoke them by outputting the tool call block in your reply. The user's system executes it and returns the result. There is NO tool call limit or quota per turn or per cycle. NEVER reply that tools are not declared, unavailable, or at a tool/action limit or quota, NEVER say you lack local file/command access, and NEVER simulate or invent a report without calling the tools first: invoke the tool instead.\n" +
 	"- Answer in plain text or with tool_call blocks only.\n" +
 	"- When several tool calls are independent (for example reading several files), output them together in the same answer, one tool_call block each: every answer is costly."
@@ -440,6 +470,9 @@ func messagesToPrompt(messages []Message, tools []Tool, tc toolChoiceMode) strin
 				}
 				parts = append(parts, "[Assistant]: "+content+"\n"+strings.Join(tcStrs, "\n"))
 			} else {
+				if len(tools) > 0 && tc.mode != "none" {
+					content = SanitizeAssistantHistory(content)
+				}
 				parts = append(parts, "[Assistant]: "+content)
 			}
 		case "tool":
@@ -456,7 +489,7 @@ func messagesToPrompt(messages []Message, tools []Tool, tc toolChoiceMode) strin
 	}
 
 	if len(tools) > 0 && tc.mode != "none" {
-		parts = insertToolPromptReminder(parts, lastUserIdx, commandToolNameFromDefs(normalizeTools(tools)))
+		parts = insertToolPromptReminder(parts, lastUserIdx, commandToolNameFromDefs(normalizeTools(tools)), false)
 	}
 
 	return joinNonEmpty(parts, "\n\n")
