@@ -4,6 +4,17 @@ Ce fichier recense les versions publiées et consolidations du proxy **GMINI-Web
 
 ---
 
+## Non publié → K56–K61 (`UI 3.0.11`, 2026-11-25 → 2026-11-27)
+
+- **K61** : distinction entre l'avertissement de quota (~90 %, non bloquant) et la pause quota (100 %, HTTP 429).
+- **K60** : interception des arrêts prématurés (« Continue », « feu vert ») ; 2e relance `2→1` sur `canned_error` ; rejets `unknown_model` visibles ; catalogue rechargé après actualisation du cookie s'il est dégradé.
+- **K59** : résilience `4 Neon` (budgets de relance, paliers `75/75/120 s`, détection de blocage plus rapide) ; modèles et vues mis à jour en direct (polling `2 s` pendant une demande).
+- **K58** : détection de fin de quota via `body[54]` et pause automatique multi-modèles.
+- **K57** : relance automatique avec step-down `4→2→1` sur `no_content_timeout`.
+- **K56** : conservation d'au moins 200 demandes et diagnostics ; persistance des diagnostics corrigée avec `-cookie-file`.
+
+---
+
 ## v1.2.0 — Consolidation K25 → K55 (`UI 3.0.9`, build `go-gemini-web2api-p9-0581e87-k55`, 2026-11-25)
 
 ### Web UI `v3.0.9` & Observabilité (K54–K55, K50, K48–K49, K37–K41)

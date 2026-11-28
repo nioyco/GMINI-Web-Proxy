@@ -1,5 +1,6 @@
 # Build output
 /go-gemini-web2api
+/gmini-web-proxy
 *.exe
 
 # Local config
