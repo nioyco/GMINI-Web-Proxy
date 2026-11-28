@@ -166,7 +166,7 @@ func TestK37_StatusFields(t *testing.T) {
 		t.Fatalf("decode /_status: %v (body=%s)", err, body)
 	}
 	if st.Version != version {
-		t.Errorf("version = %q, want %q (const version = \"1.2.0\")", st.Version, version)
+		t.Errorf("version = %q, want %q (const version = \"1.3.0\")", st.Version, version)
 	}
 	if st.UIVersion != uiVersion {
 		t.Errorf("ui_version = %q, want %q (const uiVersion = \"2.2.0\")", st.UIVersion, uiVersion)

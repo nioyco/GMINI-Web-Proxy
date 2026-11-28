@@ -13,7 +13,7 @@ import (
 	"github.com/nioyco/GMINI-Web-Proxy/pkg/gemini"
 )
 
-const version = "1.2.0"
+const version = "1.3.0"
 
 // defaultListen is the default bind address (localhost only) used when GEMINI_LISTEN
 // is unset.

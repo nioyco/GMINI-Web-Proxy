@@ -6,7 +6,7 @@
 
 > **Non fourni dans ce dépôt** : le script d'actualisation du cookie (`GEMINI_COOKIE_REFRESH_CMD`, requis par le bouton « Lancer la connexion Google » et l'auto-actualisation), la Console TUI, et le relais Antigravity > 300 s (patchs d'un projet séparé, pas encore publiés). Sans script, importez le cookie à la main.
 
-![Version](https://img.shields.io/badge/version-v1.2.0-blue)
+![Version](https://img.shields.io/badge/version-v1.3.0-blue)
 ![UI](https://img.shields.io/badge/Web%20UI-v3.0.11-0ea5e9)
 ![Build](https://img.shields.io/badge/Build-K61-1a7f4b)
 ![Modèles](https://img.shields.io/badge/Gemini%20Web-4%20Neon%20%7C%204%20Hydrogen-8b5cf6)
@@ -113,7 +113,7 @@ Le projet est activement durci autour d'un usage quotidien intensif avec des cli
 
 | Version | Jalons | Compatibilité Antigravity | Ce qui est livré et vérifié |
 |---|---|---|---|
-| **`v1.2.0`** *(actuelle · `UI 3.0.11` · Build `K61`)* | **Lots K20 – K61** (base `0581e87`) | **Jusqu'à `v2.44+`** *(vérifié en production > 500 s)* | Web UI `v3.0.11` (vues unifiées `#demandes-unified` dédoublonnée par `request_id` avec déroulé `récupérée / échec` par tentative, `#diag-unified` avec colonne `Requête` + `Récupéré` sur toutes les lignes, export sticky), persistance `CallRecord.BinaryTag`, récupérations post-`internal_tool_retry` (`canned_error`, `empty_reply`, `tool_refusal`), pause quota automatique, base outils `gemini_tools_db.jsonl`, garde-fous `.env` live (`#nc-toggle`, `#cer-toggle`), sync auto `4 Argon`, `code_ref_fastpath`, audit outils K19/K20. |
+| **`v1.3.0`** *(actuelle · `UI 3.0.11` · Build `K61`)* | **Lots K20 – K61** (base `0581e87`) | **Jusqu'à `v2.44+`** *(vérifié en production > 500 s)* | Web UI `v3.0.11` (vues unifiées `#demandes-unified` dédoublonnée par `request_id` avec déroulé `récupérée / échec` par tentative, `#diag-unified` avec colonne `Requête` + `Récupéré` sur toutes les lignes, export sticky), persistance `CallRecord.BinaryTag`, récupérations post-`internal_tool_retry` (`canned_error`, `empty_reply`, `tool_refusal`), pause quota automatique, base outils `gemini_tools_db.jsonl`, garde-fous `.env` live (`#nc-toggle`, `#cer-toggle`), sync auto `4 Argon`, `code_ref_fastpath`, audit outils K19/K20. |
 | **`v1.1.0`** | **Lots K14 – K19** | `v2.31.0` – `v2.32.1` | Sobriété anti-robot K14 (`IdleQuiet=10 min`, backoff `/sorry` `5 → 60 min`, persistance `.state.json`), détection `inner[31]=true` (K15) et réponse vide (K16), `code_ref_fastpath` (K18 T1), auto-refresh cookie `on_demand` (K18 T3/T4), hot-reload `.env` (K18 T5), anti-simulation dans les pensées (K19). |
 | **`v1.0.0`** | **Lots P6 – K13** | `v2.30.0` – `v2.31.2` | Écoute locale `127.0.0.1`, clé API obligatoire, arrêt propre `SIGINT`/`SIGTERM`, anti-SSRF, tableau de bord `/_ui`, identité réelle `inner[39]`/`inner[42]`, keepalives SSE `15 s`, `early_stop` (`256 Ko`/`120 s`). |
 | **`v0.1.0`** | Base initiale | Clients génériques | Passerelle Go zéro-dépendance issue de `n0madic/go-gemini-web2api`. |
@@ -135,7 +135,7 @@ Le projet est activement durci autour d'un usage quotidien intensif avec des cli
 Client (Antigravity ≤ v2.44+, Claude Code, OpenAI SDK, Gemini CLI…)
    │  HTTP local (ex. POST http://127.0.0.1:8081/v1/chat/completions, SSE)
    ▼
-GMINI-Web-Proxy v1.2.0 / UI 3.0.11 (127.0.0.1:8081 uniquement par défaut)
+GMINI-Web-Proxy v1.3.0 / UI 3.0.11 (127.0.0.1:8081 uniquement par défaut)
    ├─ 1. Authentifie la clé API locale (GEMINI_API_KEYS) & lit les réglages (.env)
    ├─ 2. Si auto-refresh actif et jeton > 90 min : lance la commande cookie en on_demand (~7 s)
    ├─ 3. Traduit les messages, images & outils → payload web StreamGenerate
@@ -259,7 +259,7 @@ Ordre de priorité des paramètres :
 
 ## 5. Configuration complète (`.env` et variables d'environnement)
 
-Toutes les valeurs ci-dessous correspondent aux **vraies valeurs par défaut** compilées dans `config.go` (`v1.2.0`). Voir aussi [`.env.example`](.env.example).
+Toutes les valeurs ci-dessous correspondent aux **vraies valeurs par défaut** compilées dans `config.go` (`v1.3.0`). Voir aussi [`.env.example`](.env.example).
 
 ### Réseau & sécurité
 
