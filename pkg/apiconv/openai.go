@@ -276,6 +276,7 @@ func NoInternalCodeExecRule() bool { return noInternalCodeExecRule.Load() }
 const shortToolPromptReminder = "Reminder: use ONLY the provided tools above.\n" +
 	"Local tools are active via proxy: access local files/paths ONLY via ```tool_call``` (or `function_call` in Google format).\n" +
 	"There is NO tool call limit or quota per turn: call the declared tools directly whenever needed.\n" +
+	"Never stop mid-task to ask the user to reply \"Continue\" or give a green light; keep emitting tool_call blocks until all requested edits and checks are finished.\n" +
 	"NEVER trigger Gemini internal artifacts, widgets, web search, or any built-in assistant feature, internal tool, or external connector, and never prefix tool names with any namespace.\n" +
 	"Reply directly in plain text when no tool is needed."
 

@@ -69,10 +69,10 @@ func TestK44_DefaultMaxStallRetries3AndLargePromptThresholds(t *testing.T) {
 		t.Errorf("small prompt durations = (%s, %s), want (60s, 25s)", sSmall, fSmall)
 	}
 
-	// Large prompt (>= 250 KiB) raises to 90s / 40s
+	// Large prompt (>= 250 KiB) uses K59 floors 60s / 30s
 	sLarge, fLarge := srv.effectiveHeldStallDurations(260 * 1024)
-	if sLarge != 90*time.Second || fLarge != 40*time.Second {
-		t.Errorf("large prompt durations = (%s, %s), want (90s, 40s)", sLarge, fLarge)
+	if sLarge != 60*time.Second || fLarge != 30*time.Second {
+		t.Errorf("large prompt durations = (%s, %s), want (60s, 30s)", sLarge, fLarge)
 	}
 
 	// Attempt 3/3 in prepareStallRetry keeps level=1

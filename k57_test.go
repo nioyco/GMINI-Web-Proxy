@@ -194,8 +194,8 @@ func TestK57_4NeonTripleNoContentTimeoutExhaustsRetriesTerminally(t *testing.T) 
 }
 
 func TestK57_FirstAttemptNoContentCapAndZeroSetting(t *testing.T) {
-	if got := (&Server{}).firstAttemptNoContentCap(); got != 90*time.Second {
-		t.Fatalf("firstAttemptNoContentCap() = %v, want 90s", got)
+	if got := (&Server{}).firstAttemptNoContentCap(); got != firstAttemptNoContentTimeout {
+		t.Fatalf("firstAttemptNoContentCap() = %v, want %v", got, firstAttemptNoContentTimeout)
 	}
 
 	srv := newK57NeonServer(t, 0, func(ctx context.Context, p gemini.GenParams, h gemini.StreamHandlers) error {

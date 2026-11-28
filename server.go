@@ -56,6 +56,7 @@ type Server struct {
 	noContentTimeoutOverride       time.Duration
 	firstAttemptNoContentOverride  time.Duration
 	nonFinalStallNoContentOverride time.Duration
+	finalNoContentRetryOverride    time.Duration
 	noContentNoteOverride          time.Duration
 	initialWaitNoteOverride        time.Duration
 	initialSilenceTimeoutOverride  time.Duration
@@ -228,6 +229,17 @@ func newServer(cfg *Config, client *gemini.Client, logger *slog.Logger) *Server 
 	if srv.autoRefresh != nil {
 		srv.autoRefresh.onSuccess = func() {
 			srv.resumeStaleTokenQuotaPause(context.Background(), "cookie_refresh_stale_token")
+			if len(client.ListModels()) <= 1 {
+				go func() {
+					rctx, rcancel := context.WithTimeout(context.Background(), 15*time.Second)
+					defer rcancel()
+					if err := client.RefreshModels(rctx); err != nil {
+						logger.Warn("catalog auto-recovery after cookie refresh failed", "err", err)
+					} else {
+						logger.Info("catalog auto-recovered after cookie refresh", "models", len(client.ListModels()))
+					}
+				}()
+			}
 		}
 	}
 	if cfg.UIEnabled {
@@ -395,6 +407,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	modelName, effort := apiconv.SplitModelEffort(req.Model)
 	m, err := s.client.ResolveModel(modelName)
 	if err != nil {
+		s.recordUnknownModel(r.Context(), modelName, err)
 		sendError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -857,7 +870,9 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 			return
 		}
 	}
+	allNoContent := res.noContentTimedOut
 	for attempt := 1; (res.earlyStopReason == "stall" || res.noContentTimedOut) && res.transmittedBytes == 0 && attempt <= maxRetries; attempt++ {
+		allNoContent = allNoContent && res.noContentTimedOut
 		nextParams, ok := s.prepareStallRetry(ctx, sse, cid, created, model, true, curParams, res, attempt, maxRetries)
 		if !ok {
 			return
@@ -869,7 +884,11 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 			s.recordDiagIncident(ctx, "stall", "retry", "aucun premier texte (stall)", true)
 		}
 		curParams = nextParams
-		res, gate, echo, ok = runAttempt(curParams, true, attempt < maxRetries, 0, s.stallRetryNoContentCap(attempt, maxRetries))
+		noContentCap := s.stallRetryNoContentCap(attempt, maxRetries)
+		if attempt == maxRetries && allNoContent {
+			noContentCap = s.finalNoContentCap()
+		}
+		res, gate, echo, ok = runAttempt(curParams, true, attempt < maxRetries, 0, noContentCap)
 		if !ok {
 			return
 		}
@@ -1040,7 +1059,7 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 				}
 				stallParams := retryParams
 				stepdown := ""
-				if stallParams.Mode == 1 && stallParams.Level >= 2 {
+				if stallParams.Level >= 2 {
 					stepdown = fmt.Sprintf("%d->1", stallParams.Level)
 					stallParams.Level = 1
 				}
@@ -1077,7 +1096,7 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 				}
 			}
 			// G2: Ultimate retry with level->1 stepdown if internal_tool_retry returns a short upstream glitch.
-			if rres.earlyStopReason == "" && !rres.released && apiconv.IsUpstreamGlitch(rres.rawText) && retryParams.Mode == 1 && retryParams.Level >= 2 {
+			if rres.earlyStopReason == "" && !rres.released && apiconv.IsUpstreamGlitch(rres.rawText) && retryParams.Level >= 2 {
 				if !s.waitRetryBackoff(ctx) {
 					return
 				}
@@ -1099,7 +1118,7 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 				}
 			}
 			// K54: 1 retry with 2->1 stepdown if internal_tool_retry returns a canned error.
-			if rres.earlyStopReason == "" && !rres.released && apiconv.IsUpstreamCannedErrorWithMarker(rres.rawText, rres.errorMarker) && retryParams.Mode == 1 && retryParams.Level >= 2 {
+			if rres.earlyStopReason == "" && !rres.released && apiconv.IsUpstreamCannedErrorWithMarker(rres.rawText, rres.errorMarker) && retryParams.Level >= 2 {
 				if !s.waitRetryBackoff(ctx) {
 					return
 				}
@@ -1364,6 +1383,37 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, rres.earlyStopMsg, nil)), sse.done())
 					return
 				}
+				if !rres.cannedRetryTimedOut && !rres.noContentTimedOut && rres.earlyStopReason == "" && !rres.released &&
+					apiconv.IsUpstreamCannedErrorWithMarker(rres.rawText, rres.errorMarker) && cannedParams.Level >= 2 {
+					if !s.waitRetryBackoff(ctx) {
+						return
+					}
+					stepdown := fmt.Sprintf("%d->1", cannedParams.Level)
+					cannedParams.Level = 1
+					retryTimeout = s.cannedErrorRetryTimeoutFor(len(cannedParams.Prompt))
+					s.stats.cannedErrorRetries.Add(1)
+					s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(rres.rawText), "action", "retry_2to1", "level_stepdown", stepdown, "timeout_sec", int(retryTimeout.Seconds()), "temp_chat", cannedParams.TemporaryChat)
+					s.recordDiagIncident(ctx, "canned_error", "retry_2to1", "erreur interne persistante ; nouvelle tentative niveau 1", true)
+					if s.cfg.StreamThoughts {
+						if err := sse.data(apiconv.ChatChunkReasoning(cid, created, model, proxyWaitNote(s.currentNow(), "Gemini a renvoyé une seconde erreur interne : ultime tentative (niveau 1)…"))); err != nil {
+							s.rlog(ctx).Warn("sse write failed", "err", err)
+							return
+						}
+					}
+					rres, gate2, echo2, ok = runAttempt(cannedParams, true, false, retryTimeout, 0)
+					if !ok {
+						return
+					}
+					rres, gate2, echo2, cannedParams, ok = resolveInternalToolRetry(rres, gate2, echo2, cannedParams)
+					if !ok {
+						return
+					}
+					if rres.earlyStopMsg != "" {
+						s.markEarlyStopTerminalError(ctx, rres)
+						s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, appendResumeHint(ctx, rres.earlyStopMsg), nil)), sse.done())
+						return
+					}
+				}
 				if rres.cannedRetryTimedOut || rres.noContentTimedOut || (rres.earlyStopReason == "" && (rres.genErr != nil || rres.rawText == "" || (!rres.released && apiconv.IsUpstreamCannedErrorWithMarker(rres.rawText, rres.errorMarker)))) {
 					s.recordModelFailure(model)
 					s.rlog(ctx).Warn("upstream_canned_error", "bytes", len(rres.rawText), "timed_out", rres.cannedRetryTimedOut || rres.noContentTimedOut, "action", "reported")
@@ -1373,7 +1423,7 @@ func (s *Server) streamChatToolsProgress(ctx context.Context, w http.ResponseWri
 					} else {
 						s.markTerminalError(ctx, "Erreur interne", "canned_error")
 					}
-					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, cannedErrorMessage(model, cannedParams), nil)), sse.done())
+					s.sseTail(ctx, sse, sse.data(apiconv.ChatChunkComplete(cid, model, appendResumeHint(ctx, cannedErrorMessage(model, cannedParams)), nil)), sse.done())
 					return
 				}
 				if rres.earlyStopReason == "" && !rres.released {
@@ -1852,6 +1902,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		internalTool string
 		body24Tools  []string
 		limitBanner  string
+		quotaWarning string
 		servedID     string
 		servedName   string
 		errorMarker  bool
@@ -1877,6 +1928,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 		InternalTool: func(name string) { push(event{internalTool: name}) },
 		Body24Tools:  func(names []string) { push(event{body24Tools: names}) },
 		LimitBanner:  func(msg string) { push(event{limitBanner: msg}) },
+		QuotaWarning: func(msg string) { push(event{quotaWarning: msg}) },
 		Identity: func(servedID, servedName string) {
 			push(event{servedID: servedID, servedName: servedName})
 		},
@@ -1926,6 +1978,7 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 	completeToolCalls, lastCompleteEnd := 0, 0
 	lastHeldNoteBytes := 0
 	internalToolNotified := false
+	quotaWarned := false
 	codeRefHandled := false
 	var codeRefDetectedAt time.Time
 	codeRefWaitNoted := false
@@ -2177,6 +2230,21 @@ func (s *Server) runStreamTools(ctx context.Context, sse *sseStream, p gemini.Ge
 				s.stats.limitBannerDetected.Add(1)
 			}
 			return quotaTrip("", "", "limit_banner", e.limitBanner)
+		}
+		if e.quotaWarning != "" {
+			if ri != nil {
+				ri.setStatusNote("⚠ " + e.quotaWarning)
+			}
+			if !quotaWarned {
+				quotaWarned = true
+				modelName := statModelName
+				if p.Model != nil && p.Model.Name != "" {
+					modelName = p.Model.Name
+				}
+				s.rlog(ctx).Warn("quota_warning_detected", "model", modelName, "warning", e.quotaWarning)
+				s.recordDiagIncident(ctx, "quota_warning", "warning_90pct", e.quotaWarning, true)
+			}
+			return true
 		}
 		if apiconv.IsInternalToolSignal(e.thought) || apiconv.IsInternalToolSignal(e.text) {
 			if !onInternalTool("artifact/skills") {
@@ -2773,7 +2841,7 @@ func glitchRetryParams(p gemini.GenParams) gemini.GenParams {
 	return p
 }
 
-const toolRefusalRetryNote = "\n\n[Retry instruction: The listed tools are NOT built-in model features. You invoke them by outputting a ```tool_call block in your reply; the user's system executes it locally and returns the result. There is NO tool call limit or quota per turn or per cycle. NEVER reply that tools are not declared, unavailable, or at a tool/action limit or quota, and NEVER simulate or invent a report without calling the tools first: output a ```tool_call block now or reply in plain text.]"
+const toolRefusalRetryNote = "\n\n[Retry instruction: The listed tools are NOT built-in model features. You invoke them by outputting a ```tool_call block in your reply; the user's system executes it locally and returns the result. There is NO tool call limit or quota per turn or per cycle. NEVER reply that tools are not declared, unavailable, or at a tool/action limit or quota, NEVER ask the user to reply \"Continue\" or give a green light mid-task, and NEVER simulate or invent a report without calling the tools first: output the next ```tool_call block immediately or reply in plain text.]"
 
 func toolRefusalRetryParams(p gemini.GenParams) gemini.GenParams {
 	if p.Mode == 1 && p.Level == 1 {
@@ -2992,8 +3060,12 @@ func (s *Server) cannedErrorRetryExceeded(elapsed time.Duration, promptBytes, he
 		return elapsed >= s.cannedRetryTimeoutOverride
 	}
 	budget := s.cannedErrorRetryTimeout()
-	if promptBytes >= cannedErrorLargePromptBytes && heartbeats > 0 && cannedErrorLargePromptTimeout > budget {
-		budget = cannedErrorLargePromptTimeout
+	if promptBytes >= cannedErrorLargePromptBytes && cannedErrorLargePromptTimeout > budget {
+		if heartbeats > 0 {
+			budget = cannedErrorLargePromptTimeout
+		} else if 70*time.Second > budget {
+			budget = 70 * time.Second
+		}
 	}
 	return elapsed >= budget
 }
@@ -3253,11 +3325,11 @@ func (s *Server) effectiveHeldStallDurations(promptBytes int) (stall, fast time.
 	stall = s.heldStallDuration()
 	fast = s.heldStallFastDuration()
 	if promptBytes >= largePromptStallThresholdBytes {
-		if s.heldStallOverride <= 0 && stall > 0 && stall < 90*time.Second {
-			stall = 90 * time.Second
+		if s.heldStallOverride <= 0 && stall > 0 && stall < 60*time.Second {
+			stall = 60 * time.Second
 		}
-		if s.heldStallFastOverride <= 0 && fast > 0 && fast < 40*time.Second {
-			fast = 40 * time.Second
+		if s.heldStallFastOverride <= 0 && fast > 0 && fast < 30*time.Second {
+			fast = 30 * time.Second
 		}
 	}
 	return stall, fast
@@ -3314,8 +3386,9 @@ func prepareRecoveryParams(p gemini.GenParams) (gemini.GenParams, bool) {
 }
 
 const (
-	firstAttemptNoContentTimeout       = 90 * time.Second
-	nonFinalStallRetryNoContentTimeout = 80 * time.Second
+	firstAttemptNoContentTimeout       = 75 * time.Second
+	nonFinalStallRetryNoContentTimeout = 75 * time.Second
+	finalNoContentRetryCap             = 120 * time.Second
 )
 
 func (s *Server) firstAttemptNoContentCap() time.Duration {
@@ -3323,6 +3396,13 @@ func (s *Server) firstAttemptNoContentCap() time.Duration {
 		return s.firstAttemptNoContentOverride
 	}
 	return firstAttemptNoContentTimeout
+}
+
+func (s *Server) finalNoContentCap() time.Duration {
+	if s.finalNoContentRetryOverride > 0 {
+		return s.finalNoContentRetryOverride
+	}
+	return finalNoContentRetryCap
 }
 
 func (s *Server) nonFinalStallNoContentCap() time.Duration {
@@ -3359,6 +3439,13 @@ func appendResumeHint(ctx context.Context, msg string) string {
 		return msg
 	}
 	return msg + fmt.Sprintf("\n\n_Contexte de reprise GMINI : %d appel(s) d'outil déjà exécuté(s) dans cette conversation ; envoyez « Continue » pour reprendre à l'étape suivante sans repartir de zéro._", priorCalls)
+}
+
+func (s *Server) recordUnknownModel(ctx context.Context, modelName string, err error) {
+	setReqModel(ctx, modelName)
+	s.markTerminalError(ctx, "Modèle inconnu (HTTP 400)", "unknown_model")
+	s.setErrorContext(ctx, "proxy/catalog", "ResolveModel", "unknown_model", err.Error()+" — actualisez le catalogue dans Modèles")
+	s.recordDiagIncident(ctx, "unknown_model", "http_400", err.Error(), false)
 }
 
 func (s *Server) markTerminalError(ctx context.Context, state, reason string) {
@@ -3666,6 +3753,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	m, err := s.client.ResolveModel(req.Model)
 	if err != nil {
+		s.recordUnknownModel(r.Context(), req.Model, err)
 		sendError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -3790,6 +3878,7 @@ func (s *Server) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	m, err := s.client.ResolveModel(name)
 	if err != nil {
+		s.recordUnknownModel(r.Context(), name, err)
 		sendError(w, http.StatusBadRequest, err.Error())
 		return
 	}

@@ -959,7 +959,8 @@ type StreamHandlers struct {
 	Status       func(text string)                 // Google progress status from body[2]["7"] (K11)
 	InternalTool func(name string)                 // internal Google tool detected in body[11]/body[24][0] (B1)
 	Body24Tools  func(names []string)              // all tool names in body[24][0], including local tools (K17 S3)
-	LimitBanner  func(msg string)                  // explicit Google quota/limit banner from body[52] (B1)
+	LimitBanner  func(msg string)                  // explicit Google quota/limit banner from body[52]/body[54] (B1/K58)
+	QuotaWarning func(msg string)                  // non-blocking ~90% quota warning from body[54] (K61)
 	Identity     func(servedID, servedName string) // reported as soon as position 39 is read
 	ErrorMarker  func()                            // reported when inner[31]=true is read
 	Opened       func()                            // upstream HTTP 200 stream opened (N4)
@@ -1167,6 +1168,9 @@ func (c *Client) streamOnce(ctx context.Context, p GenParams, images []uploadedI
 			if ok && fr.limitBanner != "" && h.LimitBanner != nil {
 				h.LimitBanner(fr.limitBanner)
 			}
+			if ok && fr.quotaWarning != "" && h.QuotaWarning != nil {
+				h.QuotaWarning(fr.quotaWarning)
+			}
 			if ok && len(fr.thought) > len(prevThought) {
 				delta := runeDelta(prevThought, fr.thought)
 				prevThought = fr.thought
@@ -1370,7 +1374,8 @@ type frame struct {
 	status       string      // Google progress status from body[2]["7"] (K11)
 	internalTool string      // internal Google tool from body[11] or body[24][0] (B1)
 	body24Tools  []string    // all tool names in body[24][0] (K17 S3)
-	limitBanner  string      // Google limit banner from body[52] (B1)
+	limitBanner  string      // Google limit banner from body[52] or body[54] (B1/K58)
+	quotaWarning string      // non-blocking ~90% quota warning from body[54] (K61)
 	sizes        map[int]int // first candidate: index → string bytes in that subtree
 	thoughts     []int       // sizes of the strings found under the thinking slot, in order
 }
@@ -1547,13 +1552,21 @@ func extractResetUnixSec(v any) int64 {
 
 // parseBody54Limit extracts Google's quota/limit state from inner2[54] (K58).
 // Early warnings with b54[2]==0 and b54[4] non-empty are ignored so normal turns continue.
+// parseBody54Limit returns only the hard 100% quota limit banner from inner2[54].
 func parseBody54Limit(inner2 []any) string {
+	limit, _ := parseBody54Quota(inner2)
+	return limit
+}
+
+// parseBody54Quota distinguishes hard 100% quota exhaustion (limitBanner) from
+// non-blocking ~90% warnings (warningBanner) in inner2[54] (K61).
+func parseBody54Quota(inner2 []any) (limitBanner, warningBanner string) {
 	if len(inner2) <= 54 {
-		return ""
+		return "", ""
 	}
 	b54, ok := inner2[54].([]any)
 	if !ok || len(b54) == 0 {
-		return ""
+		return "", ""
 	}
 	at := func(idx int) any {
 		if idx < len(b54) {
@@ -1567,13 +1580,13 @@ func parseBody54Limit(inner2 []any) string {
 	v4, _ := jsonSlice(at(4))
 	v5, _ := jsonFloat(at(5))
 
-	limitReached := v5 >= 1 ||
+	hardLimit := v5 >= 1 ||
 		v2 >= 2 ||
 		len(v0) > 0 ||
-		containsLimitResets(v3, 0) ||
-		(v2 >= 1 && len(v4) > 0)
-	if !limitReached {
-		return ""
+		containsLimitResets(v3, 0)
+	softWarning := !hardLimit && v2 >= 1 && len(v4) > 0
+	if !hardLimit && !softWarning {
+		return "", ""
 	}
 
 	var resetSec int64
@@ -1600,10 +1613,16 @@ func parseBody54Limit(inner2 []any) string {
 			}
 		}
 	}
-	if resetSec > 0 {
-		return fmt.Sprintf("Limite de quota Google atteinte (réinitialisation à %s)", time.Unix(resetSec, 0).In(time.Local).Format("15:04"))
+	if hardLimit {
+		if resetSec > 0 {
+			return fmt.Sprintf("Limite de quota Google atteinte (réinitialisation à %s)", time.Unix(resetSec, 0).In(time.Local).Format("15:04")), ""
+		}
+		return "Limite de quota Google atteinte", ""
 	}
-	return "Limite de quota Google atteinte"
+	if resetSec > 0 {
+		return "", fmt.Sprintf("Quota Google proche de la limite (~90 %%, réinitialisation à %s)", time.Unix(resetSec, 0).In(time.Local).Format("15:04"))
+	}
+	return "", "Quota Google proche de la limite (~90 %)"
 }
 
 // parseBody2Status extracts Google's internal tool progress text from body[2]["7"]
@@ -1666,14 +1685,15 @@ func parseFrame(line string) (frame, bool) {
 	}
 	body24Tools := parseBody24AllToolNames(inner2)
 	limitBanner := parseBody52Limit(inner2)
+	var quotaWarning string
 	if limitBanner == "" {
-		limitBanner = parseBody54Limit(inner2)
+		limitBanner, quotaWarning = parseBody54Quota(inner2)
 	}
 	var cands []any
 	if len(inner2) > 4 {
 		cands, _ = inner2[4].([]any)
 	}
-	if len(cands) == 0 && status == "" && internalTool == "" && limitBanner == "" && len(body24Tools) == 0 {
+	if len(cands) == 0 && status == "" && internalTool == "" && limitBanner == "" && quotaWarning == "" && len(body24Tools) == 0 {
 		return frame{}, false
 	}
 	var fr frame
@@ -1682,6 +1702,7 @@ func parseFrame(line string) (frame, bool) {
 	fr.internalTool = internalTool
 	fr.body24Tools = body24Tools
 	fr.limitBanner = limitBanner
+	fr.quotaWarning = quotaWarning
 	for _, part := range cands {
 		ps, ok := part.([]any)
 		if !ok {

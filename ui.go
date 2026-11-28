@@ -391,6 +391,15 @@ func (s *Server) uiModels() []uiModel {
 		failByModel[mf.Model] = mf
 	}
 	codeRefByModel := s.codeRefStats5h()
+	inFlightByModel := map[string]InFlightRequest{}
+	for _, inf := range s.inFlightRequests() {
+		if inf.Model == "" || inf.Identity == "" || inf.Identity == "not_stated" {
+			continue
+		}
+		if _, exists := inFlightByModel[inf.Model]; !exists {
+			inFlightByModel[inf.Model] = inf
+		}
+	}
 	out := make([]uiModel, 0, len(list))
 	for _, m := range list {
 		mf := failByModel[m.Name]
@@ -414,8 +423,15 @@ func (s *Server) uiModels() []uiModel {
 			Default: m.Name == def, MedianFirstMS: -1, MedianFirstSignMS: -1, MedianFirstThoughtM: -1, MenuLabel: m.MenuLabel, Family: m.Family,
 			Calls5h: 0, CodeRef5h: len(crList), MedianCodeRefPauseMS: crMedian,
 			MismatchSince: identByModel[m.Name], FailureCount: mf.Count, FailureSince: failSince, Unresponsive: mf.Unresponsive}
+		if inf, ok := inFlightByModel[m.Name]; ok {
+			u.LastTime = inf.StartTime
+			u.LastIdentity = inf.Identity
+			u.LastServed = inf.ServedName
+		}
 		var firsts, firstSigns, firstThoughts []int64
-		for _, c := range all {
+		var fallbackNotStated *gemini.CallRecord
+		for i := range all {
+			c := all[i]
 			if c.Model != m.Name {
 				continue
 			}
@@ -423,7 +439,16 @@ func (s *Server) uiModels() []uiModel {
 				u.Calls5h++
 			}
 			if u.LastTime == "" {
-				u.LastTime, u.LastIdentity, u.LastSuspect = c.Time, c.Identity, c.Suspect
+				u.LastTime = c.Time
+			}
+			isErrNoIdent := c.Error != "" && (c.Identity == "" || c.Identity == "not_stated")
+			if isErrNoIdent {
+				if fallbackNotStated == nil {
+					rec := c
+					fallbackNotStated = &rec
+				}
+			} else if u.LastIdentity == "" {
+				u.LastIdentity, u.LastSuspect = c.Identity, c.Suspect
 				u.LastServed = c.ServedName
 				if u.LastServed == "" && c.ServedID != "" {
 					u.LastServed = byID[c.ServedID]
@@ -454,6 +479,18 @@ func (s *Server) uiModels() []uiModel {
 			if sign >= 0 {
 				firstSigns = append(firstSigns, sign)
 			}
+		}
+		if u.LastIdentity == "" && fallbackNotStated != nil {
+			u.LastIdentity, u.LastSuspect = fallbackNotStated.Identity, fallbackNotStated.Suspect
+			u.LastServed = fallbackNotStated.ServedName
+			if u.LastServed == "" && fallbackNotStated.ServedID != "" {
+				u.LastServed = byID[fallbackNotStated.ServedID]
+			}
+			names := []string{}
+			for _, id := range fallbackNotStated.SeenModelIDs {
+				names = append(names, byID[id])
+			}
+			u.LastSeenModels = strings.Join(names, ", ")
 		}
 		if len(firsts) > 0 {
 			sort.Slice(firsts, func(i, j int) bool { return firsts[i] < firsts[j] })

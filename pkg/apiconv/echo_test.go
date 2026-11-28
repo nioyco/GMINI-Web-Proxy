@@ -494,3 +494,25 @@ func TestK36_IsUpstreamToolRefusalMidMessage(t *testing.T) {
 		t.Error("a reply carrying a tool_call block must never be a refusal")
 	}
 }
+
+func TestK60_IsUpstreamToolRefusalContinueAndGreenLight(t *testing.T) {
+	shouldMatch := []string{
+		"Répondez simplement **« continue »** pour lancer l'écriture.",
+		"Envoie simplement **«\u00a0Continue\u00a0»** pour que je poursuive.",
+		"Je peux démarrer l'implémentation dès que vous me donnez le feu vert.",
+	}
+	for _, s := range shouldMatch {
+		if !IsUpstreamToolRefusal(s) {
+			t.Errorf("IsUpstreamToolRefusal(%q) = false, want true", s)
+		}
+	}
+	shouldNotMatch := []string{
+		"Répondez simplement « continue » pour lancer.\n```tool_call\n{\"name\":\"write_file\",\"arguments\":{\"path\":\"a.go\"}}\n```",
+		"<summary>Répondez simplement « continue » pour lancer l'implémentation.</summary>",
+	}
+	for _, s := range shouldNotMatch {
+		if IsUpstreamToolRefusal(s) {
+			t.Errorf("IsUpstreamToolRefusal(%q) = true, want false", s)
+		}
+	}
+}

@@ -51,7 +51,7 @@ func TestK58_ParseBody54Limit(t *testing.T) {
 		}
 	})
 
-	t.Run("quota_reached_4_neon", func(t *testing.T) {
+	t.Run("warning_90pct_4_neon_non_blocking", func(t *testing.T) {
 		const ts = int64(1795650303)
 		b54 := []any{nil, nil, float64(1), nil, []any{
 			[]any{float64(3), []any{float64(ts), float64(894116000)}, float64(1), nil, []any{float64(1)}},
@@ -61,9 +61,12 @@ func TestK58_ParseBody54Limit(t *testing.T) {
 		if !ok {
 			t.Fatal("parseFrame failed")
 		}
+		if fr.limitBanner != "" {
+			t.Fatalf("b54[2]==1 must NOT set limitBanner, got %q", fr.limitBanner)
+		}
 		wantHHMM := time.Unix(ts, 0).In(time.Local).Format("15:04")
-		if !strings.Contains(fr.limitBanner, wantHHMM) {
-			t.Fatalf("limitBanner = %q, want reset time %s", fr.limitBanner, wantHHMM)
+		if !strings.Contains(fr.quotaWarning, "~90 %") || !strings.Contains(fr.quotaWarning, wantHHMM) {
+			t.Fatalf("quotaWarning = %q, want ~90 %% and reset time %s", fr.quotaWarning, wantHHMM)
 		}
 	})
 

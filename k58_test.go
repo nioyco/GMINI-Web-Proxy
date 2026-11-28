@@ -19,11 +19,14 @@ func TestK58_Body54QuotaPauseEndToEnd4Neon(t *testing.T) {
 		[]any{"rc_1", []any{"OK"}, nil, nil, nil},
 	}
 	inner2[54] = []any{
-		nil, nil, float64(1), nil,
-		[]any{
-			[]any{float64(3), []any{float64(1795650303), float64(894116000)}, float64(1), nil, []any{float64(1)}},
-		},
-		nil, nil, nil, false, false, float64(1436),
+		[]any{float64(8), float64(3), float64(5), float64(1)},
+		float64(6),
+		float64(3),
+		[]any{[]any{float64(8), nil, "Limit resets {REFILL_TIME}", nil, []any{float64(1795650303), float64(894116000)}}},
+		[]any{},
+		float64(1),
+		[]any{float64(1795650303), float64(894116000)},
+		nil, false, false, float64(1436),
 	}
 	innerJSON, err := json.Marshal(inner2)
 	if err != nil {

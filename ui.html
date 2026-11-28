@@ -722,6 +722,7 @@ async function triggerGoogleConnect(btn,src){
     }
     return true;
   });
+  schedulePoll(inflight.length > 0 ? 2000 : 5000);
   const inflightHist = d.in_flight_history || [];
   const callsList = d.calls || [];
   const callsByReq = new Map();
@@ -1154,7 +1155,14 @@ $("refresh").onclick=async()=>{
   }catch(e){$("refreshmsg").textContent="Échec : "+e.message}
   syncRefresh();load();
 };
-initShell();load();pollTimer=setInterval(()=>{if(!document.hidden)load()},5000);setInterval(()=>{if(!document.hidden&&refreshNextMs>0)syncRefresh()},1000);
+let pollMs=5000;
+function schedulePoll(ms){
+  if(pollMs===ms&&pollTimer)return;
+  pollMs=ms;
+  if(pollTimer){clearInterval(pollTimer);pollTimer=null;}
+  pollTimer=setInterval(()=>{if(!document.hidden)load()},pollMs);
+}
+initShell();load();schedulePoll(5000);setInterval(()=>{if(!document.hidden&&refreshNextMs>0)syncRefresh()},1000);
 </script>
 </body>
 </html>
