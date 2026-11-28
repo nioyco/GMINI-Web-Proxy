@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -119,7 +118,7 @@ printf "SAPISID=s1; __Secure-1PSIDTS=t2\n" > %q
 touch %q
 `, cookieFile, markerFile))
 
-	var logBuf bytes.Buffer
+	var logBuf syncBuffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 	ar := newCookieAutoRefresher(&Config{
 		CookieAutoRefreshMin: 90,
@@ -154,6 +153,7 @@ touch %q
 	if c.RotationStatus().Suspended {
 		t.Fatal("expected rotation suspension to be lifted after successful refresh")
 	}
+	waitForCondition(t, 2*time.Second, func() bool { return strings.Contains(logBuf.String(), "exit_code=0") })
 	logs := logBuf.String()
 	if strings.Contains(logs, "SECRET_PATH_LEAK") || strings.Contains(logs, "SECRET_ERR_LEAK") {
 		t.Fatalf("command output must never be logged: %s", logs)
@@ -465,7 +465,7 @@ func TestP7_AutoRefreshDisabledZeroProcessesAndPassesThroughP5(t *testing.T) {
 	markerFile := filepath.Join(t.TempDir(), "should_not_run")
 	script := writeFakeScript(t, fmt.Sprintf("touch %q\n", markerFile))
 	var googleCalls int
-	var logBuf bytes.Buffer
+	var logBuf syncBuffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 	dir1 := t.TempDir()
 	cookie1 := filepath.Join(dir1, "cookie.txt")
@@ -522,7 +522,7 @@ func TestP7_AutoRefreshDisabledZeroProcessesAndPassesThroughP5(t *testing.T) {
 
 	// 2. Enabled auto-refresh passes through P5:
 	//    When idle (>10m, even within K10's 90m activityWindow), P5 refuses Tick() and launches 0 processes.
-	var logIdle bytes.Buffer
+	var logIdle syncBuffer
 	idleLogger := slog.New(slog.NewTextHandler(&logIdle, nil))
 	dirIdle := t.TempDir()
 	cookieIdle := filepath.Join(dirIdle, "cookie.txt")

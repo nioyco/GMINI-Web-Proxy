@@ -349,21 +349,27 @@ func reqFrom(ctx context.Context) *reqInfo {
 // setReqModel records the resolved model for the request log (used before preflight 429).
 func setReqModel(ctx context.Context, model string) {
 	if ri := reqFrom(ctx); ri != nil && model != "" {
+		ri.inFlightMu.Lock()
 		ri.model = model
+		ri.inFlightMu.Unlock()
 	}
 }
 
 // setReqMeta records the resolved model and stream flag for the request log.
 func setReqMeta(ctx context.Context, model string, stream bool) {
 	if ri := reqFrom(ctx); ri != nil {
+		ri.inFlightMu.Lock()
 		ri.model, ri.stream = model, stream
+		ri.inFlightMu.Unlock()
 	}
 }
 
 // setReqConvID records a content-free conversation identifier on the request.
 func setReqConvID(ctx context.Context, convID string) {
 	if ri := reqFrom(ctx); ri != nil {
+		ri.inFlightMu.Lock()
 		ri.convID = convID
+		ri.inFlightMu.Unlock()
 	}
 }
 
@@ -645,8 +651,8 @@ func (a *activeSet) inFlight() []InFlightRequest {
 	now := time.Now()
 	out := make([]InFlightRequest, 0, len(snap))
 	for _, ri := range snap {
-		if ri.model != "" {
-			out = append(out, ri.inFlightSnapshot(now))
+		if s := ri.inFlightSnapshot(now); s.Model != "" {
+			out = append(out, s)
 		}
 	}
 	return out
@@ -657,9 +663,12 @@ func (a *activeSet) inFlight() []InFlightRequest {
 func (s *Server) AbortActive() int {
 	reqs := s.active.snapshot()
 	for _, ri := range reqs {
+		ri.inFlightMu.RLock()
+		model, stream := ri.model, ri.stream
+		ri.inFlightMu.RUnlock()
 		s.log.Warn("aborted_on_shutdown",
-			"request_id", ri.id, "route", ri.route, "model", ri.model,
-			"stream", ri.stream, "elapsed_ms", time.Since(ri.start).Milliseconds())
+			"request_id", ri.id, "route", ri.route, "model", model,
+			"stream", stream, "elapsed_ms", time.Since(ri.start).Milliseconds())
 		s.stats.abortedOnShutdown.Add(1)
 		ri.cancel(errAbortedOnShutdown)
 	}

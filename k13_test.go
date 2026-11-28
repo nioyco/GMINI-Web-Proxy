@@ -449,7 +449,7 @@ printf "SAPISID=s1; __Secure-1PSIDTS=t_manual_new\n" > %q
 touch %q
 `, cookieFile, marker))
 
-	var logBuf bytes.Buffer
+	var logBuf syncBuffer
 	cfg := testConfig()
 	cfg.UIEnabled = true
 	cfg.CookieAutoRefreshMin = 0 // disabled auto-refresh!
@@ -490,6 +490,7 @@ touch %q
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("manual script did not run: %v", err)
 	}
+	waitForCondition(t, 2*time.Second, func() bool { return strings.Contains(logBuf.String(), "trigger=manual") })
 	logs := logBuf.String()
 	if strings.Contains(logs, "MANUAL_SECRET_") {
 		t.Fatalf("script output leaked to logs: %s", logs)
